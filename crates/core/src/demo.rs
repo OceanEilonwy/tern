@@ -31,7 +31,10 @@ fn folder_id(kind: FolderKind) -> FolderId {
 	FolderId(format!("{kind:?}").to_lowercase())
 }
 
-/// A 2×2 PNG, so inline and attached images have something to draw.
+/// A small sunset, so the demo's photos look like photos.
+pub const SUNSET_PNG: &[u8] = include_bytes!("../assets/sunset.png");
+
+/// A 2×2 PNG, for tests that only need a valid image.
 pub const TINY_PNG: &[u8] = &[
 	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00,
 	0x00, 0x00, 0xfd, 0xd4, 0x9a, 0x73, 0x00, 0x00, 0x00, 0x16, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x08, 0x18, 0x18, 0x18, 0xfe,
@@ -54,11 +57,13 @@ impl DemoBackend {
 			let id = MailId { list: "demo".into(), element: format!("m{n:03}") };
 			let summary = MailSummary {
 				id: id.clone(),
-				from,
+				from: from.clone(),
 				subject: subject.into(),
 				received_ms: now - ago * hour,
 				unread,
 				has_attachments: !files.is_empty(),
+				outgoing: from.address == me.address,
+				to: Some(me.clone()),
 			};
 			let (attachments, data): (Vec<_>, Vec<_>) = files.into_iter().unzip();
 			mails.push(Stored {
@@ -88,7 +93,7 @@ impl DemoBackend {
 			true,
 			"<p>Hi!</p><p>Here are the photos from <b>Saturday</b>. The one below is my favourite:</p>\
 			 <p><img src=\"cid:sunset\" alt=\"Sunset\"></p><p>Speak soon,<br>Mia</p>",
-			vec![att("a1", "sunset.png", "image/png", TINY_PNG, Some("sunset")), att("a2", "beach.png", "image/png", TINY_PNG, None)],
+			vec![att("a1", "sunset.png", "image/png", SUNSET_PNG, Some("sunset")), att("a2", "beach.png", "image/png", SUNSET_PNG, None)],
 		);
 		add(
 			2,
@@ -126,6 +131,12 @@ impl DemoBackend {
 			vec![],
 		);
 		add(5, FolderKind::Sent, Address::new("You", "you@tuta.com"), "Are you free for lunch on Friday?", 30, false, "<div>Are you free for lunch on Friday?</div>", vec![]);
+		// The one sent mail went to Sam.
+		let sam = Address::new("Sam Okafor", "sam@example.net");
+		for stored in mails.iter_mut().filter(|m| m.folder == FolderKind::Sent) {
+			stored.mail.to = vec![sam.clone()];
+			stored.mail.summary.to = Some(sam.clone());
+		}
 		Self { mails: Mutex::new(mails) }
 	}
 
@@ -204,6 +215,8 @@ impl Backend for DemoBackend {
 					received_ms,
 					unread: false,
 					has_attachments: !draft.attachments.is_empty(),
+					to: draft.to.first().or(draft.cc.first()).or(draft.bcc.first()).cloned(),
+					outgoing: true,
 				},
 				to: draft.to,
 				cc: draft.cc,

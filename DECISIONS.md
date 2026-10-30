@@ -39,6 +39,13 @@ attachments must work, KISS, fast, Rust. These are the calls I made, in the orde
 - **Mail from password-protected external mailboxes** (symmetric bucket keys) shows an error instead of
   opening; the SDK has a `todo!()` there and Tern routes around it.
 - Notification-mail language is "en"; the account's "send plain text only" setting is ignored (Tern sends HTML).
+- **Received mail is not migrated to owner keys** (the official client's UpdateSessionKeysService call is not
+  ported). Every open repeats the public-key decryption of the mail's bucket key. Correct, just slower on
+  first pages of new mail; port it if paging feels slow.
+- **Mail Tern cannot decrypt still gets a row** ("Open this message in Tuta") instead of disappearing.
+- **SDK panics cannot take the window down**: every Tuta call runs in its own task, and a panic becomes an
+  error toast.
+- Sent and Drafts rows show "To: <first recipient>" instead of yourself.
 
 ## What is verified, and what is not
 

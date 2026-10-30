@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use base64::Engine;
 use crypto_primitives::aes::{Aes256Key, InitializationVector};
 use crypto_primitives::key::GenericAesKey;
@@ -24,6 +25,7 @@ use crate::crypto::crypto_facade::CryptoFacade;
 use crate::crypto::crypto_facade::ResolvedSessionKey;
 #[cfg_attr(test, mockall_double::double)]
 use crate::crypto::public_key_provider::PublicKeyProvider;
+use crate::crypto::asymmetric_crypto_facade::PubEncSymKey;
 use crate::crypto::public_key_provider::{PublicKeyIdentifier, PublicKeyLoadingError};
 use crate::element_value::{ElementValue, ParsedEntity};
 use crate::entities::entity_facade::{EntityFacade, EntityFacadeImpl};
@@ -286,6 +288,13 @@ pub struct OpenedMail {
 	pub attachments: Vec<TutanotaFile>,
 }
 
+/// One row of a folder page.
+pub enum PageItem {
+	Mail(Mail),
+	/// A mail Tern cannot decrypt, e.g. from a password-protected external mailbox.
+	Unreadable { id: IdTupleGenerated, received_ms: u64 },
+}
+
 pub struct OutgoingAttachment {
 	pub name: String,
 	pub mime_type: String,
@@ -374,7 +383,7 @@ impl TernMail {
 		entries: &GeneratedId,
 		after: Option<CustomId>,
 		count: usize,
-	) -> Result<(Vec<Mail>, Option<CustomId>), TernError> {
+	) -> Result<(Vec<PageItem>, Option<CustomId>), TernError> {
 		let start = after.unwrap_or_else(custom_max_id);
 		let entries: Vec<MailSetEntry> = self
 			.sdk
@@ -395,19 +404,25 @@ impl TernMail {
 				None => by_list.push((entry.mail.list_id.clone(), vec![entry.mail.element_id.clone()])),
 			}
 		}
-		let mut loaded: HashMap<GeneratedId, Mail> = HashMap::new();
+		let mut loaded: HashMap<GeneratedId, PageItem> = HashMap::new();
+		let mail_model = self.sdk.entity_client.resolve_server_type_ref(&Mail::type_ref())?;
 		for (list, ids) in by_list {
 			for chunk in ids.chunks(MAX_IDS_PER_REQUEST) {
 				for raw in self.load_multiple_raw(&Mail::type_ref(), &list, chunk).await? {
-					// A mail we cannot decrypt is skipped rather than failing the whole folder.
-					match self.decrypt::<Mail>(raw, None).await {
-						Ok(mail) => {
-							if let Some(id) = &mail._id {
-								loaded.insert(id.element_id.clone(), mail);
+					let Some(element) = element_id(&mail_model, &raw) else { continue };
+					let received = received_ms(&mail_model, &raw);
+					// A mail we cannot decrypt still gets a row, rather than vanishing or failing the folder.
+					let item = match self.decrypt::<Mail>(raw, None).await {
+						Ok(mail) => PageItem::Mail(mail),
+						Err(e) => {
+							log::warn!("mail {element} does not decrypt: {e}");
+							PageItem::Unreadable {
+								id: IdTupleGenerated { list_id: list.clone(), element_id: element.clone() },
+								received_ms: received,
 							}
 						},
-						Err(e) => log::warn!("skipping mail that does not decrypt: {e}"),
-					}
+					};
+					loaded.insert(element, item);
 				}
 			}
 		}
@@ -497,21 +512,11 @@ impl TernMail {
 			)
 			.await?;
 
-		let mut out = Vec::with_capacity(file.size.max(0) as usize);
+		// The size comes from the server; trust it only as a hint.
+		let mut out = Vec::with_capacity((file.size.max(0) as usize).min(64 * 1024 * 1024));
 		let blob_ids: Vec<&GeneratedId> = file.blobs.iter().map(|b| &b.blobId).collect();
 		for chunk in blob_ids.chunks(MAX_IDS_PER_REQUEST) {
-			let get = BlobGetIn {
-				_format: 0,
-				archiveId: first_blob.archiveId.clone(),
-				blobId: None,
-				blobIds: chunk
-					.iter()
-					.map(|id| BlobId {
-						_id: None,
-						blobId: (*id).clone(),
-					})
-					.collect(),
-			};
+			let get = blob_get_in(&self.randomizer, &first_blob.archiveId, chunk);
 			let body = self.to_json(get)?;
 			let mut params = self.blob_query_params(&access, BlobGetIn::type_ref())?;
 			params.push(("_body".to_string(), body));
@@ -554,8 +559,13 @@ impl TernMail {
 		if outgoing.body_html.len() > UNCOMPRESSED_MAX_SIZE {
 			return Err(TernError::Other("the message is too long".into()));
 		}
-		let all: Vec<&OutgoingRecipient> =
-			outgoing.to.iter().chain(&outgoing.cc).chain(&outgoing.bcc).collect();
+		// One key per address, however often it appears across To, Cc and Bcc.
+		let mut all: Vec<&OutgoingRecipient> = Vec::new();
+		for recipient in outgoing.to.iter().chain(&outgoing.cc).chain(&outgoing.bcc) {
+			if !all.iter().any(|r| r.address.eq_ignore_ascii_case(&recipient.address)) {
+				all.push(recipient);
+			}
+		}
 		if all.is_empty() {
 			return Err(TernError::Other("no recipients".into()));
 		}
@@ -698,11 +708,10 @@ impl TernMail {
 		for file_id in &draft_mail.attachments {
 			let raw_file = self.sdk.entity_client.load(&TutanotaFile::type_ref(), file_id).await?;
 			let file_key = self.session_key(&TutanotaFile::type_ref(), &raw_file, None).await?;
-			attachment_key_data.push(AttachmentKeyData {
-				_id: None,
+			attachment_key_data.push(AttachmentKeys {
 				file: file_id.clone(),
-				bucketEncFileSessionKey: confidential.then(|| bucket_key.encrypt_key(&file_key, iv())),
-				fileSessionKey: (!confidential).then(|| file_key.as_bytes().to_vec()),
+				bucket_enc_file_session_key: confidential.then(|| bucket_key.encrypt_key(&file_key, iv())),
+				file_session_key: (!confidential).then(|| file_key.as_bytes().to_vec()),
 			});
 		}
 
@@ -717,20 +726,13 @@ impl TernMail {
 					.asym_encrypt_sym_key(bucket_key.clone(), key, &user_group)
 					.await
 					.map_err(|e| TernError::Other(format!("cannot encrypt for {}: {e}", recipient.address)))?;
-				internal_recipient_key_data.push(InternalRecipientKeyData {
-					_id: None,
-					mailAddress: recipient.address.clone(),
-					pubEncBucketKey: encrypted.pub_enc_sym_key_bytes,
-					recipientKeyVersion: encrypted.recipient_key_version as i64,
-					protocolVersion: encrypted.crypto_protocol_version as i64,
-					senderKeyVersion: encrypted.sender_key_version.map(|v| v as i64),
-				});
+				internal_recipient_key_data.push((recipient.address.clone(), encrypted));
 			}
 		}
 		let tuta_crypt_only = confidential
 			&& internal_recipient_key_data
 				.iter()
-				.all(|d| d.protocolVersion == CryptoProtocolVersion::TutaCrypt as i64);
+				.all(|(_, key)| key.crypto_protocol_version == CryptoProtocolVersion::TutaCrypt);
 		let session_enc_auth_status = tuta_crypt_only.then(|| {
 			mail_key
 				.encrypt_data(ENCRYPTION_AUTH_STATUS_TUTACRYPT_SENDER.as_bytes(), iv())
@@ -739,38 +741,17 @@ impl TernMail {
 		let bucket_enc_mail_session_key = confidential.then(|| bucket_key.encrypt_key(&mail_key, iv()));
 		let mail_session_key = (!confidential).then(|| mail_key.as_bytes().to_vec());
 
-		let send = SendDraftData {
-			_format: 0,
-			language: "en".to_string(),
-			mailSessionKey: mail_session_key.clone(),
-			bucketEncMailSessionKey: bucket_enc_mail_session_key.clone(),
-			senderNameUnencrypted: None,
-			plaintext: false,
-			calendarMethod: false,
-			sessionEncEncryptionAuthStatus: session_enc_auth_status.clone(),
-			sendAt: None,
-			allowUndo: false,
-			internalRecipientKeyData: internal_recipient_key_data.clone(),
-			secureExternalRecipientKeyData: vec![],
-			attachmentKeyData: attachment_key_data.clone(),
-			mail: created.draft.clone(),
-			symEncInternalRecipientKeyData: vec![],
-			parameters: Some(SendDraftParameters {
-				_id: None,
-				language: "en".to_string(),
-				mailSessionKey: mail_session_key,
-				bucketEncMailSessionKey: bucket_enc_mail_session_key,
-				senderNameUnencrypted: None,
-				plaintext: false,
-				calendarMethod: false,
-				sessionEncEncryptionAuthStatus: session_enc_auth_status,
-				mail: created.draft,
-				internalRecipientKeyData: internal_recipient_key_data,
-				secureExternalRecipientKeyData: vec![],
-				symEncInternalRecipientKeyData: vec![],
-				attachmentKeyData: attachment_key_data,
-			}),
-		};
+		let send = send_draft_data(
+			&self.randomizer,
+			created.draft,
+			SendKeys {
+				mail_session_key,
+				bucket_enc_mail_session_key,
+				session_enc_auth_status,
+				recipients: internal_recipient_key_data,
+				attachments: attachment_key_data,
+			},
+		);
 		self.sdk
 			.get_service_executor()
 			.post::<SendDraftService>(send, ExtraServiceParams::default())
@@ -975,24 +956,7 @@ impl TernMail {
 		archive: &GeneratedId,
 		instance: Option<(&GeneratedId, &GeneratedId)>,
 	) -> Result<BlobServerAccessInfo, TernError> {
-		let request = BlobAccessTokenPostIn {
-			_format: 0,
-			archiveDataType: archive_data_type.map(|t| t.discriminant()),
-			write: None,
-			read: Some(BlobReadData {
-				_id: None,
-				archiveId: archive.clone(),
-				instanceListId: instance.map(|(list, _)| list.clone()),
-				instanceIds: instance
-					.map(|(_, element)| {
-						vec![InstanceId {
-							_id: None,
-							instanceId: Some(element.clone()),
-						}]
-					})
-					.unwrap_or_default(),
-			}),
-		};
+		let request = read_token_request(&self.randomizer, archive_data_type, archive, instance);
 		Ok(self
 			.sdk
 			.get_service_executor()
@@ -1043,6 +1007,140 @@ impl TernMail {
 		}
 		Err(last_error)
 	}
+}
+
+/// A fresh id for an aggregate. The SDK fills these in only for encrypted requests, so
+/// unencrypted ones must carry their own or they do not serialize.
+fn aggregate_id(random: &RandomizerFacade) -> Option<CustomId> {
+	Some(CustomId(BASE64_URL_SAFE_NO_PAD.encode(random.generate_random_array::<4>())))
+}
+
+fn read_token_request(
+	random: &RandomizerFacade,
+	archive_data_type: Option<ArchiveDataType>,
+	archive: &GeneratedId,
+	instance: Option<(&GeneratedId, &GeneratedId)>,
+) -> BlobAccessTokenPostIn {
+	BlobAccessTokenPostIn {
+		_format: 0,
+		archiveDataType: archive_data_type.map(|t| t.discriminant()),
+		write: None,
+		read: Some(BlobReadData {
+			_id: aggregate_id(random),
+			archiveId: archive.clone(),
+			instanceListId: instance.map(|(list, _)| list.clone()),
+			instanceIds: instance
+				.map(|(_, element)| {
+					vec![InstanceId {
+						_id: aggregate_id(random),
+						instanceId: Some(element.clone()),
+					}]
+				})
+				.unwrap_or_default(),
+		}),
+	}
+}
+
+fn blob_get_in(random: &RandomizerFacade, archive: &GeneratedId, blobs: &[&GeneratedId]) -> BlobGetIn {
+	BlobGetIn {
+		_format: 0,
+		archiveId: archive.clone(),
+		blobId: None,
+		blobIds: blobs
+			.iter()
+			.map(|id| BlobId {
+				_id: aggregate_id(random),
+				blobId: (*id).clone(),
+			})
+			.collect(),
+	}
+}
+
+struct AttachmentKeys {
+	file: IdTupleGenerated,
+	bucket_enc_file_session_key: Option<Vec<u8>>,
+	file_session_key: Option<Vec<u8>>,
+}
+
+/// The keys a send carries: the mail's, wrapped for each recipient when confidential, else plain.
+struct SendKeys {
+	mail_session_key: Option<Vec<u8>>,
+	bucket_enc_mail_session_key: Option<Vec<u8>>,
+	session_enc_auth_status: Option<Vec<u8>>,
+	recipients: Vec<(String, PubEncSymKey)>,
+	attachments: Vec<AttachmentKeys>,
+}
+
+/// SendDraftData, with the parameters mirrored at the top level as the TypeScript client sends them.
+fn send_draft_data(random: &RandomizerFacade, mail: IdTupleGenerated, keys: SendKeys) -> SendDraftData {
+	let recipients = |keys: &SendKeys| -> Vec<InternalRecipientKeyData> {
+		keys.recipients
+			.iter()
+			.map(|(address, key)| InternalRecipientKeyData {
+				_id: aggregate_id(random),
+				mailAddress: address.clone(),
+				pubEncBucketKey: key.pub_enc_sym_key_bytes.clone(),
+				recipientKeyVersion: key.recipient_key_version as i64,
+				protocolVersion: key.crypto_protocol_version.clone() as i64,
+				senderKeyVersion: key.sender_key_version.map(|v| v as i64),
+			})
+			.collect()
+	};
+	let attachments = |keys: &SendKeys| -> Vec<AttachmentKeyData> {
+		keys.attachments
+			.iter()
+			.map(|a| AttachmentKeyData {
+				_id: aggregate_id(random),
+				file: a.file.clone(),
+				bucketEncFileSessionKey: a.bucket_enc_file_session_key.clone(),
+				fileSessionKey: a.file_session_key.clone(),
+			})
+			.collect()
+	};
+	SendDraftData {
+		_format: 0,
+		language: "en".to_string(),
+		mailSessionKey: keys.mail_session_key.clone(),
+		bucketEncMailSessionKey: keys.bucket_enc_mail_session_key.clone(),
+		senderNameUnencrypted: None,
+		plaintext: false,
+		calendarMethod: false,
+		sessionEncEncryptionAuthStatus: keys.session_enc_auth_status.clone(),
+		sendAt: None,
+		allowUndo: false,
+		internalRecipientKeyData: recipients(&keys),
+		secureExternalRecipientKeyData: vec![],
+		attachmentKeyData: attachments(&keys),
+		mail: mail.clone(),
+		symEncInternalRecipientKeyData: vec![],
+		parameters: Some(SendDraftParameters {
+			_id: aggregate_id(random),
+			language: "en".to_string(),
+			mailSessionKey: keys.mail_session_key.clone(),
+			bucketEncMailSessionKey: keys.bucket_enc_mail_session_key.clone(),
+			senderNameUnencrypted: None,
+			plaintext: false,
+			calendarMethod: false,
+			sessionEncEncryptionAuthStatus: keys.session_enc_auth_status.clone(),
+			mail,
+			internalRecipientKeyData: recipients(&keys),
+			secureExternalRecipientKeyData: vec![],
+			symEncInternalRecipientKeyData: vec![],
+			attachmentKeyData: attachments(&keys),
+		}),
+	}
+}
+
+/// The received date, which is stored unencrypted, so it is there even when the mail does not decrypt.
+fn received_ms(type_model: &TypeModel, raw: &ParsedEntity) -> u64 {
+	type_model
+		.get_attribute_id_by_attribute_name("receivedDate")
+		.ok()
+		.and_then(|id| match raw.get(&id) {
+			Some(ElementValue::Date(date)) => Some(date.as_millis()),
+			_ => None,
+		})
+		.unwrap_or(0)
 }
 
 fn element_id(type_model: &TypeModel, raw: &ParsedEntity) -> Option<GeneratedId> {
@@ -1184,6 +1282,9 @@ mod tests {
 		let parsed = mapper.serialize_entity(draft).unwrap();
 		let model = provider.resolve_client_type_ref(&DraftCreateData::type_ref()).unwrap();
 		let encrypted = facade.encrypt_and_map(model, &parsed, &mail_key).unwrap();
+		crate::json_serializer::JsonSerializer::new(provider.clone())
+			.serialize(&DraftCreateData::type_ref(), encrypted.clone())
+			.expect("the encrypted draft serializes for the wire");
 
 		let field = |entity: &ParsedEntity, type_ref: TypeRef, name: &str| -> ElementValue {
 			let model = provider.resolve_client_type_ref(&type_ref).unwrap();
@@ -1203,6 +1304,69 @@ mod tests {
 		let name = field(&new_file, NewDraftAttachment::type_ref(), "encFileName");
 		assert_eq!(name.assert_bytes(), &enc_name, "the file name is passed through, not re-encrypted");
 		assert_eq!(decrypt(&file_key, name).unwrap(), b"report.pdf");
+	}
+
+	/// Requests the SDK does not encrypt get no aggregate ids from it; without our own they fail
+	/// to serialize and reading bodies, downloading and sending all break.
+	#[test]
+	fn unencrypted_requests_with_aggregates_serialize() {
+		use crate::instance_mapper::InstanceMapper;
+		use crate::json_serializer::JsonSerializer;
+		use crate::util::test_utils::mock_type_model_provider;
+
+		let provider = Arc::new(mock_type_model_provider());
+		let mapper = InstanceMapper::new(provider.clone());
+		let json = JsonSerializer::new(provider.clone());
+		let random = RandomizerFacade::from_core(rand_core::OsRng);
+		let id = |s: &str| GeneratedId(s.to_string());
+		let mail = IdTupleGenerated { list_id: id("list"), element_id: id("mail") };
+		macro_rules! serializes {
+			($value:expr) => {{
+				let value = $value;
+				let type_ref = entity_type_ref(&value);
+				let parsed = mapper.serialize_entity(value).unwrap();
+				json.serialize(&type_ref, parsed).unwrap();
+			}};
+		}
+		fn entity_type_ref<T: Entity>(_: &T) -> TypeRef {
+			T::type_ref()
+		}
+
+		serializes!(read_token_request(&random, None, &id("archive"), None));
+		serializes!(read_token_request(&random, Some(ArchiveDataType::Attachments), &id("archive"), Some((&id("files"), &id("file")))));
+		serializes!(blob_get_in(&random, &id("archive"), &[&id("blob1"), &id("blob2")]));
+		let pub_key = || PubEncSymKey {
+			pub_enc_sym_key_bytes: vec![1; 32],
+			crypto_protocol_version: CryptoProtocolVersion::TutaCrypt,
+			sender_key_version: Some(0),
+			recipient_key_version: 0,
+		};
+		serializes!(send_draft_data(
+			&random,
+			mail.clone(),
+			SendKeys {
+				mail_session_key: None,
+				bucket_enc_mail_session_key: Some(vec![2; 48]),
+				session_enc_auth_status: Some(vec![3; 48]),
+				recipients: vec![("ann@tuta.com".into(), pub_key()), ("bob@tuta.com".into(), pub_key())],
+				attachments: vec![AttachmentKeys {
+					file: IdTupleGenerated { list_id: id("files"), element_id: id("file") },
+					bucket_enc_file_session_key: Some(vec![4; 48]),
+					file_session_key: None,
+				}],
+			},
+		));
+		serializes!(send_draft_data(
+			&random,
+			mail,
+			SendKeys {
+				mail_session_key: Some(vec![5; 32]),
+				bucket_enc_mail_session_key: None,
+				session_enc_auth_status: None,
+				recipients: vec![],
+				attachments: vec![],
+			},
+		));
 	}
 
 	#[test]

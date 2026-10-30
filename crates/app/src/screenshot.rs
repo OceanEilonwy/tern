@@ -10,10 +10,9 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use adw::prelude::*;
-use async_trait::async_trait;
 use gtk::{glib, graphene};
 use tern_core::demo::DemoBackend;
-use tern_core::{Account, Attachment, Backend, Draft, Folder, FolderId, Mail, MailId, MailPage, NewAttachment, Result};
+use tern_core::{Backend, NewAttachment};
 
 use crate::compose_model::Fields;
 use crate::composer::Composer;
@@ -141,68 +140,7 @@ fn save(window: &gtk::Widget, path: &std::path::Path) -> std::result::Result<(),
 	texture.save_to_png(path).map_err(|e| e.to_string())
 }
 
-/// The demo account, but with a real photo behind the "Photos from Saturday" mail's tiny inline PNG,
-/// so the screenshot shows what an inline image looks like.
+/// The demo account the screenshots are taken from.
 pub fn backend() -> Arc<dyn Backend> {
-	Arc::new(Shot(DemoBackend::new()))
-}
-
-struct Shot(DemoBackend);
-
-fn sunset_png() -> Vec<u8> {
-	let (w, h) = (960u32, 600u32);
-	let img = image::RgbImage::from_fn(w, h, |x, y| {
-		let t = y as f32 / h as f32;
-		let horizon = 0.62;
-		let (dx, dy) = (x as f32 - w as f32 * 0.5, y as f32 - h as f32 * horizon);
-		let sun = (dx * dx + dy * dy).sqrt() < 70.0 && t < horizon;
-		let px = if sun {
-			[255, 214, 120]
-		} else if t < horizon {
-			let k = t / horizon;
-			[(80.0 + 170.0 * k) as u8, (60.0 + 80.0 * k) as u8, (140.0 - 60.0 * k) as u8]
-		} else {
-			let k = (t - horizon) / (1.0 - horizon);
-			let glint = if dx.abs() < 60.0 * (1.0 - k) && (y / 6) % 2 == 0 { 60.0 } else { 0.0 };
-			[(40.0 + glint * 2.0) as u8, (60.0 + glint * 1.5) as u8, (110.0 - 40.0 * k + glint) as u8]
-		};
-		image::Rgb(px)
-	});
-	let mut out = std::io::Cursor::new(Vec::new());
-	img.write_to(&mut out, image::ImageFormat::Png).expect("encode");
-	out.into_inner()
-}
-
-#[async_trait]
-impl Backend for Shot {
-	fn account(&self) -> Account {
-		self.0.account()
-	}
-	async fn folders(&self) -> Result<Vec<Folder>> {
-		self.0.folders().await
-	}
-	async fn list(&self, folder: &FolderId, next: Option<String>, count: usize) -> Result<MailPage> {
-		self.0.list(folder, next, count).await
-	}
-	async fn open(&self, id: &MailId) -> Result<Mail> {
-		self.0.open(id).await
-	}
-	async fn attachment(&self, mail: &MailId, attachment: &Attachment) -> Result<Vec<u8>> {
-		if attachment.cid.as_deref() == Some("sunset") {
-			return Ok(sunset_png());
-		}
-		self.0.attachment(mail, attachment).await
-	}
-	async fn send(&self, draft: Draft) -> Result<()> {
-		self.0.send(draft).await
-	}
-	async fn set_unread(&self, id: &MailId, unread: bool) -> Result<()> {
-		self.0.set_unread(id, unread).await
-	}
-	async fn trash(&self, id: &MailId) -> Result<()> {
-		self.0.trash(id).await
-	}
-	async fn sign_out(&self) -> Result<()> {
-		self.0.sign_out().await
-	}
+	Arc::new(DemoBackend::new())
 }

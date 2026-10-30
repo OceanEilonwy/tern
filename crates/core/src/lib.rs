@@ -68,6 +68,10 @@ pub struct MailSummary {
 	pub received_ms: i64,
 	pub unread: bool,
 	pub has_attachments: bool,
+	/// The first recipient, shown instead of the sender for mail the account sent.
+	pub to: Option<Address>,
+	/// Sent by this account (Sent, Drafts, or a copy to yourself).
+	pub outgoing: bool,
 }
 
 /// A page of a folder, newest first. Pass `next` back to [`Backend::list`] for the page after.

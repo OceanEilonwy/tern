@@ -218,6 +218,8 @@ mod tests {
 				received_ms: 0,
 				unread: false,
 				has_attachments: false,
+				to: None,
+				outgoing: false,
 			},
 			to: vec![Address::new("You", "you@tuta.com"), Address::new("", "sam@x.org")],
 			cc: vec![Address::new("Ann", "ann@x.org"), Address::new("", "MIA@tuta.com")],

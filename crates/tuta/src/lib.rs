@@ -16,7 +16,8 @@ use tutasdk::folder_system::MailSetKind;
 use tutasdk::login::{CredentialType, Credentials};
 use tutasdk::net::native_rest_client::NativeRestClient;
 use tutasdk::tern::{
-	OutgoingAttachment, OutgoingMail, OutgoingRecipient, TernAccount, TernError, TernMail, CONVERSATION_FORWARD, CONVERSATION_REPLY,
+	OutgoingAttachment, OutgoingMail, OutgoingRecipient, PageItem, TernAccount, TernError, TernMail, CONVERSATION_FORWARD,
+	CONVERSATION_REPLY,
 };
 use tutasdk::{CustomId, GeneratedId, IdTupleGenerated, Sdk};
 
@@ -35,8 +36,12 @@ struct SavedSession {
 /// Signs in with an email address and password. Returns the account and a saved session
 /// to keep in the keyring, which [`resume`] turns back into the account without the password.
 pub async fn login(email: &str, password: &str) -> Result<(Arc<dyn Backend>, String)> {
-	let email = email.trim().to_lowercase();
-	let (sdk, credentials) = sdk()?.tern_sign_in(&email, password, CLIENT_IDENTIFIER).await.map_err(to_error)?;
+	let (email, password) = (email.trim().to_lowercase(), password.to_string());
+	guarded(async move { login_inner(&email, &password).await }).await
+}
+
+async fn login_inner(email: &str, password: &str) -> Result<(Arc<dyn Backend>, String)> {
+	let (sdk, credentials) = sdk()?.tern_sign_in(email, password, CLIENT_IDENTIFIER).await.map_err(to_error)?;
 	let saved = serde_json::to_string(&SavedSession {
 		login: credentials.login.clone(),
 		user_id: credentials.user_id.to_string(),
@@ -50,6 +55,11 @@ pub async fn login(email: &str, password: &str) -> Result<(Arc<dyn Backend>, Str
 
 /// Reopens a session saved by [`login`].
 pub async fn resume(saved: &str) -> Result<Arc<dyn Backend>> {
+	let saved = saved.to_string();
+	guarded(async move { resume_inner(&saved).await }).await
+}
+
+async fn resume_inner(saved: &str) -> Result<Arc<dyn Backend>> {
 	let saved: SavedSession = serde_json::from_str(saved).map_err(|_| Error::SessionExpired)?;
 	let credentials = Credentials {
 		login: saved.login.clone(),
@@ -67,6 +77,16 @@ fn sdk() -> Result<Sdk> {
 	Ok(Sdk::new(BASE_URL.to_string(), Arc::new(rest), Arc::new(CacheFileClient::new())))
 }
 
+/// Runs SDK work in its own task, so a panic on an answer the SDK does not expect becomes an error
+/// message instead of taking the window down.
+async fn guarded<T: Send + 'static>(work: impl std::future::Future<Output = Result<T>> + Send + 'static) -> Result<T> {
+	match tokio::spawn(work).await {
+		Ok(result) => result,
+		Err(e) if e.is_panic() => Err(Error::Other("Tuta sent an answer Tern does not understand".into())),
+		Err(_) => Err(Error::Other("Cancelled".into())),
+	}
+}
+
 fn to_error(error: TernError) -> Error {
 	match error {
 		TernError::BadLogin => Error::BadLogin,
@@ -82,14 +102,14 @@ fn to_error(error: TernError) -> Error {
 }
 
 struct TutaBackend {
-	mail: TernMail,
-	account: TernAccount,
+	mail: Arc<TernMail>,
+	account: Arc<TernAccount>,
 }
 
 impl TutaBackend {
 	async fn new(mail: TernMail, login: &str) -> Result<Self> {
 		let account = mail.account(login).await.map_err(to_error)?;
-		Ok(Self { mail, account })
+		Ok(Self { mail: Arc::new(mail), account: Arc::new(account) })
 	}
 }
 
@@ -134,8 +154,10 @@ fn folder(set: &MailSet) -> Option<Folder> {
 	Some(Folder { id: FolderId(format!("{}/{}", set.entries, element)), name, kind, unread: 0 })
 }
 
-fn summary(mail: &TutaMail) -> Option<MailSummary> {
+fn summary(mail: &TutaMail, me: &str) -> Option<MailSummary> {
 	Some(MailSummary {
+		to: mail.firstRecipient.as_ref().map(|a| Address::new(a.name.clone(), a.address.clone())),
+		outgoing: mail.sender.address.eq_ignore_ascii_case(me),
 		id: id_string(mail._id.as_ref()?),
 		from: Address::new(mail.sender.name.clone(), mail.sender.address.clone()),
 		subject: mail.subject.clone(),
@@ -152,7 +174,8 @@ impl Backend for TutaBackend {
 	}
 
 	async fn folders(&self) -> Result<Vec<Folder>> {
-		let sets = self.mail.folders().await.map_err(to_error)?;
+		let mail = self.mail.clone();
+		let sets = guarded(async move { mail.folders().await.map_err(to_error) }).await?;
 		let order = |k: FolderKind| FOLDER_ORDER.iter().position(|&o| o == k);
 		let mut folders: Vec<Folder> = sets.iter().filter_map(folder).collect();
 		folders.sort_by(|a, b| order(a.kind).cmp(&order(b.kind)).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
@@ -160,19 +183,38 @@ impl Backend for TutaBackend {
 	}
 
 	async fn list(&self, folder: &FolderId, next: Option<String>, count: usize) -> Result<MailPage> {
-		let entries = folder.0.split('/').next().unwrap_or_default();
-		let (mails, next) = self.mail.mail_page(&GeneratedId(entries.to_string()), next.map(CustomId), count).await.map_err(to_error)?;
-		Ok(MailPage { mails: mails.iter().filter_map(summary).collect(), next: next.map(|n| n.0) })
+		let entries = GeneratedId(folder.0.split('/').next().unwrap_or_default().to_string());
+		let mail = self.mail.clone();
+		let (items, next) = guarded(async move { mail.mail_page(&entries, next.map(CustomId), count).await.map_err(to_error) }).await?;
+		let me = &self.account.mail_address;
+		let mails = items
+			.iter()
+			.filter_map(|item| match item {
+				PageItem::Mail(mail) => summary(mail, me),
+				PageItem::Unreadable { id, received_ms } => Some(MailSummary {
+					id: id_string(id),
+					from: Address::new("Tuta", ""),
+					subject: "Open this message in Tuta".into(),
+					received_ms: *received_ms as i64,
+					unread: false,
+					has_attachments: false,
+					to: None,
+					outgoing: false,
+				}),
+			})
+			.collect();
+		Ok(MailPage { mails, next: next.map(|n| n.0) })
 	}
 
 	async fn open(&self, id: &MailId) -> Result<Mail> {
-		let opened = self.mail.open(&id_tuple(id)).await.map_err(to_error)?;
+		let (mail, tuple) = (self.mail.clone(), id_tuple(id));
+		let opened = guarded(async move { mail.open(&tuple).await.map_err(to_error) }).await?;
 		let address = |a: &MailAddress| Address::new(a.name.clone(), a.address.clone());
 		let body = &opened.details.body;
 		let body_html = body.compressedText.clone().filter(|t| !t.is_empty()).or_else(|| body.text.clone()).unwrap_or_default();
 		let folder = opened.mail.sets.first().map(|set| set.element_id.to_string()).unwrap_or_default();
 		Ok(Mail {
-			summary: summary(&opened.mail).ok_or_else(|| Error::Other("mail has no id".into()))?,
+			summary: summary(&opened.mail, &self.account.mail_address).ok_or_else(|| Error::Other("mail has no id".into()))?,
 			to: opened.details.recipients.toRecipients.iter().map(address).collect(),
 			cc: opened.details.recipients.ccRecipients.iter().map(address).collect(),
 			reply_to: opened.details.replyTos.iter().map(|a| Address::new(a.name.clone(), a.address.clone())).collect(),
@@ -198,7 +240,8 @@ impl Backend for TutaBackend {
 	async fn attachment(&self, mail: &MailId, attachment: &Attachment) -> Result<Vec<u8>> {
 		let (list, element) = attachment.id.split_once('/').ok_or_else(|| Error::Other("bad attachment id".into()))?;
 		let file = IdTupleGenerated { list_id: GeneratedId(list.into()), element_id: GeneratedId(element.into()) };
-		self.mail.download(&id_tuple(mail), &file).await.map_err(to_error)
+		let (tern, mail) = (self.mail.clone(), id_tuple(mail));
+		guarded(async move { tern.download(&mail, &file).await.map_err(to_error) }).await
 	}
 
 	async fn send(&self, draft: Draft) -> Result<()> {
@@ -217,20 +260,27 @@ impl Backend for TutaBackend {
 			attachments: draft.attachments.into_iter().map(|a| OutgoingAttachment { name: a.name, mime_type: a.mime, data: a.data }).collect(),
 			previous,
 		};
-		self.mail.send(&self.account, outgoing).await.map(|_| ()).map_err(to_error)
+		let (mail, account) = (self.mail.clone(), self.account.clone());
+		guarded(async move { mail.send(&account, outgoing).await.map(|_| ()).map_err(to_error) }).await
 	}
 
 	async fn set_unread(&self, id: &MailId, unread: bool) -> Result<()> {
-		self.mail.set_unread(vec![id_tuple(id)], unread).await.map_err(to_error)
+		let (mail, id) = (self.mail.clone(), id_tuple(id));
+		guarded(async move { mail.set_unread(vec![id], unread).await.map_err(to_error) }).await
 	}
 
 	async fn trash(&self, id: &MailId) -> Result<()> {
-		self.mail.trash(vec![id_tuple(id)]).await.map_err(to_error)
+		let (mail, id) = (self.mail.clone(), id_tuple(id));
+		guarded(async move { mail.trash(vec![id]).await.map_err(to_error) }).await
 	}
 
 	async fn sign_out(&self) -> Result<()> {
-		self.mail.sign_out().await;
-		Ok(())
+		let mail = self.mail.clone();
+		guarded(async move {
+			mail.sign_out().await;
+			Ok(())
+		})
+		.await
 	}
 }
 

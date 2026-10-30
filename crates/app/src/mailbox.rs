@@ -82,7 +82,11 @@ fn bind_row(row: &gtk::Box, m: &MailSummary, now: i64, tz: &glib::TimeZone) {
 	let clip = sender.next_sibling().unwrap();
 	let date = clip.next_sibling().and_downcast::<gtk::Label>().unwrap();
 	dot.set_visible(m.unread);
-	sender.set_label(if m.from.display().is_empty() { "(Unknown Sender)" } else { m.from.display() });
+	match (&m.to, m.outgoing) {
+		(Some(to), true) => sender.set_label(&format!("To: {}", to.display())),
+		(None, true) => sender.set_label("(No Recipients)"),
+		_ => sender.set_label(if m.from.display().is_empty() { "(Unknown Sender)" } else { m.from.display() }),
+	}
 	if m.unread {
 		sender.add_css_class("heading");
 	} else {
