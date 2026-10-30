@@ -11,6 +11,7 @@ use tern_core::{
 	Account, Address, Attachment, Backend, Draft, Error, Folder, FolderId, FolderKind, Mail, MailId, MailPage, MailSummary, ReplyKind, Result,
 };
 use tutasdk::bindings::file_client::{FileClient, FileClientError};
+use tutasdk::bindings::rest_client::{HttpMethod, RestClient, RestClientError, RestClientOptions, RestResponse};
 use tutasdk::entities::generated::tutanota::{Mail as TutaMail, MailAddress, MailSet};
 use tutasdk::folder_system::MailSetKind;
 use tutasdk::login::{CredentialType, Credentials};
@@ -74,7 +75,49 @@ async fn resume_inner(saved: &str) -> Result<Arc<dyn Backend>> {
 
 fn sdk() -> Result<Sdk> {
 	let rest = NativeRestClient::try_new().map_err(|e| Error::Other(format!("cannot set up TLS: {e}")))?;
-	Ok(Sdk::new(BASE_URL.to_string(), Arc::new(rest), Arc::new(CacheFileClient::new())))
+	Ok(Sdk::new(BASE_URL.to_string(), Arc::new(TimedRestClient::new(rest)), Arc::new(CacheFileClient::new())))
+}
+
+/// How long one request may take before Tern gives up on it. Generous, since attachments
+/// ride on single requests, but a stalled connection no longer leaves the window waiting forever.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The SDK's HTTP client with a time limit on every request, and a log line per request on
+/// stderr when `TERN_LOG` is set. The log shows method, path, status and time: never the query
+/// string, headers or bodies, which carry tokens and mail.
+struct TimedRestClient {
+	inner: NativeRestClient,
+	log: bool,
+}
+
+impl TimedRestClient {
+	fn new(inner: NativeRestClient) -> Self {
+		Self { inner, log: std::env::var_os("TERN_LOG").is_some() }
+	}
+}
+
+#[async_trait]
+impl RestClient for TimedRestClient {
+	async fn request_binary(&self, url: String, method: HttpMethod, options: RestClientOptions) -> std::result::Result<RestResponse, RestClientError> {
+		let what = format!("{method:?} {}", log_path(&url));
+		let started = std::time::Instant::now();
+		let result = tokio::time::timeout(REQUEST_TIMEOUT, self.inner.request_binary(url, method, options)).await;
+		let ms = started.elapsed().as_millis();
+		if self.log {
+			match &result {
+				Ok(Ok(response)) => eprintln!("tern: {what} -> {} ({ms} ms)", response.status),
+				Ok(Err(e)) => eprintln!("tern: {what} -> {e:?} ({ms} ms)"),
+				Err(_) => eprintln!("tern: {what} -> timed out ({ms} ms)"),
+			}
+		}
+		result.unwrap_or(Err(RestClientError::NetworkError))
+	}
+}
+
+/// The URL without host and query string.
+fn log_path(url: &str) -> &str {
+	let path = url.find("/rest/").map_or(url, |i| &url[i..]);
+	path.split('?').next().unwrap_or(path)
 }
 
 /// Runs SDK work in its own task, so a panic on an answer the SDK does not expect becomes an error
