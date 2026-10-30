@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/xyz/hollingworth/Tern/icons/scalable/apps">
+    <file alias="xyz.hollingworth.Tern.svg" preprocess="xml-stripblanks">icons/xyz.hollingworth.Tern.svg</file>
+  </gresource>
+  <gresource prefix="/xyz/hollingworth/Tern/icons/scalable/actions">
+    <file alias="tern-inbox-symbolic.svg" preprocess="xml-stripblanks">icons/symbolic/tern-inbox-symbolic.svg</file>
+    <file alias="tern-archive-symbolic.svg" preprocess="xml-stripblanks">icons/symbolic/tern-archive-symbolic.svg</file>
+  </gresource>
+</gresources>

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>xyz.hollingworth.Tern</id>
+  <name>Tern</name>
+  <summary>Read and write Tuta mail</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <developer id="xyz.hollingworth">
+    <name>Henry Hollingworth</name>
+  </developer>
+  <description>
+    <p>Tern is a small, fast mail client for Tuta accounts. It reads and writes simple mail, opens and saves attachments, and leaves the rest to Tuta’s web app.</p>
+    <p>Tern is unofficial and not affiliated with Tuta GmbH.</p>
+  </description>
+  <launchable type="desktop-id">xyz.hollingworth.Tern.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>touch</control>
+  </supports>
+  <releases>
+    <release version="0.1.0" date="2026-10-31"/>
+  </releases>
+</component>

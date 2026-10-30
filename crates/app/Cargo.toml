@@ -2,7 +2,24 @@
 name = "tern"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-only"
 publish = false
 
 [dependencies]
 tern-core = { workspace = true }
+tern-tuta = { workspace = true }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_22"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_8"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time"] }
+oo7 = { version = "0.6", default-features = false, features = ["tokio", "native_crypto"] }
+scraper = { version = "0.29", default-features = false }
+ego-tree = "0.11"
+base64 = { workspace = true }
+async-trait = "0.1.77"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
+[build-dependencies]
+glib-build-tools = "0.22"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

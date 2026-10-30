@@ -1,1 +1,50 @@
-fn main() {}
+//! Tern, a small GNOME mail client for Tuta.
+
+mod attachments;
+mod compose_model;
+mod composer;
+mod format;
+mod html_doc;
+mod keyring;
+mod login;
+mod mailbox;
+mod reader;
+mod render;
+mod runtime;
+mod screenshot;
+mod window;
+
+use adw::prelude::*;
+use gtk::{gio, glib};
+
+pub const APP_ID: &str = "xyz.hollingworth.Tern";
+
+fn main() -> glib::ExitCode {
+	gio::resources_register_include!("tern.gresource").expect("register resources");
+	glib::set_application_name("Tern");
+
+	let app = adw::Application::builder().application_id(APP_ID).resource_base_path("/xyz/hollingworth/Tern").build();
+	app.connect_startup(|app| {
+		gtk::Window::set_default_icon_name(APP_ID);
+		app.set_accels_for_action("app.quit", &["<Control>q"]);
+		app.set_accels_for_action("app.shortcuts", &["<Control>question"]);
+		app.set_accels_for_action("win.compose", &["<Control>n"]);
+		app.set_accels_for_action("win.reply", &["<Control>r"]);
+		app.set_accels_for_action("win.reply-all", &["<Control><Shift>r"]);
+		app.set_accels_for_action("win.forward", &["<Control>l"]);
+		app.set_accels_for_action("win.trash", &["Delete"]);
+		app.set_accels_for_action("win.refresh", &["F5"]);
+		let quit = gio::ActionEntry::builder("quit").activate(|app: &adw::Application, _, _| app.quit()).build();
+		app.add_action_entries([quit]);
+	});
+	app.connect_activate(|app| {
+		if let Some(w) = app.active_window() {
+			w.present();
+			return;
+		}
+		window::Window::new(app);
+		attachments::clean_old_files();
+	});
+	// Tern takes no arguments of its own.
+	app.run_with_args::<&str>(&[])
+}

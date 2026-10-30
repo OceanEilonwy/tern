@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Tern
+Comment=Read and write Tuta mail
+Exec=tern
+Icon=xyz.hollingworth.Tern
+Terminal=false
+Type=Application
+Categories=GNOME;GTK;Network;Email;
+Keywords=mail;email;tuta;tutanota;
+StartupNotify=true
