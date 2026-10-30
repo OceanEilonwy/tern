@@ -43,6 +43,7 @@ pub async fn login(email: &str, password: &str) -> Result<(Arc<dyn Backend>, Str
 
 async fn login_inner(email: &str, password: &str) -> Result<(Arc<dyn Backend>, String)> {
 	let (sdk, credentials) = sdk()?.tern_sign_in(email, password, CLIENT_IDENTIFIER).await.map_err(to_error)?;
+	trace("session open, loading the account");
 	let saved = serde_json::to_string(&SavedSession {
 		login: credentials.login.clone(),
 		user_id: credentials.user_id.to_string(),
@@ -51,7 +52,15 @@ async fn login_inner(email: &str, password: &str) -> Result<(Arc<dyn Backend>, S
 	})
 	.map_err(|e| Error::Other(e.to_string()))?;
 	let backend = TutaBackend::new(sdk.tern(), &credentials.login).await?;
+	trace("signed in");
 	Ok((Arc::new(backend), saved))
+}
+
+/// A step on stderr when `TERN_LOG` is set.
+pub fn trace(step: &str) {
+	if std::env::var_os("TERN_LOG").is_some() {
+		eprintln!("tern: {step}");
+	}
 }
 
 /// Reopens a session saved by [`login`].
@@ -100,6 +109,9 @@ impl TimedRestClient {
 impl RestClient for TimedRestClient {
 	async fn request_binary(&self, url: String, method: HttpMethod, options: RestClientOptions) -> std::result::Result<RestResponse, RestClientError> {
 		let what = format!("{method:?} {}", log_path(&url));
+		if self.log {
+			eprintln!("tern: {what} ...");
+		}
 		let started = std::time::Instant::now();
 		let result = tokio::time::timeout(REQUEST_TIMEOUT, self.inner.request_binary(url, method, options)).await;
 		let ms = started.elapsed().as_millis();
@@ -124,6 +136,10 @@ fn log_path(url: &str) -> &str {
 /// message instead of taking the window down.
 async fn guarded<T: Send + 'static>(work: impl std::future::Future<Output = Result<T>> + Send + 'static) -> Result<T> {
 	match tokio::spawn(work).await {
+		Ok(Err(e)) => {
+			trace(&format!("failed: {e:?}"));
+			Err(e)
+		},
 		Ok(result) => result,
 		Err(e) if e.is_panic() => Err(Error::Other("Tuta sent an answer Tern does not understand".into())),
 		Err(_) => Err(Error::Other("Cancelled".into())),
@@ -152,6 +168,7 @@ struct TutaBackend {
 impl TutaBackend {
 	async fn new(mail: TernMail, login: &str) -> Result<Self> {
 		let account = mail.account(login).await.map_err(to_error)?;
+		trace("account loaded");
 		Ok(Self { mail: Arc::new(mail), account: Arc::new(account) })
 	}
 }

@@ -143,6 +143,7 @@ impl Login {
 		runtime::spawn_local(async move {
 			let e = email.clone();
 			let result = runtime::run(async move { tern_tuta::login(&e, &password).await }).await;
+			tern_tuta::trace(if result.is_ok() { "sign-in finished" } else { "sign-in failed" });
 			this.set_busy(false);
 			match result {
 				Ok((backend, session)) => this.finish(backend, Some((email, session))),

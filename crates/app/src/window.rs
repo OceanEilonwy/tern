@@ -158,12 +158,14 @@ impl Window {
 
 	/// `saved` is the session to remember, with the address it belongs to.
 	fn signed_in(&self, backend: Arc<dyn Backend>, saved: Option<(String, String)>) {
+		tern_tuta::trace("opening the mailbox");
 		*self.ctx.backend.borrow_mut() = Some(backend.clone());
 		if let Some((email, session)) = saved {
 			runtime::spawn_local(async move { runtime::run(async move { keyring::store(&email, &session).await }).await });
 		}
 		self.mailbox.start();
 		self.stack.set_visible_child_name("mailbox");
+		tern_tuta::trace("mailbox shown");
 	}
 
 	fn sign_out(self: &Rc<Self>) {
