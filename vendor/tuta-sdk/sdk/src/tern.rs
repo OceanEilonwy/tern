@@ -844,6 +844,15 @@ impl TernMail {
 
 	/// The session key of `raw`: from the bucket keys if they cover it, else from its owner group.
 	async fn session_key(&self, type_ref: &TypeRef, raw: &ParsedEntity, instance_keys: Option<&InstanceKeys>) -> Result<GenericAesKey, TernError> {
+		// Resolve bucket keys here rather than in the SDK, which panics on secure external ones.
+		let computed;
+		let instance_keys = match instance_keys {
+			Some(keys) => Some(keys),
+			None => {
+				computed = self.bucket_instance_keys(type_ref, raw).await?;
+				computed.as_ref()
+			},
+		};
 		let type_model = self.sdk.entity_client.resolve_server_type_ref(type_ref)?;
 		if let (Some(keys), Some(id)) = (instance_keys, element_id(&type_model, raw)) {
 			if let Some(key) = keys.get(&id) {
