@@ -32,6 +32,12 @@ impl FolderSystem {
 		Self { folders }
 	}
 
+	/// All folders, for Tern's sidebar.
+	#[must_use]
+	pub fn into_folders(self) -> Vec<MailSet> {
+		self.folders
+	}
+
 	#[must_use]
 	pub fn system_folder_by_type(&self, mail_set_kind: MailSetKind) -> Option<&MailSet> {
 		self.folders

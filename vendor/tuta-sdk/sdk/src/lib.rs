@@ -55,6 +55,7 @@ use crypto_primitives::key::GenericAesKey;
 use crypto_primitives::randomizer_facade::RandomizerFacade;
 use crypto_primitives::versioned::VersionedAesKey;
 
+pub mod tern;
 pub mod contacts;
 pub mod crypto;
 pub mod crypto_entity_client;
@@ -314,6 +315,16 @@ impl Sdk {
 		));
 
 		Ok(Arc::new(LoggedInSdk {
+			tern: tern::TernParts {
+				key_loader_facade: key_loader_facade.clone(),
+				asymmetric_crypto_facade: asymmetric_crypto_facade.clone(),
+				crypto_facade: crypto_facade.clone(),
+				public_key_provider: public_key_provider.clone(),
+				rest_client: self.rest_client.clone(),
+				base_url: self.base_url.clone(),
+				auth_headers_provider: auth_headers_provider.clone(),
+				access_token: credentials.access_token.clone(),
+			},
 			user_facade,
 			entity_client,
 			service_executor,
@@ -474,6 +485,7 @@ impl Sdk {
 #[allow(dead_code)]
 #[derive(uniffi::Object)]
 pub struct LoggedInSdk {
+	pub(crate) tern: tern::TernParts,
 	user_facade: Arc<UserFacade>,
 	entity_client: Arc<EntityClient>,
 	service_executor: Arc<ResolvingServiceExecutor>,

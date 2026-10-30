@@ -50,10 +50,10 @@ pub struct DecapsulatedAesKey {
 }
 
 pub struct PubEncSymKey {
-	pub_enc_sym_key_bytes: Vec<u8>,
-	crypto_protocol_version: CryptoProtocolVersion,
-	sender_key_version: Option<u64>,
-	recipient_key_version: u64,
+	pub(crate) pub_enc_sym_key_bytes: Vec<u8>,
+	pub(crate) crypto_protocol_version: CryptoProtocolVersion,
+	pub(crate) sender_key_version: Option<u64>,
+	pub(crate) recipient_key_version: u64,
 }
 
 #[derive(thiserror::Error, Debug)]
