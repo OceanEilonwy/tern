@@ -52,7 +52,9 @@ attachments must work, KISS, fast, Rust. These are the calls I made, in the orde
 - Verified against the real server: sign-in up to the password check (salt, Argon2, session request).
 - Not verified live: reading, downloading, sending. There was no Tuta account to test with, and creating
   one needs a captcha and is not my call. The port follows the TypeScript client at the same tag line by
-  line, an independent review compared the two, and unit tests cover the encodings
-  (draft encryption, blob response parsing, id encoding).
+  line, and an independent review compared the two. It found one real bug, now fixed: the read-token,
+  blob and send requests had aggregates without ids (the SDK fills those in only for encrypted requests),
+  so they would not have serialized. Unit tests now push every request Tern builds (draft, send in both
+  modes, read tokens, blob fetch) through the SDK's own wire serializer.
 - To prove it on your account: `TERN_TEST_EMAIL=you@tuta.com TERN_TEST_PASSWORD=… cargo test -p tern-tuta -- --ignored`
   sends yourself a mail with a PDF attached, reads it back from Sent and compares the attachment bytes.
