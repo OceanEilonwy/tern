@@ -68,3 +68,13 @@ attachments must work, KISS, fast, Rust. These are the calls I made, in the orde
   broadway display (`test-ui`) and fails if the mailbox does not open.
 - **Every Tuta request has a two-minute limit**, and `TERN_LOG=1` prints each request (method, path,
   status, time; never query strings, headers or bodies) and each sign-in step on stderr.
+- **Audit for the same kind of silent failure** (state dropped or never updated, so the window waits forever):
+  - Folders that fail to load now show "Could Not Load Folders" with the reason and "Press F5 to try again",
+    instead of a spinner behind a toast that disappears. An account with no folders says "No Folders".
+  - A refresh (F5, or sending while Sent is open) during a folder's first page left the list thinking a
+    page was still loading, so scrolling never loaded older mail. Loads now carry the list generation.
+  - Folders arriving after sign-out were put back in the list; signing into the same account then opened
+    no folder and spun. Results for a backend that is no longer signed in are dropped.
+  - Each has a scene in `make test-ui` that fails with the old code (checked by putting each bug back).
+  - Checked and fine: the composer keeps itself alive until its window is destroyed; Mailbox and Reader are
+    owned by the window; mail, page and reader loads already ignore stale results.

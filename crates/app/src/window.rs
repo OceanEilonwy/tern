@@ -96,6 +96,10 @@ impl Window {
 		if let Some((w, h)) = screenshot::size() {
 			window.set_default_size(w, h);
 			window.maximize();
+			// Page changes are crossfades, which never advance when broadway draws no frames.
+			if let Some(settings) = gtk::Settings::default() {
+				settings.set_gtk_enable_animations(false);
+			}
 		}
 		window.present();
 		this.clone().start();

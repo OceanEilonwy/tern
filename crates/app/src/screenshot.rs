@@ -1,6 +1,6 @@
 //! A hidden debug path that builds a scene, saves a PNG of it and quits.
 //!
-//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|inbox|reading|invoice|newsletter|compose|narrow|narrow-reading`
+//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|folders-fail|refresh-race|sign-out-race|inbox|reading|invoice|newsletter|compose|narrow|narrow-reading`
 //! (with `TERN_DEMO=1` for all but login and sign-in; sign-in types "demo" on the sign-in page). For dark mode add `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
 
 use std::path::PathBuf;
@@ -51,10 +51,6 @@ fn sign_in(win: std::rc::Weak<Window>, path: PathBuf) {
 	glib::spawn_future_local(async move {
 		sleep(300).await;
 		let Some(w) = win.upgrade() else { return eprintln!("tern: screenshot failed: the window was dropped") };
-		// The page change is a crossfade, which never advances when broadway draws no frames.
-		if let Some(settings) = gtk::Settings::default() {
-			settings.set_gtk_enable_animations(false);
-		}
 		w.login.sign_in_as("demo");
 		let window = w.ctx.window.clone();
 		drop(w);
@@ -83,10 +79,56 @@ async fn save_and_quit(target: &gtk::Widget, path: &std::path::Path, app: Option
 	}
 }
 
+/// The scenes that check the window recovers from failing or slow calls.
+async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String> {
+	let mailbox = win.mailbox.clone();
+	let app = win.ctx.window.application().ok_or("no application")?;
+	match scene {
+		// Folders that fail to load say so instead of spinning.
+		"folders-fail" => {
+			wait_for(|| mailbox.status().is_some()).await;
+			match mailbox.status() {
+				Some(title) if title == "Could Not Load Folders" => Ok(()),
+				other => Err(format!("expected the folder error, got {other:?}")),
+			}
+		}
+		// A refresh while the first page loads must not leave the list unable to load more.
+		"refresh-race" => {
+			wait_for(|| mailbox.is_loading()).await;
+			gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.refresh", None).map_err(|e| e.to_string())?;
+			wait_for(|| mailbox.store.n_items() > 0 && !mailbox.is_loading()).await;
+			sleep(1000).await;
+			if mailbox.is_loading() { Err("the list still counts a page as loading".into()) } else { Ok(()) }
+		}
+		// Folders that arrive after signing out must not stop the next sign-in from opening the inbox.
+		"sign-out-race" => {
+			sleep(100).await;
+			app.activate_action("sign-out", None);
+			sleep(800).await;
+			win.login.sign_in_as("demo");
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			if mailbox.store.n_items() > 0 { Ok(()) } else { Err("signing in again showed no mail".into()) }
+		}
+		_ => Ok(()),
+	}
+}
+
 pub fn drive(win: Rc<Window>) {
 	let Some((path, scene)) = scene() else { return };
 	if scene == "sign-in" {
 		return sign_in(Rc::downgrade(&win), path);
+	}
+	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race") {
+		glib::spawn_future_local(async move {
+			if let Err(e) = check(&win, &scene).await {
+				// No picture, so the check fails.
+				eprintln!("tern: screenshot failed: {e}");
+				std::process::exit(1);
+			}
+			let app = win.ctx.window.application();
+			save_and_quit(win.ctx.window.upcast_ref(), &path, app).await;
+		});
+		return;
 	}
 	glib::spawn_future_local(async move {
 		let mailbox = win.mailbox.clone();
@@ -168,5 +210,61 @@ fn save(window: &gtk::Widget, path: &std::path::Path) -> std::result::Result<(),
 
 /// The demo account the screenshots are taken from.
 pub fn backend() -> Arc<dyn Backend> {
-	Arc::new(DemoBackend::new())
+	let scene = scene().map(|(_, s)| s).unwrap_or_default();
+	let demo = DemoBackend::new();
+	match scene.as_str() {
+		"folders-fail" => Arc::new(Staged { demo, folders_fail: true, delay: Duration::ZERO, delay_folders: false }),
+		"refresh-race" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::from_millis(500), delay_folders: false }),
+		"sign-out-race" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::from_millis(500), delay_folders: true }),
+		_ => Arc::new(demo),
+	}
+}
+
+/// The demo account with slow or failing calls, for the scenes that check the window copes.
+struct Staged {
+	demo: DemoBackend,
+	folders_fail: bool,
+	/// How long `list` (or `folders`, with `delay_folders`) takes.
+	delay: Duration,
+	delay_folders: bool,
+}
+
+#[async_trait::async_trait]
+impl Backend for Staged {
+	fn account(&self) -> tern_core::Account {
+		self.demo.account()
+	}
+	async fn folders(&self) -> tern_core::Result<Vec<tern_core::Folder>> {
+		if self.folders_fail {
+			return Err(tern_core::Error::Offline);
+		}
+		if self.delay_folders {
+			tokio::time::sleep(self.delay).await;
+		}
+		self.demo.folders().await
+	}
+	async fn list(&self, folder: &tern_core::FolderId, next: Option<String>, count: usize) -> tern_core::Result<tern_core::MailPage> {
+		if !self.delay_folders {
+			tokio::time::sleep(self.delay).await;
+		}
+		self.demo.list(folder, next, count).await
+	}
+	async fn open(&self, id: &tern_core::MailId) -> tern_core::Result<tern_core::Mail> {
+		self.demo.open(id).await
+	}
+	async fn attachment(&self, mail: &tern_core::MailId, attachment: &tern_core::Attachment) -> tern_core::Result<Vec<u8>> {
+		self.demo.attachment(mail, attachment).await
+	}
+	async fn send(&self, draft: tern_core::Draft) -> tern_core::Result<()> {
+		self.demo.send(draft).await
+	}
+	async fn set_unread(&self, id: &tern_core::MailId, unread: bool) -> tern_core::Result<()> {
+		self.demo.set_unread(id, unread).await
+	}
+	async fn trash(&self, id: &tern_core::MailId) -> tern_core::Result<()> {
+		self.demo.trash(id).await
+	}
+	async fn sign_out(&self) -> tern_core::Result<()> {
+		self.demo.sign_out().await
+	}
 }

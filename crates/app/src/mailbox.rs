@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -32,7 +33,8 @@ pub struct Mailbox {
 	selection: gtk::SingleSelection,
 	list_view: gtk::ListView,
 	next: RefCell<Option<String>>,
-	loading_more: Cell<bool>,
+	/// The generation of the list load in flight, if any; `load_more` waits for it.
+	loading: Cell<Option<u64>>,
 	generation: Cell<u64>,
 	/// Set while the list is swapped under an open mail, so the reader stays.
 	hold: Cell<bool>,
@@ -196,7 +198,7 @@ impl Mailbox {
 			selection,
 			list_view,
 			next: RefCell::default(),
-			loading_more: Cell::new(false),
+			loading: Cell::new(None),
 			generation: Cell::new(0),
 			hold: Cell::new(false),
 			reader,
@@ -360,8 +362,18 @@ impl Mailbox {
 		let Some(backend) = self.ctx.backend() else { return };
 		let this = self.clone();
 		runtime::spawn_local(async move {
-			match runtime::run(async move { backend.folders().await }).await {
+			let b = backend.clone();
+			let result = runtime::run(async move { b.folders().await }).await;
+			// Signed out, or into another account, while this was loading.
+			if !this.ctx.backend().is_some_and(|now| Arc::ptr_eq(&now, &backend)) {
+				return;
+			}
+			match result {
 				Ok(folders) => this.set_folders(folders, select_inbox),
+				Err(e) if this.folders.borrow().is_empty() => {
+					this.list_title.set_title("");
+					this.show_status("Could Not Load Folders", Some(&format!("{e}. Press F5 to try again.")));
+				}
 				Err(e) => this.ctx.error(&e),
 			}
 		});
@@ -397,6 +409,9 @@ impl Mailbox {
 			rows.push((folder, count));
 		}
 		*self.folders.borrow_mut() = rows;
+		if self.folders.borrow().is_empty() {
+			return self.show_status("No Folders", None);
+		}
 		let target = {
 			let folders = self.folders.borrow();
 			let by_current = current.and_then(|c| folders.iter().position(|(f, _)| f.id == c));
@@ -406,6 +421,13 @@ impl Mailbox {
 		if let Some(row) = target.and_then(|i| self.folder_list.row_at_index(i as i32)) {
 			self.folder_list.select_row(Some(&row));
 		}
+	}
+
+	/// Shows a status page in place of the mail list.
+	fn show_status(&self, title: &str, description: Option<&str>) {
+		self.empty.set_title(title);
+		self.empty.set_description(description);
+		self.list_stack.set_visible_child_name("empty");
 	}
 
 	fn change_unread(&self, delta: i32) {
@@ -441,14 +463,14 @@ impl Mailbox {
 		} else {
 			self.generation.get()
 		};
-		self.loading_more.set(true);
+		self.loading.set(Some(generation));
 		let this = self.clone();
 		runtime::spawn_local(async move {
 			let result = runtime::run(async move { backend.list(&folder, next, PAGE).await }).await;
 			if this.generation.get() != generation {
 				return;
 			}
-			this.loading_more.set(false);
+			this.loading.set(None);
 			match result {
 				Ok(page) => {
 					let items: Vec<glib::BoxedAnyObject> = page.mails.into_iter().map(glib::BoxedAnyObject::new).collect();
@@ -464,9 +486,7 @@ impl Mailbox {
 				}
 				Err(e) => {
 					if this.store.n_items() == 0 {
-						this.empty.set_title("Could Not Load Messages");
-						this.empty.set_description(Some(&e.to_string()));
-						this.list_stack.set_visible_child_name("empty");
+						this.show_status("Could Not Load Messages", Some(&e.to_string()));
 					} else {
 						this.ctx.error(&e);
 					}
@@ -476,7 +496,7 @@ impl Mailbox {
 	}
 
 	fn load_more(self: &Rc<Self>) {
-		if self.loading_more.get() {
+		if self.is_loading() {
 			return;
 		}
 		let next = self.next.borrow().clone();
@@ -495,6 +515,7 @@ impl Mailbox {
 		let Some(folder) = self.current.borrow().clone() else { return };
 		self.generation.set(self.generation.get() + 1);
 		let generation = self.generation.get();
+		self.loading.set(Some(generation));
 		let open = self.reader.current.borrow().as_ref().map(|o| o.mail.summary.id.clone());
 		let this = self.clone();
 		runtime::spawn_local(async move {
@@ -502,6 +523,7 @@ impl Mailbox {
 			if this.generation.get() != generation {
 				return;
 			}
+			this.loading.set(None);
 			match result {
 				Ok(page) => {
 					let selected = page.mails.iter().position(|m| Some(&m.id) == open.as_ref());
@@ -626,6 +648,16 @@ impl Mailbox {
 				}
 			}
 		});
+	}
+
+	/// A page of the current list is on its way.
+	pub fn is_loading(&self) -> bool {
+		self.loading.get() == Some(self.generation.get())
+	}
+
+	/// For the screenshot scenes: the title of the status page shown instead of the list, if one is.
+	pub fn status(&self) -> Option<String> {
+		(self.list_stack.visible_child_name().as_deref() == Some("empty")).then(|| self.empty.title().to_string())
 	}
 
 	/// For the screenshot scenes: opens the first folder of a kind.
