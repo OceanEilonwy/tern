@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/tuta",
+    "crates/app",
+    "vendor/tuta-sdk/sdk",
+    "vendor/tuta-sdk/crypto-primitives",
+    "vendor/tuta-sdk/util",
+]
+default-members = ["crates/app"]
+
+[workspace.package]
+version = "365.261029.1"
+rust-version = "1.84.0"
+edition = "2021"
+homepage = "https://tutao.de"
+repository = "https://github.com/tutao/tutanota"
+license-file = "LICENSE"
+publish = false
+
+[workspace.dependencies]
+tuta-sdk = { path = "vendor/tuta-sdk/sdk", default-features = false }
+crypto-primitives = { path = "vendor/tuta-sdk/crypto-primitives", default-features = false }
+util = { path = "vendor/tuta-sdk/util", default-features = false }
+tern-core = { path = "crates/core" }
+tern-tuta = { path = "crates/tuta" }
+base64 = { version = "0.22.1" }
+log = { version = "0.4.22" }
+serde = { version = "1.0.210", features = ["derive", "rc"] }
+serde_json = { version = "1.0.117" }
+tokio = { version = "1.43", default-features = false }
+uniffi = { git = "https://github.com/mozilla/uniffi-rs.git", rev = "13a1c559cb3708eeca40dcf95dc8b3ccccf3b88c", default-features = false }
+rand = { version = "0.8" }
+
+# Lints the vendored Tuta SDK expects from its own workspace.
+[workspace.lints.clippy]
+new_without_default = "allow"
+enum_variant_names = "allow"
+let_and_return = "allow"
+too_many_arguments = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2
