@@ -58,3 +58,13 @@ attachments must work, KISS, fast, Rust. These are the calls I made, in the orde
   modes, read tokens, blob fetch) through the SDK's own wire serializer.
 - To prove it on your account: `TERN_TEST_EMAIL=you@tuta.com TERN_TEST_PASSWORD=… cargo test -p tern-tuta -- --ignored`
   sends yourself a mail with a PDF attached, reads it back from Sent and compares the attachment bytes.
+
+## Morning fixes (2026-10-31)
+
+- **Sign-in with a real account stayed on the sign-in page.** `main` dropped the window's state right after
+  building it, and the sign-in callback held only a weak reference to it, so a successful sign-in went
+  nowhere (the demo and screenshot paths held their own reference, which hid it). The GTK window now owns
+  that state until it is destroyed. `make test` signs in as "demo" through the real button on a headless
+  broadway display (`test-ui`) and fails if the mailbox does not open.
+- **Every Tuta request has a two-minute limit**, and `TERN_LOG=1` prints each request (method, path,
+  status, time; never query strings, headers or bodies) and each sign-in step on stderr.

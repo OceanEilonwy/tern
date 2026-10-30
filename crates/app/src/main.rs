@@ -24,6 +24,10 @@ fn main() -> glib::ExitCode {
 	glib::set_application_name("Tern");
 
 	let app = adw::Application::builder().application_id(APP_ID).resource_base_path("/xyz/hollingworth/Tern").build();
+	if screenshot::scene().is_some() {
+		// Screenshot runs must not hand off to a Tern that is already open.
+		app.set_flags(gio::ApplicationFlags::NON_UNIQUE);
+	}
 	app.connect_startup(|app| {
 		gtk::Window::set_default_icon_name(APP_ID);
 		app.set_accels_for_action("app.quit", &["<Control>q"]);

@@ -81,6 +81,9 @@ impl Window {
 		}
 
 		let this = Rc::new(Window { ctx, stack, login, mailbox });
+		// The GTK window owns this struct until it is destroyed; callbacks and actions hold only weak references.
+		let owner = RefCell::new(Some(this.clone()));
+		window.connect_destroy(move |_| drop(owner.take()));
 		this.add_actions(app);
 		{
 			let weak = Rc::downgrade(&this);

@@ -93,6 +93,12 @@ impl Login {
 		*self.on_signed_in.borrow_mut() = Some(Box::new(f));
 	}
 
+	/// Types `email` and presses Sign In, for the screenshot scenes.
+	pub fn sign_in_as(&self, email: &str) {
+		self.email.set_text(email);
+		self.submit();
+	}
+
 	fn is_demo(&self) -> bool {
 		self.email.text().trim().eq_ignore_ascii_case(DEMO_LOGIN)
 	}

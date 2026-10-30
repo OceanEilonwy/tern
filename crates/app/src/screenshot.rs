@@ -1,7 +1,7 @@
 //! A hidden debug path that builds a scene, saves a PNG of it and quits.
 //!
-//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|inbox|reading|invoice|newsletter|compose|narrow|narrow-reading`
-//! (with `TERN_DEMO=1` for all but login). For dark mode add `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
+//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|inbox|reading|invoice|newsletter|compose|narrow|narrow-reading`
+//! (with `TERN_DEMO=1` for all but login and sign-in; sign-in types "demo" on the sign-in page). For dark mode add `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -45,8 +45,49 @@ async fn wait_for(ready: impl Fn() -> bool) {
 	eprintln!("tern: screenshot scene did not get ready");
 }
 
+/// Signs in from the sign-in page holding only a weak reference, as the app does, so the scene fails
+/// if nothing else keeps the window alive.
+fn sign_in(win: std::rc::Weak<Window>, path: PathBuf) {
+	glib::spawn_future_local(async move {
+		sleep(300).await;
+		let Some(w) = win.upgrade() else { return eprintln!("tern: screenshot failed: the window was dropped") };
+		// The page change is a crossfade, which never advances when broadway draws no frames.
+		if let Some(settings) = gtk::Settings::default() {
+			settings.set_gtk_enable_animations(false);
+		}
+		w.login.sign_in_as("demo");
+		let window = w.ctx.window.clone();
+		drop(w);
+		wait_for(|| win.upgrade().is_some_and(|w| w.mailbox.store.n_items() > 0)).await;
+		save_and_quit(window.upcast_ref(), &path, window.application()).await;
+	});
+}
+
+async fn save_and_quit(target: &gtk::Widget, path: &std::path::Path, app: Option<gtk::Application>) {
+	sleep(1200).await;
+	// Broadway draws only while a client watches; try until a frame has been drawn.
+	let mut result: std::result::Result<(), String> = Err(String::new());
+	for _ in 0..25 {
+		target.queue_draw();
+		sleep(200).await;
+		result = save(target, path);
+		if result.is_ok() {
+			break;
+		}
+	}
+	if let Err(e) = result {
+		eprintln!("tern: screenshot failed: {e}");
+	}
+	if let Some(app) = app {
+		app.quit();
+	}
+}
+
 pub fn drive(win: Rc<Window>) {
 	let Some((path, scene)) = scene() else { return };
+	if scene == "sign-in" {
+		return sign_in(Rc::downgrade(&win), path);
+	}
 	glib::spawn_future_local(async move {
 		let mailbox = win.mailbox.clone();
 		if scene != "login" {
@@ -100,23 +141,8 @@ pub fn drive(win: Rc<Window>) {
 		} else {
 			win.ctx.window.clone().upcast()
 		};
-		sleep(1200).await;
-		// Broadway draws only while a client watches; try until a frame has been drawn.
-		let mut result: std::result::Result<(), String> = Err(String::new());
-		for _ in 0..25 {
-			target.queue_draw();
-			sleep(200).await;
-			result = save(&target, &path);
-			if result.is_ok() {
-				break;
-			}
-		}
-		if let Err(e) = result {
-			eprintln!("tern: screenshot failed: {e}");
-		}
-		if let Some(app) = win.ctx.window.application() {
-			app.quit();
-		}
+		let app = win.ctx.window.application();
+		save_and_quit(&target, &path, app).await;
 	});
 }
 
