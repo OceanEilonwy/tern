@@ -34,13 +34,10 @@ use crate::entities::generated::sys::{
 	BucketKey, CreateSessionData, GroupInfo, SaltData,
 };
 use crate::entities::generated::tutanota::{
-	AttachmentKeyData, BodyTransferAggregatedType, DraftAttachment, DraftCreateData,
-	DraftCreateReturn, DraftData, FileTransferAggregatedType, InternalRecipientKeyData, Mail,
-	MailAddressTransferAggregatedType, MailDetails, MailDetailsBlob,
-	MailDetailsBlobTransferAggregatedType, MailDetailsTransferAggregatedType, MailSet,
-	MailSetEntry, MailTransferAggregatedType, NewDraftAttachment,
-	RecipientsTransferAggregatedType, SendDraftData, SendDraftParameters, SendDraftReturn,
-	TutanotaFile, ConversationEntry,
+	AttachmentKeyData, ConversationEntry, DraftAttachment, DraftCreateData, DraftCreateReturn,
+	DraftData, DraftRecipient, InternalRecipientKeyData, Mail, MailDetails, MailDetailsBlob,
+	MailDetailsDraft, MailSet, MailSetEntry, NewDraftAttachment, SendDraftData,
+	SendDraftParameters, SendDraftReturn, TutanotaFile,
 };
 use crate::entities::Entity;
 #[cfg_attr(test, mockall_double::double)]
@@ -439,9 +436,9 @@ impl TernMail {
 			let raw = self
 				.sdk
 				.entity_client
-				.load(&crate::entities::generated::tutanota::MailDetailsDraft::type_ref(), draft_id)
+				.load(&MailDetailsDraft::type_ref(), draft_id)
 				.await?;
-			self.decrypt_with::<crate::entities::generated::tutanota::MailDetailsDraft>(raw, mail_key.clone())?
+			self.decrypt_with::<MailDetailsDraft>(raw, mail_key.clone())?
 				.details
 		} else {
 			return Err(TernError::Other("mail has no body".into()));
@@ -601,7 +598,10 @@ impl TernMail {
 
 		let mail_key = GenericAesKey::Aes256(Aes256Key::generate(&self.randomizer));
 		let owner_enc_mail_key = group_key.object.encrypt_key(&mail_key, iv());
-		let mut keys: Vec<(Vec<u8>, GenericAesKey)> = vec![(owner_enc_mail_key.clone(), mail_key.clone())];
+		let encrypt_string = |key: &GenericAesKey, value: &str| {
+			key.encrypt_data(value.as_bytes(), iv())
+				.map_err(|e| TernError::Other(format!("cannot encrypt: {e}")))
+		};
 
 		// Upload the attachments, each under its own key.
 		let file_keys: Vec<GenericAesKey> = outgoing
@@ -628,38 +628,25 @@ impl TernMail {
 		};
 		let mut added_attachments = Vec::with_capacity(tokens.len());
 		for ((attachment, key), reference_tokens) in outgoing.attachments.iter().zip(&file_keys).zip(tokens) {
-			let owner_enc_file_key = group_key.object.encrypt_key(key, iv());
-			keys.push((owner_enc_file_key.clone(), key.clone()));
 			added_attachments.push(DraftAttachment {
 				_id: None,
-				ownerEncFileSessionKey: None,
-				ownerKeyVersion: None,
+				ownerEncFileSessionKey: group_key.object.encrypt_key(key, iv()),
+				ownerKeyVersion: group_key.version as i64,
 				existingFile: None,
 				newFile: Some(NewDraftAttachment {
 					_id: None,
-					encFileName: None,
-					encMimeType: None,
+					encFileName: encrypt_string(key, &attachment.name)?,
+					encMimeType: encrypt_string(key, &attachment.mime_type)?,
 					encCid: None,
 					referenceTokens: reference_tokens,
-					file: Some(FileTransferAggregatedType {
-						_id: None,
-						_ownerEncSessionKey: Some(owner_enc_file_key),
-						_ownerKeyVersion: Some(group_key.version as i64),
-						_kdfNonce: None,
-						name: attachment.name.clone(),
-						mimeType: Some(attachment.mime_type.clone()),
-						cid: None,
-						_errors: Default::default(),
-					}),
 				}),
 			});
 		}
 
-		let address = |r: &OutgoingRecipient| MailAddressTransferAggregatedType {
+		let recipient = |r: &OutgoingRecipient| DraftRecipient {
 			_id: None,
 			name: r.name.clone(),
-			address: r.address.clone(),
-			contact: None,
+			mailAddress: r.address.clone(),
 			_errors: Default::default(),
 		};
 		let (previous_message_id, conversation_type) = match &outgoing.previous {
@@ -670,68 +657,38 @@ impl TernMail {
 			_format: 0,
 			previousMessageId: previous_message_id,
 			conversationType: conversation_type,
-			ownerEncSessionKey: None,
-			ownerKeyVersion: None,
+			ownerEncSessionKey: owner_enc_mail_key,
+			ownerKeyVersion: group_key.version as i64,
 			draftData: DraftData {
 				_id: None,
-				subject: None,
-				bodyText: None,
-				senderMailAddress: None,
-				senderName: None,
-				confidential: None,
-				method: None,
-				compressedBodyText: None,
-				toRecipients: vec![],
-				ccRecipients: vec![],
-				bccRecipients: vec![],
+				subject: outgoing.subject.clone(),
+				bodyText: String::new(),
+				senderMailAddress: sender.mail_address.clone(),
+				senderName: sender.name.clone(),
+				confidential,
+				method: 0,
+				compressedBodyText: Some(outgoing.body_html.clone()),
+				toRecipients: outgoing.to.iter().map(recipient).collect(),
+				ccRecipients: outgoing.cc.iter().map(recipient).collect(),
+				bccRecipients: outgoing.bcc.iter().map(recipient).collect(),
 				addedAttachments: added_attachments,
 				removedAttachments: vec![],
 				replyTos: vec![],
-				mail: Some(MailTransferAggregatedType {
-					_id: None,
-					_ownerEncSessionKey: Some(owner_enc_mail_key.clone()),
-					_ownerKeyVersion: Some(group_key.version as i64),
-					_kdfNonce: None,
-					subject: outgoing.subject.clone(),
-					confidential,
-					method: 0,
-					sender: MailAddressTransferAggregatedType {
-						_id: None,
-						name: sender.name.clone(),
-						address: sender.mail_address.clone(),
-						contact: None,
-						_errors: Default::default(),
-					},
-					firstRecipient: all.first().map(|r| address(r)),
-					_errors: Default::default(),
-				}),
-				mailDetailsBlob: Some(MailDetailsBlobTransferAggregatedType {
-					_id: None,
-					_ownerEncSessionKey: Some(owner_enc_mail_key),
-					_ownerKeyVersion: Some(group_key.version as i64),
-					_kdfNonce: None,
-					details: MailDetailsTransferAggregatedType {
-						_id: None,
-						replyTos: vec![],
-						recipients: RecipientsTransferAggregatedType {
-							_id: None,
-							toRecipients: outgoing.to.iter().map(address).collect(),
-							ccRecipients: outgoing.cc.iter().map(address).collect(),
-							bccRecipients: outgoing.bcc.iter().map(address).collect(),
-						},
-						body: BodyTransferAggregatedType {
-							_id: None,
-							text: Some(String::new()),
-							compressedText: Some(outgoing.body_html.clone()),
-							_errors: Default::default(),
-						},
-					},
-				}),
 				_errors: Default::default(),
 			},
 			_errors: Default::default(),
 		};
-		let created: DraftCreateReturn = self.post_with_aggregate_keys::<DraftService, _, _>(draft, &keys).await?;
+		let created: DraftCreateReturn = self
+			.sdk
+			.get_service_executor()
+			.post::<DraftService>(
+				draft,
+				ExtraServiceParams {
+					session_key: Some(mail_key.clone()),
+					..Default::default()
+				},
+			)
+			.await?;
 
 		// Every attachment's key goes along, wrapped for the recipients.
 		let raw_draft = self.sdk.entity_client.load(&Mail::type_ref(), &created.draft).await?;
@@ -814,7 +771,16 @@ impl TernMail {
 				attachmentKeyData: attachment_key_data,
 			}),
 		};
-		self.post_with_aggregate_keys::<SendDraftService, _, _>(send, &[]).await
+		self.sdk
+			.get_service_executor()
+			.post::<SendDraftService>(send, ExtraServiceParams::default())
+			.await
+			.map_err(|e| match e {
+				ApiCallError::ServerResponseError {
+					source: source @ (HttpError::NotFoundError | HttpError::PreconditionFailedError(_)),
+				} => TernError::Other(format!("Tuta refused to send the mail ({source})")),
+				e => e.into(),
+			})
 	}
 
 	/// The Message-ID of the mail being answered, so the reply joins its conversation.
@@ -828,61 +794,6 @@ impl TernMail {
 			.await
 			.ok()?;
 		Some(entry.messageId)
-	}
-
-	/// Serializes `data`, encrypts each aggregate under the key its `_ownerEncSessionKey` maps to,
-	/// and posts it to service `S`.
-	async fn post_with_aggregate_keys<S, I, O>(&self, data: I, keys: &[(Vec<u8>, GenericAesKey)]) -> Result<O, TernError>
-	where
-		S: Service,
-		I: Entity + Serialize,
-		O: Entity + DeserializeOwned,
-	{
-		let type_ref = I::type_ref();
-		let parsed = self
-			.sdk
-			.instance_mapper
-			.serialize_entity(data)
-			.map_err(|e| TernError::Other(format!("cannot serialize {type_ref}: {e}")))?;
-		let type_model = self.sdk.entity_client.resolve_client_type_ref(&type_ref)?;
-		let encrypted = self.entity_facade.encrypt_and_map_with_aggregate_keys(type_model, &parsed, &|owner_enc| {
-			keys.iter().find(|(k, _)| k.as_slice() == owner_enc).map(|(_, key)| key.clone())
-		})?;
-		let raw = self.sdk.json_serializer.serialize(&type_ref, encrypted)?;
-		let body = serde_json::to_vec(&raw).map_err(|e| TernError::Other(e.to_string()))?;
-
-		let parts = self.parts();
-		let mut headers = parts.auth_headers_provider.provide_headers(S::VERSION);
-		headers.insert("Content-Type".to_owned(), "application/json".to_owned());
-		let response = parts
-			.rest_client
-			.request_binary(
-				format!("{}/rest/{}", parts.base_url, S::PATH),
-				HttpMethod::POST,
-				RestClientOptions {
-					headers,
-					body: Some(body),
-					suspension_behavior: None,
-				},
-			)
-			.await
-			.map_err(ApiCallError::from)?;
-		if !(200..300).contains(&response.status) {
-			let error = HttpError::from_http_response(response.status, &response.headers)?;
-			return Err(match error {
-				HttpError::NotFoundError | HttpError::PreconditionFailedError(_) if S::PATH.ends_with("senddraftservice") => {
-					TernError::Other(format!("Tuta refused to send the mail ({error})"))
-				},
-				other => ApiCallError::ServerResponseError { source: other }.into(),
-			});
-		}
-		let bytes = response.body.unwrap_or_default();
-		let raw = serde_json::from_slice(&bytes).map_err(|e| TernError::Other(format!("bad response: {e}")))?;
-		let parsed = self.sdk.json_serializer.parse(&O::type_ref(), raw)?;
-		self.sdk
-			.instance_mapper
-			.parse_entity::<O>(parsed)
-			.map_err(|e| TernError::Other(format!("bad response: {e}")))
 	}
 
 	/// For an instance carrying a bucket key (mail as received), decrypts the bucket key and returns
@@ -1204,10 +1115,10 @@ mod tests {
 		assert_eq!(to_base64_ext(b"Man"), "IL4i");
 	}
 
-	/// The draft request must carry the mail under the mail's key and each attachment's name under
-	/// the attachment's own key, or recipients cannot read the file names.
+	/// The draft request is encrypted with the mail's session key, except the attachment's name and
+	/// type, which go under the attachment's own key so recipients can read them.
 	#[test]
-	fn draft_parts_are_encrypted_under_their_own_keys() {
+	fn draft_request_encrypts_the_mail_and_leaves_attachment_names_to_their_key() {
 		use crate::instance_mapper::InstanceMapper;
 		use crate::util::test_utils::mock_type_model_provider;
 
@@ -1217,90 +1128,45 @@ mod tests {
 		let facade = EntityFacadeImpl::new(provider.clone(), random.clone());
 		let mail_key = GenericAesKey::Aes256(Aes256Key::generate(&random));
 		let file_key = GenericAesKey::Aes256(Aes256Key::generate(&random));
-		let address = MailAddressTransferAggregatedType {
-			_id: None,
-			name: "Ann".into(),
-			address: "ann@tuta.com".into(),
-			contact: None,
-			_errors: Default::default(),
-		};
+		let enc_name = file_key.encrypt_data(b"report.pdf", InitializationVector::generate(&random)).unwrap();
 		let draft = DraftCreateData {
 			_format: 0,
 			previousMessageId: None,
 			conversationType: CONVERSATION_NEW,
-			ownerEncSessionKey: None,
-			ownerKeyVersion: None,
+			ownerEncSessionKey: vec![1; 48],
+			ownerKeyVersion: 0,
 			draftData: DraftData {
 				_id: None,
-				subject: None,
-				bodyText: None,
-				senderMailAddress: None,
-				senderName: None,
-				confidential: None,
-				method: None,
-				compressedBodyText: None,
-				toRecipients: vec![],
+				subject: "Hello".into(),
+				bodyText: String::new(),
+				senderMailAddress: "me@tuta.com".into(),
+				senderName: "Me".into(),
+				confidential: true,
+				method: 0,
+				compressedBodyText: Some("<div>Hi</div>".into()),
+				toRecipients: vec![DraftRecipient {
+					_id: None,
+					name: "Ann".into(),
+					mailAddress: "ann@tuta.com".into(),
+					_errors: Default::default(),
+				}],
 				ccRecipients: vec![],
 				bccRecipients: vec![],
 				addedAttachments: vec![DraftAttachment {
 					_id: None,
-					ownerEncFileSessionKey: None,
-					ownerKeyVersion: None,
+					ownerEncFileSessionKey: vec![2; 48],
+					ownerKeyVersion: 0,
 					existingFile: None,
 					newFile: Some(NewDraftAttachment {
 						_id: None,
-						encFileName: None,
-						encMimeType: None,
+						encFileName: enc_name.clone(),
+						encMimeType: enc_name.clone(),
 						encCid: None,
 						referenceTokens: vec![],
-						file: Some(FileTransferAggregatedType {
-							_id: None,
-							_ownerEncSessionKey: Some(b"file".to_vec()),
-							_ownerKeyVersion: Some(0),
-							_kdfNonce: None,
-							name: "report.pdf".into(),
-							mimeType: Some("application/pdf".into()),
-							cid: None,
-							_errors: Default::default(),
-						}),
 					}),
 				}],
 				removedAttachments: vec![],
 				replyTos: vec![],
-				mail: Some(MailTransferAggregatedType {
-					_id: None,
-					_ownerEncSessionKey: Some(b"mail".to_vec()),
-					_ownerKeyVersion: Some(0),
-					_kdfNonce: None,
-					subject: "Hello".into(),
-					confidential: true,
-					method: 0,
-					sender: address.clone(),
-					firstRecipient: Some(address.clone()),
-					_errors: Default::default(),
-				}),
-				mailDetailsBlob: Some(MailDetailsBlobTransferAggregatedType {
-					_id: None,
-					_ownerEncSessionKey: Some(b"mail".to_vec()),
-					_ownerKeyVersion: Some(0),
-					_kdfNonce: None,
-					details: MailDetailsTransferAggregatedType {
-						_id: None,
-						replyTos: vec![],
-						recipients: RecipientsTransferAggregatedType {
-							_id: None,
-							toRecipients: vec![address],
-							ccRecipients: vec![],
-							bccRecipients: vec![],
-						},
-						body: BodyTransferAggregatedType {
-							_id: None,
-							text: Some(String::new()),
-							compressedText: Some("<div>Hi</div>".into()),
-							_errors: Default::default(),
-						},
-					},
-				}),
 				_errors: Default::default(),
 			},
 			_errors: Default::default(),
@@ -1308,12 +1174,7 @@ mod tests {
 
 		let parsed = mapper.serialize_entity(draft).unwrap();
 		let model = provider.resolve_client_type_ref(&DraftCreateData::type_ref()).unwrap();
-		let keys = [(b"mail".to_vec(), mail_key.clone()), (b"file".to_vec(), file_key.clone())];
-		let encrypted = facade
-			.encrypt_and_map_with_aggregate_keys(model, &parsed, &|k| {
-				keys.iter().find(|(o, _)| o.as_slice() == k).map(|(_, key)| key.clone())
-			})
-			.unwrap();
+		let encrypted = facade.encrypt_and_map(model, &parsed, &mail_key).unwrap();
 
 		let field = |entity: &ParsedEntity, type_ref: TypeRef, name: &str| -> ElementValue {
 			let model = provider.resolve_client_type_ref(&type_ref).unwrap();
@@ -1322,30 +1183,17 @@ mod tests {
 		let first = |value: ElementValue| value.assert_array()[0].assert_dict();
 		let decrypt = |key: &GenericAesKey, value: ElementValue| key.decrypt_data(value.assert_bytes());
 
-		let draft_data = first(field(&encrypted, DraftCreateData::type_ref(), "draftData"));
-		let mail = first(field(&draft_data, DraftData::type_ref(), "mail"));
-		let subject = field(&mail, MailTransferAggregatedType::type_ref(), "subject");
-		assert_eq!(decrypt(&mail_key, subject).unwrap(), b"Hello");
-
-		let attachment = first(field(&draft_data, DraftData::type_ref(), "addedAttachments"));
+		let data = first(field(&encrypted, DraftCreateData::type_ref(), "draftData"));
+		assert_eq!(decrypt(&mail_key, field(&data, DraftData::type_ref(), "subject")).unwrap(), b"Hello");
+		assert!(decrypt(&mail_key, field(&data, DraftData::type_ref(), "compressedBodyText")).is_ok());
+		assert_eq!(field(&data, DraftData::type_ref(), "senderMailAddress").assert_string(), "me@tuta.com");
+		let to = first(field(&data, DraftData::type_ref(), "toRecipients"));
+		assert_eq!(decrypt(&mail_key, field(&to, DraftRecipient::type_ref(), "name")).unwrap(), b"Ann");
+		let attachment = first(field(&data, DraftData::type_ref(), "addedAttachments"));
 		let new_file = first(field(&attachment, DraftAttachment::type_ref(), "newFile"));
-		let file = first(field(&new_file, NewDraftAttachment::type_ref(), "file"));
-		let name = field(&file, FileTransferAggregatedType::type_ref(), "name");
-		assert_eq!(decrypt(&file_key, name.clone()).unwrap(), b"report.pdf");
-		assert!(decrypt(&mail_key, name).is_err(), "the file name must not be under the mail key");
-
-		let blob = first(field(&draft_data, DraftData::type_ref(), "mailDetailsBlob"));
-		let details = first(field(&blob, MailDetailsBlobTransferAggregatedType::type_ref(), "details"));
-		let recipients = first(field(&details, MailDetailsTransferAggregatedType::type_ref(), "recipients"));
-		let to = first(field(&recipients, RecipientsTransferAggregatedType::type_ref(), "toRecipients"));
-		// Tuta routes on the address, so only the name is encrypted.
-		let to_name = field(&to, MailAddressTransferAggregatedType::type_ref(), "name");
-		assert_eq!(decrypt(&mail_key, to_name).unwrap(), b"Ann");
-		let to_address = field(&to, MailAddressTransferAggregatedType::type_ref(), "address");
-		assert_eq!(to_address.assert_string(), "ann@tuta.com");
-		let body = first(field(&details, MailDetailsTransferAggregatedType::type_ref(), "body"));
-		let compressed = field(&body, BodyTransferAggregatedType::type_ref(), "compressedText");
-		assert!(decrypt(&mail_key, compressed).is_ok());
+		let name = field(&new_file, NewDraftAttachment::type_ref(), "encFileName");
+		assert_eq!(name.assert_bytes(), &enc_name, "the file name is passed through, not re-encrypted");
+		assert_eq!(decrypt(&file_key, name).unwrap(), b"report.pdf");
 	}
 
 	#[test]

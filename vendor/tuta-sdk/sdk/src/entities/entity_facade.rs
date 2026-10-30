@@ -109,19 +109,6 @@ impl EntityFacadeImpl {
 		}
 	}
 
-	fn own_owner_enc_session_key<'a>(
-		type_model: &TypeModel,
-		instance: &'a ParsedEntity,
-	) -> Option<&'a [u8]> {
-		let id = type_model
-			.get_attribute_id_by_attribute_name(OWNER_ENC_SESSION_KEY_FIELD)
-			.ok()?;
-		match instance.get(&id) {
-			Some(ElementValue::Bytes(bytes)) if !bytes.is_empty() => Some(bytes.as_slice()),
-			_ => None,
-		}
-	}
-
 	fn map_value_to_binary(value_type: &ValueType, value: &ElementValue) -> Vec<u8> {
 		match value_type {
 			ValueType::Bytes => value.assert_bytes().clone(),
@@ -146,36 +133,12 @@ impl EntityFacadeImpl {
 		}
 	}
 
-	/// Encrypts like [EntityFacade::encrypt_and_map], except that an aggregate carrying its own
-	/// `_ownerEncSessionKey` is encrypted with the session key `keys` returns for it, as the
-	/// TypeScript client's "WithSessionKey" data transfer encryption does (e.g. the mail and each
-	/// attachment inside a DraftCreateData). Values outside any keyed aggregate must be unset.
-	pub fn encrypt_and_map_with_aggregate_keys(
-		&self,
-		type_model: &TypeModel,
-		instance: &ParsedEntity,
-		keys: &dyn Fn(&[u8]) -> Option<GenericAesKey>,
-	) -> Result<ParsedEntity, ApiCallError> {
-		self.encrypt_and_map_inner(type_model, instance, None, Some(keys))
-	}
-
 	fn encrypt_and_map_inner(
 		&self,
 		type_model: &TypeModel,
 		instance: &ParsedEntity,
-		sk: Option<&GenericAesKey>,
-		keys: Option<&dyn Fn(&[u8]) -> Option<GenericAesKey>>,
+		sk: &GenericAesKey,
 	) -> Result<ParsedEntity, ApiCallError> {
-		let own_key;
-		let sk = match (keys, Self::own_owner_enc_session_key(type_model, instance)) {
-			(Some(resolve), Some(owner_enc_session_key)) => {
-				own_key = resolve(owner_enc_session_key).ok_or_else(|| {
-					ApiCallError::internal(format!("no session key for aggregate {}", type_model.name))
-				})?;
-				Some(&own_key)
-			},
-			_ => sk,
-		};
 		let mut encrypted = ParsedEntity::new();
 
 		for (&value_id, value_type) in &type_model.values {
@@ -192,17 +155,7 @@ impl EntityFacadeImpl {
 			} else if instance_value.eq(&value_type.value_type.get_default()) {
 				// If the value is a default value and encrypted, we restore an empty string (default for encrypted fields)
 				ElementValue::String(String::new())
-			} else if <ElementValue as Encode<()>>::is_nil(instance_value)
-				&& value_type.cardinality == Cardinality::ZeroOrOne
-			{
-				instance_value.clone()
 			} else {
-				let sk = sk.ok_or_else(|| {
-					ApiCallError::internal(format!(
-						"no session key to encrypt {}.{}",
-						type_model.name, value_id_string
-					))
-				})?;
 				Self::encrypt_value(
 					value_type,
 					instance_value,
@@ -248,7 +201,6 @@ impl EntityFacadeImpl {
 					association_type,
 					instance,
 					sk,
-					keys,
 				)?,
 				AssociationType::ElementAssociation
 				| AssociationType::ListAssociation
@@ -274,8 +226,7 @@ impl EntityFacadeImpl {
 		association_id: &str,
 		association: &ModelAssociation,
 		instance: &ParsedEntity,
-		sk: Option<&GenericAesKey>,
-		keys: Option<&dyn Fn(&[u8]) -> Option<GenericAesKey>>,
+		sk: &GenericAesKey,
 	) -> Result<ElementValue, ApiCallError> {
 		let dependency_type_ref = TypeRef::new(
 			association.dependency.unwrap_or(type_model.app),
@@ -294,7 +245,7 @@ impl EntityFacadeImpl {
 		let mut encrypted_aggregates = Vec::with_capacity(aggregates.len());
 		for aggregate in &aggregates {
 			let parsed_entity =
-				self.encrypt_and_map_inner(aggregated_type_model, &aggregate.assert_dict(), sk, keys)?;
+				self.encrypt_and_map_inner(aggregated_type_model, &aggregate.assert_dict(), sk)?;
 			encrypted_aggregates.push(ElementValue::Dict(parsed_entity));
 		}
 
@@ -620,7 +571,7 @@ impl EntityFacade for EntityFacadeImpl {
 		instance: &ParsedEntity,
 		sk: &GenericAesKey,
 	) -> Result<ParsedEntity, ApiCallError> {
-		self.encrypt_and_map_inner(type_model, instance, Some(sk), None)
+		self.encrypt_and_map_inner(type_model, instance, sk)
 	}
 }
 
@@ -1297,7 +1248,7 @@ mod tests {
 		}
 
 		let encrypted_mail = entity_facade
-			.encrypt_and_map_inner(&mail_type_model, &raw_mail, Some(&sk), None)
+			.encrypt_and_map_inner(&mail_type_model, &raw_mail, &sk)
 			.unwrap();
 
 		// verify every data is preserved as is after decryption

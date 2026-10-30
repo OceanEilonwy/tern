@@ -10,7 +10,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"80": {
 				"final": true,
@@ -18,8 +17,7 @@
 				"id": 80,
 				"type": "CustomId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"81": {
 				"final": true,
@@ -27,8 +25,7 @@
 				"id": 81,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": true,
-				"transferredAttributeId": null
+				"encrypted": true
 			},
 			"82": {
 				"final": true,
@@ -36,8 +33,7 @@
 				"id": 82,
 				"type": "Date",
 				"cardinality": "One",
-				"encrypted": true,
-				"transferredAttributeId": null
+				"encrypted": true
 			},
 			"83": {
 				"final": true,
@@ -45,8 +41,7 @@
 				"id": 83,
 				"type": "String",
 				"cardinality": "ZeroOrOne",
-				"encrypted": true,
-				"transferredAttributeId": null
+				"encrypted": true
 			},
 			"84": {
 				"final": true,
@@ -54,8 +49,7 @@
 				"id": 84,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": true,
-				"transferredAttributeId": null
+				"encrypted": true
 			}
 		},
 		"associations": {}
@@ -71,7 +65,6 @@
 		"versioned": false,
 		"encrypted": true,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"87": {
 				"final": false,
@@ -79,8 +72,7 @@
 				"id": 87,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"88": {
 				"final": true,
@@ -88,8 +80,7 @@
 				"id": 88,
 				"type": "GeneratedId",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"89": {
 				"final": true,
@@ -97,8 +88,7 @@
 				"id": 89,
 				"type": "Bytes",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"92": {
 				"final": false,
@@ -106,8 +96,7 @@
 				"id": 92,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"94": {
 				"final": true,
@@ -115,8 +104,7 @@
 				"id": 94,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": true,
-				"transferredAttributeId": null
+				"encrypted": true
 			},
 			"96": {
 				"final": true,
@@ -124,8 +112,7 @@
 				"id": 96,
 				"type": "Number",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -136,8 +123,7 @@
 				"type": "AGGREGATION",
 				"cardinality": "Any",
 				"refTypeId": 79,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	}

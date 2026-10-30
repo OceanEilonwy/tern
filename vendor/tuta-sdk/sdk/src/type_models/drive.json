@@ -2,7 +2,7 @@
 	"0": {
 		"name": "DriveFolder",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "LIST_ELEMENT_TYPE",
 		"id": 0,
@@ -10,7 +10,6 @@
 		"versioned": false,
 		"encrypted": true,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"2": {
 				"final": true,
@@ -18,8 +17,7 @@
 				"id": 2,
 				"type": "GeneratedId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"3": {
 				"final": true,
@@ -27,8 +25,7 @@
 				"id": 3,
 				"type": "GeneratedId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"4": {
 				"final": false,
@@ -36,8 +33,7 @@
 				"id": 4,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"5": {
 				"final": true,
@@ -45,8 +41,7 @@
 				"id": 5,
 				"type": "GeneratedId",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"6": {
 				"final": true,
@@ -54,8 +49,7 @@
 				"id": 6,
 				"type": "Bytes",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"7": {
 				"final": true,
@@ -63,8 +57,7 @@
 				"id": 7,
 				"type": "Number",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"8": {
 				"final": true,
@@ -72,8 +65,7 @@
 				"id": 8,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"9": {
 				"final": true,
@@ -81,8 +73,7 @@
 				"id": 9,
 				"type": "String",
 				"cardinality": "One",
-				"encrypted": true,
-				"transferredAttributeId": null
+				"encrypted": true
 			},
 			"10": {
 				"final": true,
@@ -90,8 +81,7 @@
 				"id": 10,
 				"type": "Date",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"11": {
 				"final": true,
@@ -99,8 +89,7 @@
 				"id": 11,
 				"type": "Date",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"121": {
 				"final": true,
@@ -108,8 +97,7 @@
 				"id": 121,
 				"type": "Bytes",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -120,8 +108,7 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "ZeroOrOne",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"13": {
 				"final": true,
@@ -130,8 +117,7 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "ZeroOrOne",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"38": {
 				"final": true,
@@ -140,15 +126,14 @@
 				"type": "LIST_ASSOCIATION",
 				"cardinality": "One",
 				"refTypeId": 30,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"14": {
 		"name": "DriveFile",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "LIST_ELEMENT_TYPE",
 		"id": 14,
@@ -156,7 +141,6 @@
 		"versioned": false,
 		"encrypted": true,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"16": {
 				"final": true,
@@ -164,8 +148,7 @@
 				"id": 16,
 				"type": "GeneratedId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"17": {
 				"final": true,
@@ -173,8 +156,7 @@
 				"id": 17,
 				"type": "GeneratedId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"18": {
 				"final": false,
@@ -182,8 +164,7 @@
 				"id": 18,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"19": {
 				"final": true,
@@ -191,8 +172,7 @@
 				"id": 19,
 				"type": "GeneratedId",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"20": {
 				"final": true,
@@ -200,8 +180,7 @@
 				"id": 20,
 				"type": "Bytes",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"21": {
 				"final": true,
@@ -209,8 +188,7 @@
 				"id": 21,
 				"type": "Number",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"22": {
 				"final": true,
@@ -218,8 +196,7 @@
 				"id": 22,
 				"type": "String",
 				"cardinality": "One",
-				"encrypted": true,
-				"transferredAttributeId": null
+				"encrypted": true
 			},
 			"23": {
 				"final": true,
@@ -227,8 +204,7 @@
 				"id": 23,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"24": {
 				"final": true,
@@ -236,8 +212,7 @@
 				"id": 24,
 				"type": "String",
 				"cardinality": "One",
-				"encrypted": true,
-				"transferredAttributeId": null
+				"encrypted": true
 			},
 			"25": {
 				"final": true,
@@ -245,8 +220,7 @@
 				"id": 25,
 				"type": "Date",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"26": {
 				"final": true,
@@ -254,8 +228,7 @@
 				"id": 26,
 				"type": "Date",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"122": {
 				"final": true,
@@ -263,8 +236,7 @@
 				"id": 122,
 				"type": "Bytes",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -275,8 +247,7 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "One",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"28": {
 				"final": true,
@@ -285,8 +256,7 @@
 				"type": "AGGREGATION",
 				"cardinality": "Any",
 				"refTypeId": 1882,
-				"dependency": "sys",
-				"transferredAttributeId": null
+				"dependency": "sys"
 			},
 			"29": {
 				"final": true,
@@ -295,15 +265,14 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "ZeroOrOne",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"30": {
 		"name": "DriveFileRef",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "LIST_ELEMENT_TYPE",
 		"id": 30,
@@ -311,7 +280,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"32": {
 				"final": true,
@@ -319,8 +287,7 @@
 				"id": 32,
 				"type": "GeneratedId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"33": {
 				"final": true,
@@ -328,8 +295,7 @@
 				"id": 33,
 				"type": "GeneratedId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"34": {
 				"final": false,
@@ -337,8 +303,7 @@
 				"id": 34,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"35": {
 				"final": true,
@@ -346,8 +311,7 @@
 				"id": 35,
 				"type": "GeneratedId",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -358,8 +322,7 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "ZeroOrOne",
 				"refTypeId": 14,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"37": {
 				"final": true,
@@ -368,15 +331,14 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "ZeroOrOne",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"39": {
 		"name": "DriveFileBag",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "AGGREGATED_TYPE",
 		"id": 39,
@@ -384,7 +346,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"40": {
 				"final": true,
@@ -392,8 +353,7 @@
 				"id": 40,
 				"type": "CustomId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -404,15 +364,14 @@
 				"type": "LIST_ASSOCIATION",
 				"cardinality": "One",
 				"refTypeId": 14,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"42": {
 		"name": "DriveFolderBag",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "AGGREGATED_TYPE",
 		"id": 42,
@@ -420,7 +379,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"43": {
 				"final": true,
@@ -428,8 +386,7 @@
 				"id": 43,
 				"type": "CustomId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -440,15 +397,14 @@
 				"type": "LIST_ASSOCIATION",
 				"cardinality": "One",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"45": {
 		"name": "DriveGroupRoot",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "ELEMENT_TYPE",
 		"id": 45,
@@ -456,7 +412,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"47": {
 				"final": true,
@@ -464,8 +419,7 @@
 				"id": 47,
 				"type": "GeneratedId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"48": {
 				"final": true,
@@ -473,8 +427,7 @@
 				"id": 48,
 				"type": "GeneratedId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"49": {
 				"final": false,
@@ -482,8 +435,7 @@
 				"id": 49,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"50": {
 				"final": true,
@@ -491,8 +443,7 @@
 				"id": 50,
 				"type": "GeneratedId",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -503,8 +454,7 @@
 				"type": "AGGREGATION",
 				"cardinality": "Any",
 				"refTypeId": 39,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"52": {
 				"final": false,
@@ -513,8 +463,7 @@
 				"type": "AGGREGATION",
 				"cardinality": "Any",
 				"refTypeId": 42,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"53": {
 				"final": false,
@@ -523,8 +472,7 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "One",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"54": {
 				"final": false,
@@ -533,15 +481,14 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "One",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"55": {
 		"name": "DriveUploadedFile",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "AGGREGATED_TYPE",
 		"id": 55,
@@ -549,7 +496,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"56": {
 				"final": true,
@@ -557,44 +503,39 @@
 				"id": 56,
 				"type": "CustomId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"57": {
 				"final": true,
 				"name": "fileName",
 				"id": 57,
 				"type": "String",
-				"cardinality": "ZeroOrOne",
-				"encrypted": true,
-				"transferredAttributeId": null
+				"cardinality": "One",
+				"encrypted": true
 			},
 			"58": {
 				"final": true,
 				"name": "mimeType",
 				"id": 58,
 				"type": "String",
-				"cardinality": "ZeroOrOne",
-				"encrypted": true,
-				"transferredAttributeId": null
+				"cardinality": "One",
+				"encrypted": true
 			},
 			"59": {
 				"final": true,
 				"name": "ownerEncSessionKey",
 				"id": 59,
 				"type": "Bytes",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"cardinality": "One",
+				"encrypted": false
 			},
 			"112": {
 				"final": false,
 				"name": "ownerKeyVersion",
 				"id": 112,
 				"type": "Number",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"cardinality": "One",
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -605,25 +546,14 @@
 				"type": "AGGREGATION",
 				"cardinality": "Any",
 				"refTypeId": 1990,
-				"dependency": "sys",
-				"transferredAttributeId": null
-			},
-			"149": {
-				"final": true,
-				"name": "file",
-				"id": 149,
-				"type": "AGGREGATION",
-				"cardinality": "ZeroOrOne",
-				"refTypeId": 136,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": "sys"
 			}
 		}
 	},
 	"61": {
 		"name": "DrivePostIn",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "DATA_TRANSFER_TYPE",
 		"id": 61,
@@ -631,7 +561,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"62": {
 				"final": false,
@@ -639,8 +568,7 @@
 				"id": 62,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"64": {
 				"final": true,
@@ -648,8 +576,7 @@
 				"id": 64,
 				"type": "Bytes",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"65": {
 				"final": true,
@@ -657,8 +584,7 @@
 				"id": 65,
 				"type": "Bytes",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"113": {
 				"final": false,
@@ -666,8 +592,7 @@
 				"id": 113,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -678,15 +603,14 @@
 				"type": "ELEMENT_ASSOCIATION",
 				"cardinality": "One",
 				"refTypeId": 5,
-				"dependency": "sys",
-				"transferredAttributeId": null
+				"dependency": "sys"
 			}
 		}
 	},
 	"67": {
 		"name": "DriveItemPostIn",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "DATA_TRANSFER_TYPE",
 		"id": 67,
@@ -694,7 +618,6 @@
 		"versioned": false,
 		"encrypted": true,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"68": {
 				"final": false,
@@ -702,8 +625,7 @@
 				"id": 68,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -714,8 +636,7 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "One",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"70": {
 				"final": true,
@@ -724,15 +645,14 @@
 				"type": "AGGREGATION",
 				"cardinality": "One",
 				"refTypeId": 55,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"71": {
 		"name": "DriveItemPostOut",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "DATA_TRANSFER_TYPE",
 		"id": 71,
@@ -740,7 +660,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"72": {
 				"final": false,
@@ -748,8 +667,7 @@
 				"id": 72,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -760,15 +678,14 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "One",
 				"refTypeId": 14,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"74": {
 		"name": "DriveItemPutIn",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "DATA_TRANSFER_TYPE",
 		"id": 74,
@@ -776,7 +693,6 @@
 		"versioned": false,
 		"encrypted": true,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"75": {
 				"final": false,
@@ -784,17 +700,15 @@
 				"id": 75,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"76": {
 				"final": true,
 				"name": "newName",
 				"id": 76,
 				"type": "String",
-				"cardinality": "ZeroOrOne",
-				"encrypted": true,
-				"transferredAttributeId": null
+				"cardinality": "One",
+				"encrypted": true
 			}
 		},
 		"associations": {
@@ -805,8 +719,7 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "ZeroOrOne",
 				"refTypeId": 14,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"78": {
 				"final": true,
@@ -815,35 +728,14 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "ZeroOrOne",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
-			},
-			"150": {
-				"final": true,
-				"name": "fileWithNewName",
-				"id": 150,
-				"type": "AGGREGATION",
-				"cardinality": "ZeroOrOne",
-				"refTypeId": 143,
-				"dependency": null,
-				"transferredAttributeId": null
-			},
-			"151": {
-				"final": true,
-				"name": "folderWithNewName",
-				"id": 151,
-				"type": "AGGREGATION",
-				"cardinality": "ZeroOrOne",
-				"refTypeId": 130,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"79": {
 		"name": "DriveItemDeleteIn",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "DATA_TRANSFER_TYPE",
 		"id": 79,
@@ -851,7 +743,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"80": {
 				"final": false,
@@ -859,8 +750,7 @@
 				"id": 80,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -871,8 +761,7 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "Any",
 				"refTypeId": 14,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"82": {
 				"final": false,
@@ -881,15 +770,14 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "Any",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"84": {
 		"name": "DriveFolderServicePostIn",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "DATA_TRANSFER_TYPE",
 		"id": 84,
@@ -897,7 +785,6 @@
 		"versioned": false,
 		"encrypted": true,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"85": {
 				"final": false,
@@ -905,35 +792,31 @@
 				"id": 85,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"86": {
 				"final": true,
 				"name": "folderName",
 				"id": 86,
 				"type": "String",
-				"cardinality": "ZeroOrOne",
-				"encrypted": true,
-				"transferredAttributeId": null
+				"cardinality": "One",
+				"encrypted": true
 			},
 			"87": {
 				"final": true,
 				"name": "ownerEncSessionKey",
 				"id": 87,
 				"type": "Bytes",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"cardinality": "One",
+				"encrypted": false
 			},
 			"114": {
 				"final": false,
 				"name": "ownerKeyVersion",
 				"id": 114,
 				"type": "Number",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"cardinality": "One",
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -942,27 +825,16 @@
 				"name": "parent",
 				"id": 88,
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
-				"cardinality": "ZeroOrOne",
+				"cardinality": "One",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
-			},
-			"152": {
-				"final": true,
-				"name": "folder",
-				"id": 152,
-				"type": "AGGREGATION",
-				"cardinality": "ZeroOrOne",
-				"refTypeId": 123,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"89": {
 		"name": "DriveFolderServicePostOut",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "DATA_TRANSFER_TYPE",
 		"id": 89,
@@ -970,7 +842,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"90": {
 				"final": false,
@@ -978,8 +849,7 @@
 				"id": 90,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -990,15 +860,14 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "One",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"92": {
 		"name": "DriveRenameData",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "AGGREGATED_TYPE",
 		"id": 92,
@@ -1006,7 +875,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"93": {
 				"final": true,
@@ -1014,8 +882,7 @@
 				"id": 93,
 				"type": "CustomId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"94": {
 				"final": true,
@@ -1023,8 +890,7 @@
 				"id": 94,
 				"type": "Bytes",
 				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -1035,8 +901,7 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "ZeroOrOne",
 				"refTypeId": 14,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"96": {
 				"final": true,
@@ -1045,15 +910,14 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "ZeroOrOne",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"97": {
 		"name": "DriveFolderServicePutIn",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "DATA_TRANSFER_TYPE",
 		"id": 97,
@@ -1061,7 +925,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"98": {
 				"final": false,
@@ -1069,8 +932,7 @@
 				"id": 98,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -1081,8 +943,7 @@
 				"type": "AGGREGATION",
 				"cardinality": "Any",
 				"refTypeId": 92,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"100": {
 				"final": true,
@@ -1091,15 +952,14 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "One",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"101": {
 		"name": "DriveFolderServiceDeleteIn",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "DATA_TRANSFER_TYPE",
 		"id": 101,
@@ -1107,7 +967,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"102": {
 				"final": false,
@@ -1115,8 +974,7 @@
 				"id": 102,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"105": {
 				"final": false,
@@ -1124,8 +982,7 @@
 				"id": 105,
 				"type": "Boolean",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -1136,8 +993,7 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "Any",
 				"refTypeId": 14,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"104": {
 				"final": true,
@@ -1146,15 +1002,14 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "Any",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"107": {
 		"name": "DriveCopyServicePostIn",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 1,
 		"type": "DATA_TRANSFER_TYPE",
 		"id": 107,
@@ -1162,7 +1017,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"108": {
 				"final": false,
@@ -1170,8 +1024,7 @@
 				"id": 108,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {
@@ -1182,8 +1035,7 @@
 				"type": "AGGREGATION",
 				"cardinality": "Any",
 				"refTypeId": 92,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			},
 			"110": {
 				"final": false,
@@ -1192,15 +1044,14 @@
 				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
 				"cardinality": "One",
 				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": null
+				"dependency": null
 			}
 		}
 	},
 	"115": {
 		"name": "DriveCopyServicePostOut",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 3,
 		"type": "DATA_TRANSFER_TYPE",
 		"id": 115,
@@ -1208,7 +1059,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"116": {
 				"final": false,
@@ -1216,8 +1066,7 @@
 				"id": 116,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"117": {
 				"final": false,
@@ -1225,8 +1074,7 @@
 				"id": 117,
 				"type": "GeneratedId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			}
 		},
 		"associations": {}
@@ -1234,7 +1082,7 @@
 	"118": {
 		"name": "DriveItemServiceDeleteOut",
 		"app": "drive",
-		"version": 5,
+		"version": 4,
 		"since": 3,
 		"type": "DATA_TRANSFER_TYPE",
 		"id": 118,
@@ -1242,7 +1090,6 @@
 		"versioned": false,
 		"encrypted": false,
 		"isPublic": true,
-		"targetTypeId": null,
 		"values": {
 			"119": {
 				"final": false,
@@ -1250,8 +1097,7 @@
 				"id": 119,
 				"type": "Number",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
+				"encrypted": false
 			},
 			"120": {
 				"final": false,
@@ -1259,272 +1105,7 @@
 				"id": 120,
 				"type": "GeneratedId",
 				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
-			}
-		},
-		"associations": {}
-	},
-	"123": {
-		"name": "DriveFolderTransferAggregatedType",
-		"app": "drive",
-		"version": 5,
-		"since": 5,
-		"type": "AGGREGATED_TYPE",
-		"id": 123,
-		"rootId": "BWRyaXZlAHs",
-		"versioned": false,
-		"encrypted": false,
-		"isPublic": true,
-		"targetTypeId": 0,
-		"values": {
-			"124": {
-				"final": true,
-				"name": "_id",
-				"id": 124,
-				"type": "CustomId",
-				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
-			},
-			"125": {
-				"final": true,
-				"name": "_ownerEncSessionKey",
-				"id": 125,
-				"type": "Bytes",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": 6
-			},
-			"126": {
-				"final": true,
-				"name": "_ownerKeyVersion",
-				"id": 126,
-				"type": "Number",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": 7
-			},
-			"127": {
-				"final": true,
-				"name": "_kdfNonce",
-				"id": 127,
-				"type": "Bytes",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": 121
-			},
-			"128": {
-				"final": true,
-				"name": "name",
-				"id": 128,
-				"type": "String",
-				"cardinality": "One",
-				"encrypted": true,
-				"transferredAttributeId": 9
-			}
-		},
-		"associations": {
-			"129": {
-				"final": true,
-				"name": "parent",
-				"id": 129,
-				"type": "LIST_ELEMENT_ASSOCIATION_GENERATED",
-				"cardinality": "ZeroOrOne",
-				"refTypeId": 0,
-				"dependency": null,
-				"transferredAttributeId": 12
-			}
-		}
-	},
-	"130": {
-		"name": "DriveFolderNameTransferAggregatedType",
-		"app": "drive",
-		"version": 5,
-		"since": 5,
-		"type": "AGGREGATED_TYPE",
-		"id": 130,
-		"rootId": "BWRyaXZlAACC",
-		"versioned": false,
-		"encrypted": false,
-		"isPublic": true,
-		"targetTypeId": 0,
-		"values": {
-			"131": {
-				"final": true,
-				"name": "_id",
-				"id": 131,
-				"type": "CustomId",
-				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
-			},
-			"132": {
-				"final": true,
-				"name": "_ownerEncSessionKey",
-				"id": 132,
-				"type": "Bytes",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": 6
-			},
-			"133": {
-				"final": true,
-				"name": "_ownerKeyVersion",
-				"id": 133,
-				"type": "Number",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": 7
-			},
-			"134": {
-				"final": true,
-				"name": "_kdfNonce",
-				"id": 134,
-				"type": "Bytes",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": 121
-			},
-			"135": {
-				"final": true,
-				"name": "name",
-				"id": 135,
-				"type": "String",
-				"cardinality": "One",
-				"encrypted": true,
-				"transferredAttributeId": 9
-			}
-		},
-		"associations": {}
-	},
-	"136": {
-		"name": "DriveFileTransferAggregatedType",
-		"app": "drive",
-		"version": 5,
-		"since": 5,
-		"type": "AGGREGATED_TYPE",
-		"id": 136,
-		"rootId": "BWRyaXZlAACI",
-		"versioned": false,
-		"encrypted": false,
-		"isPublic": true,
-		"targetTypeId": 14,
-		"values": {
-			"137": {
-				"final": true,
-				"name": "_id",
-				"id": 137,
-				"type": "CustomId",
-				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
-			},
-			"138": {
-				"final": true,
-				"name": "_ownerEncSessionKey",
-				"id": 138,
-				"type": "Bytes",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": 20
-			},
-			"139": {
-				"final": true,
-				"name": "_ownerKeyVersion",
-				"id": 139,
-				"type": "Number",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": 21
-			},
-			"140": {
-				"final": true,
-				"name": "_kdfNonce",
-				"id": 140,
-				"type": "Bytes",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": 122
-			},
-			"141": {
-				"final": true,
-				"name": "name",
-				"id": 141,
-				"type": "String",
-				"cardinality": "One",
-				"encrypted": true,
-				"transferredAttributeId": 22
-			},
-			"142": {
-				"final": true,
-				"name": "mimeType",
-				"id": 142,
-				"type": "String",
-				"cardinality": "One",
-				"encrypted": true,
-				"transferredAttributeId": 24
-			}
-		},
-		"associations": {}
-	},
-	"143": {
-		"name": "DriveFileNameTransferAggregatedType",
-		"app": "drive",
-		"version": 5,
-		"since": 5,
-		"type": "AGGREGATED_TYPE",
-		"id": 143,
-		"rootId": "BWRyaXZlAACP",
-		"versioned": false,
-		"encrypted": false,
-		"isPublic": true,
-		"targetTypeId": 14,
-		"values": {
-			"144": {
-				"final": true,
-				"name": "_id",
-				"id": 144,
-				"type": "CustomId",
-				"cardinality": "One",
-				"encrypted": false,
-				"transferredAttributeId": null
-			},
-			"145": {
-				"final": true,
-				"name": "_ownerEncSessionKey",
-				"id": 145,
-				"type": "Bytes",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": 20
-			},
-			"146": {
-				"final": true,
-				"name": "_ownerKeyVersion",
-				"id": 146,
-				"type": "Number",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": 21
-			},
-			"147": {
-				"final": true,
-				"name": "_kdfNonce",
-				"id": 147,
-				"type": "Bytes",
-				"cardinality": "ZeroOrOne",
-				"encrypted": false,
-				"transferredAttributeId": 122
-			},
-			"148": {
-				"final": true,
-				"name": "name",
-				"id": 148,
-				"type": "String",
-				"cardinality": "One",
-				"encrypted": true,
-				"transferredAttributeId": 22
+				"encrypted": false
 			}
 		},
 		"associations": {}
