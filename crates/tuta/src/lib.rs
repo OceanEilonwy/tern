@@ -117,6 +117,13 @@ impl RestClient for TimedRestClient {
 		let ms = started.elapsed().as_millis();
 		if self.log {
 			match &result {
+				Ok(Ok(response)) if response.status >= 400 => {
+					// Error answers carry no tokens; their headers may say why.
+					let mut headers: Vec<_> = response.headers.iter().filter(|(k, _)| !k.contains("cookie")).collect();
+					headers.sort();
+					let body = response.body.as_deref().map(|b| String::from_utf8_lossy(&b[..b.len().min(300)]).into_owned());
+					eprintln!("tern: {what} -> {} ({ms} ms) headers {headers:?} body {body:?}", response.status);
+				},
 				Ok(Ok(response)) => eprintln!("tern: {what} -> {} ({ms} ms)", response.status),
 				Ok(Err(e)) => eprintln!("tern: {what} -> {e:?} ({ms} ms)"),
 				Err(_) => eprintln!("tern: {what} -> timed out ({ms} ms)"),
