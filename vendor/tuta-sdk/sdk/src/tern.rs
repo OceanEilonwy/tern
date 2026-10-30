@@ -290,7 +290,7 @@ pub struct OpenedMail {
 
 /// One row of a folder page.
 pub enum PageItem {
-	Mail(Mail),
+	Mail(Box<Mail>),
 	/// A mail Tern cannot decrypt, e.g. from a password-protected external mailbox.
 	Unreadable { id: IdTupleGenerated, received_ms: u64 },
 }
@@ -413,7 +413,7 @@ impl TernMail {
 					let received = received_ms(&mail_model, &raw);
 					// A mail we cannot decrypt still gets a row, rather than vanishing or failing the folder.
 					let item = match self.decrypt::<Mail>(raw, None).await {
-						Ok(mail) => PageItem::Mail(mail),
+						Ok(mail) => PageItem::Mail(Box::new(mail)),
 						Err(e) => {
 							log::warn!("mail {element} does not decrypt: {e}");
 							PageItem::Unreadable {
