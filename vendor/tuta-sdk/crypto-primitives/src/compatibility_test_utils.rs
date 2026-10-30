@@ -293,6 +293,6 @@ impl Base64 {
 
 pub fn get_compatibility_test_data() -> CompatibilityTestData {
 	let data_json =
-		include_str!("../../../../test/tests/api/worker/crypto/CompatibilityTestData.json");
+		include_str!("../../testdata/CompatibilityTestData.json");
 	serde_json::from_str(data_json).unwrap()
 }
