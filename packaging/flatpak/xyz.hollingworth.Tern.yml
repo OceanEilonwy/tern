@@ -1,0 +1,40 @@
+# Tern as a Flatpak, for any distribution: `flatpak-builder --user --install build packaging/flatpak/xyz.hollingworth.Tern.yml`.
+# The GNOME 50 runtime brings GTK 4.22 and libadwaita 1.9, which Tern needs. Cargo fetches crates
+# during the build (network allowed), which suits a downloadable bundle; Flathub would need the
+# crates listed as sources instead.
+id: xyz.hollingworth.Tern
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: tern
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  build-args:
+    - --share=network
+  env:
+    CARGO_HOME: /run/build/tern/cargo
+    CARGO_NET_GIT_FETCH_WITH_CLI: 'false'
+modules:
+  - name: tern
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked -p tern
+      - install -Dm755 target/release/tern /app/bin/tern
+      - install -Dm644 data/xyz.hollingworth.Tern.desktop /app/share/applications/xyz.hollingworth.Tern.desktop
+      - install -Dm644 data/icons/xyz.hollingworth.Tern.svg /app/share/icons/hicolor/scalable/apps/xyz.hollingworth.Tern.svg
+      - install -Dm644 data/xyz.hollingworth.Tern.metainfo.xml /app/share/metainfo/xyz.hollingworth.Tern.metainfo.xml
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .flatpak-builder
+          - build

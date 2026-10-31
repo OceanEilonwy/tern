@@ -4,6 +4,9 @@
 //! It is a cache: anything here can be fetched again, so a database that does not open with the key
 //! or has an older layout is thrown away and started afresh.
 
+// async_trait marks the boxed futures it returns #[must_use], which clippy on stable Rust 1.99 calls doubled.
+#![allow(clippy::double_must_use)]
+
 pub mod embed;
 pub mod search;
 mod storage;

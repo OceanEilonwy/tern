@@ -1,5 +1,8 @@
 //! Tern, a small GNOME mail client for Tuta.
 
+// async_trait marks the boxed futures it returns #[must_use], which clippy on stable Rust 1.99 calls doubled.
+#![allow(clippy::double_must_use)]
+
 mod activity;
 mod attachments;
 mod background;

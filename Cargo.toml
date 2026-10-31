@@ -56,6 +56,8 @@ unnecessary_lazy_evaluations = "allow"
 unnecessary_unwrap = "allow"
 useless_conversion = "allow"
 zero_prefixed_literal = "allow"
+# async_trait marks the boxed futures it returns #[must_use], which clippy on Rust 1.99 calls doubled.
+double_must_use = "allow"
 enum_variant_names = "allow"
 let_and_return = "allow"
 too_many_arguments = "allow"

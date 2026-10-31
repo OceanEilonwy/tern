@@ -467,3 +467,30 @@ Built to the "Cache cleanup" boards on the design canvas.
   stored text's length plus free pages, so they are approximate.
 - The dialog is an AdwAlertDialog. It is narrower than the mockup, as AlertDialog sets its own
   width.
+
+## Downloads for Linux (2026-10-31)
+
+- **Two downloads per build, x86_64:** a Flatpak bundle for any distribution, and a tarball with
+  `install.sh` for up-to-date ones. Both put Tern in the applications menu with its icon.
+- **Linux Mint gets the Flatpak.** Mint 22 is Ubuntu 24.04 underneath, with GTK 4.14 and libadwaita
+  1.5; Tern needs GTK 4.22 and libadwaita 1.9, so a plain binary cannot run there. The GNOME 50
+  runtime brings both.
+- **The tarball is built on Void.** Void has GTK 4.22 and libadwaita 1.9 but glibc 2.41, older than
+  Arch's, so a binary built there runs on Void and on CachyOS or Arch; one built on Arch would not run
+  on Void. Checked: all its libraries resolve on Void, and installed with `install.sh` it runs the
+  window scenes on CachyOS.
+- `install.sh` installs into `~/.local` (or `PREFIX`) and writes the menu entry with the program's full
+  path, since `~/.local/bin` is not on every desktop's path. `--uninstall` removes it and leaves mail
+  and settings.
+- **The Flatpak sandbox** has network, Wayland (X11 as fallback) and the GPU only. Files are opened,
+  saved and attached through portals; the keyring comes through the Secret portal (oo7 does this by
+  itself), and without one Tern keeps no cache on disk, as before. Cargo fetches crates during the
+  Flatpak build, which is fine for a bundle; Flathub would want them listed as sources, a later step.
+- **No AppImage, .deb or .rpm**: GTK 4 and libadwaita AppImages theme badly, and Debian and Ubuntu do
+  not ship the GTK Tern needs. Not built yet: aarch64, Void's musl variant, an AUR package, a Void
+  template, a Flathub listing.
+- **Releases**: every push to main replaces the `latest-main` pre-release; a `v*` tag makes a release.
+- **CI runs on Arch** in a container, with kwin_wayland's virtual display for the window scenes, as
+  locally; under GTK's Broadway display the panes scene sizes differently. Clippy on stable 1.99 calls
+  async_trait's generated `#[must_use]` doubled, so that lint is allowed in each crate. kwin_wayland's
+  file capability is removed in the container, which otherwise refuses to start it.
