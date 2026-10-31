@@ -3,6 +3,7 @@
 mod activity;
 mod attachments;
 mod background;
+mod cleanup;
 mod compose_model;
 mod composer;
 mod fetcher;

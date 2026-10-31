@@ -79,6 +79,16 @@ pub fn forget(cache: Option<&Cache>) {
 	}
 }
 
+/// Bytes the downloaded model takes on disk; 0 when it is not there.
+pub fn model_bytes() -> u64 {
+	FILES.iter().filter_map(|(name, _)| std::fs::metadata(dir().join(name)).ok()).map(|m| m.len()).sum()
+}
+
+/// Deletes the downloaded model; turning search by meaning on fetches it again.
+pub fn remove_model() {
+	let _ = std::fs::remove_dir_all(dir());
+}
+
 /// Works out the meaning of the mails that lack it, off the UI thread. Returns how many.
 pub async fn index(cache: Arc<Cache>) -> Result<usize, Error> {
 	let model = ensure().await?;

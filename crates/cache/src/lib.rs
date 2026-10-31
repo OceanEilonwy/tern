@@ -6,10 +6,11 @@
 
 pub mod embed;
 pub mod search;
+mod storage;
 pub mod policy;
 pub mod sync;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::types::Value;
@@ -142,6 +143,8 @@ pub enum Met {
 
 pub struct Cache {
 	conn: Mutex<Connection>,
+	/// The database file, or None for a cache in memory.
+	path: Option<PathBuf>,
 }
 
 /// The thread a mail belongs to: by subject, or alone when it has none.
@@ -202,7 +205,7 @@ impl Cache {
 		// Fails here when the key is wrong.
 		conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
 		conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
-		Self::prepare(conn)
+		Ok(Cache { path: Some(path.to_path_buf()), ..Self::prepare(conn)? })
 	}
 
 	/// A cache in memory only, for the demo account and tests.
@@ -237,8 +240,10 @@ impl Cache {
 		conn.execute_batch("CREATE TABLE IF NOT EXISTS draft_quotes (list TEXT NOT NULL, element TEXT NOT NULL, quote TEXT NOT NULL, PRIMARY KEY (list, element));")?;
 		// Every word in the search index with how many mails hold it, for finding what a typo meant.
 		// A view of the index, on this connection only: nothing more is stored.
+		// The page cursor after a mail that ended a page, so mail trimmed past it is fetched again from there.
+		conn.execute_batch("CREATE TABLE IF NOT EXISTS cursors (list TEXT NOT NULL, element TEXT NOT NULL, next TEXT NOT NULL, PRIMARY KEY (list, element));")?;
 		conn.execute_batch("CREATE VIRTUAL TABLE temp.vocab USING fts5vocab(main, words, row);")?;
-		Ok(Cache { conn: Mutex::new(conn) })
+		Ok(Cache { conn: Mutex::new(conn), path: None })
 	}
 
 	fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -794,6 +799,7 @@ fn forget(tx: &Connection, id: &MailId) -> Result<()> {
 	tx.execute("DELETE FROM mails WHERE list = ?1 AND element = ?2", params![id.list, id.element])?;
 	tx.execute("DELETE FROM bodies WHERE list = ?1 AND element = ?2", params![id.list, id.element])?;
 	tx.execute("DELETE FROM draft_quotes WHERE list = ?1 AND element = ?2", params![id.list, id.element])?;
+	tx.execute("DELETE FROM cursors WHERE list = ?1 AND element = ?2", params![id.list, id.element])?;
 	Ok(())
 }
 

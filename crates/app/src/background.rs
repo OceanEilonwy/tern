@@ -1,6 +1,7 @@
 //! Keeps the cache up to date while signed in: the folder list, each folder's newest mail, the
 //! rules on new mail in the Inbox, contacts, then the newest mails opened ahead by the fetcher, and
-//! their meaning for search when that is turned on. A round runs at sign-in, every few minutes
+//! their meaning for search when that is turned on. Each folder is trimmed back to Keep Ready
+//! after its sync, except the one on screen, whose older mail may be scrolled to. A round runs at sign-in, every few minutes
 //! after, and at once when something asks for it (F5, a changed setting).
 
 use std::rc::Weak;
@@ -12,7 +13,7 @@ use tern_core::{Error, FolderKind};
 
 use crate::activity::Word;
 use crate::mailbox::Mailbox;
-use crate::{rules, runtime, semantic, window::Ctx};
+use crate::{cleanup, rules, runtime, semantic, window::Ctx};
 
 const INTERVAL: Duration = Duration::from_secs(5 * 60);
 
@@ -43,7 +44,13 @@ pub fn start(ctx: &Ctx, mailbox: Weak<Mailbox>) {
 					drop(mb);
 					for folder in folders {
 						let (b, c, id) = (backend.clone(), cache.clone(), folder.id.clone());
-						let result = runtime::run(async move { sync::folder(b.as_ref(), &c, &id, level.headers()).await }).await;
+						let trim = folder.kind != FolderKind::Drafts && mailbox.upgrade().is_some_and(|mb| mb.current_folder().as_ref() != Some(&folder.id));
+						let result = runtime::run(async move {
+							let changed = sync::folder(b.as_ref(), &c, &id, level.headers()).await?;
+							let trimmed = if trim { c.trim(&id, level.headers()).map_err(|e| Error::Other(e.to_string()))? } else { 0 };
+							Ok(changed || trimmed > 0)
+						})
+						.await;
 						if !signed_in(&ctx) {
 							return;
 						}
@@ -92,6 +99,7 @@ pub fn start(ctx: &Ctx, mailbox: Weak<Mailbox>) {
 				},
 				Err(e) => mb.sync_failed(&e),
 			}
+			cleanup::check(&ctx).await;
 			drop(busy);
 			let wake = ctx.wake();
 			runtime::run(async move {

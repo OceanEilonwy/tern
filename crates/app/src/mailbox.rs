@@ -18,7 +18,7 @@ use crate::reader::Reader;
 use crate::activity::Word;
 use crate::search::{self, Searching};
 use crate::settings::Settings;
-use crate::{composer, format, grip, runtime, spam, window::Ctx};
+use crate::{cleanup, composer, format, grip, runtime, spam, window::Ctx};
 
 /// Conversations taken from the cache at a time.
 const ROWS: usize = 100;
@@ -50,6 +50,8 @@ pub struct Mailbox {
 	/// The main menu: on the folders' header, or on the list's while the folders are a rail.
 	menus: (gtk::MenuButton, gtk::MenuButton),
 	folder_list: gtk::ListBox,
+	/// The offer to clean up, at the foot of the folders: shown once Tern takes more room than set.
+	broom: Broom,
 	folders: RefCell<Vec<FolderRow>>,
 	current: RefCell<Option<Folder>>,
 	list_title: adw::WindowTitle,
@@ -81,6 +83,47 @@ pub struct Mailbox {
 	/// The conversation whose menu was opened last, which the menu's actions act on.
 	menu_row: RefCell<Option<ThreadRow>>,
 	pub reader: Rc<Reader>,
+}
+
+/// The sidebar's offer to clean up: a broom with a dot, "Clean Up" and how much Tern takes; on the
+/// rail, the broom alone.
+struct Broom {
+	button: gtk::Button,
+	text: gtk::Box,
+	size: gtk::Label,
+}
+
+impl Broom {
+	fn new() -> Broom {
+		let icon = gtk::Image::builder().icon_name("tern-broom-symbolic").build();
+		let dot = gtk::Box::builder().css_classes(["cleanup-dot"]).halign(gtk::Align::End).valign(gtk::Align::Start).build();
+		let mark = gtk::Overlay::builder().child(&icon).valign(gtk::Align::Center).build();
+		mark.add_overlay(&dot);
+		let size = gtk::Label::builder().xalign(0.0).css_classes(["caption", "dim-label", "numeric"]).build();
+		let text = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+		text.append(&gtk::Label::builder().label("Clean Up").xalign(0.0).build());
+		text.append(&size);
+		let content = gtk::Box::builder().spacing(12).build();
+		content.append(&mark);
+		content.append(&text);
+		let button = gtk::Button::builder().child(&content).action_name("win.clean-up").css_classes(["flat", "cleanup"]).visible(false).build();
+		button.update_property(&[gtk::accessible::Property::Label("Clean Up")]);
+		Broom { button, text, size }
+	}
+
+	fn offer(&self, bytes: Option<u64>) {
+		self.button.set_visible(bytes.is_some());
+		if let Some(bytes) = bytes {
+			let size = format!("{} on this computer", glib::format_size(bytes));
+			self.size.set_label(&size);
+			self.button.set_tooltip_text(Some(&format!("Clean Up — {size}")));
+		}
+	}
+
+	fn set_rail(&self, rail: bool) {
+		self.text.set_visible(!rail);
+		self.button.set_halign(if rail { gtk::Align::Center } else { gtk::Align::Fill });
+	}
 }
 
 /// A folder in the sidebar, with its unread count beside its name, or on its icon on the rail.
@@ -247,6 +290,8 @@ impl Mailbox {
 		let folder_view = adw::ToolbarView::new();
 		folder_view.add_top_bar(&folder_header);
 		folder_view.set_content(Some(&folder_scroll));
+		let broom = Broom::new();
+		folder_view.add_bottom_bar(&broom.button);
 
 		// Conversation list.
 		let store = gio::ListStore::new::<glib::BoxedAnyObject>();
@@ -335,6 +380,7 @@ impl Mailbox {
 			rail_icon: gtk::Image::builder().icon_name(crate::APP_ID).pixel_size(16).build(),
 			menus,
 			folder_list,
+			broom,
 			folders: RefCell::default(),
 			current: RefCell::default(),
 			list_title,
@@ -383,6 +429,12 @@ impl Mailbox {
 		this.ctx.connect_changed(move |kinds| {
 			if let Some(this) = weak.upgrade() {
 				this.sync_kinds(kinds);
+			}
+		});
+		let weak = Rc::downgrade(&this);
+		this.ctx.connect_offer_cleanup(move |bytes| {
+			if let Some(this) = weak.upgrade() {
+				this.broom.offer(bytes);
 			}
 		});
 		let weak = Rc::downgrade(&this);
@@ -516,6 +568,7 @@ impl Mailbox {
 		} else {
 			self.folder_list.remove_css_class("rail");
 		}
+		self.broom.set_rail(rail);
 		for row in self.folders.borrow().iter() {
 			row.set_rail(rail);
 		}
@@ -686,7 +739,7 @@ impl Mailbox {
 	}
 
 	fn add_actions(self: &Rc<Self>) {
-		let entries: [(&str, MailAction); 14] = [
+		let entries: [(&str, MailAction); 15] = [
 			("compose", |m| {
 				composer::Composer::open(&m.ctx, Fields::default(), None);
 			}),
@@ -715,6 +768,10 @@ impl Mailbox {
 			("focus-list", |m| m.focus_list()),
 			("toggle-folders", |m| m.toggle_rail()),
 			("search", |m| m.start_search()),
+			("clean-up", |m| {
+				let ctx = m.ctx.clone();
+				cleanup::open(&m.ctx, m.ctx.window.upcast_ref(), move |freed| ctx.toast(&cleanup::freed_toast(freed)));
+			}),
 		];
 		for (name, f) in entries {
 			let action = gio::SimpleAction::new(name, None);
@@ -841,7 +898,7 @@ impl Mailbox {
 	}
 
 	fn set_enabled(&self, signed_in: bool) {
-		for name in ["compose", "refresh", "next", "previous", "focus-list", "folder", "search"] {
+		for name in ["compose", "refresh", "next", "previous", "focus-list", "folder", "search", "clean-up"] {
 			self.action(name).set_enabled(signed_in);
 		}
 		self.update_actions();
@@ -887,6 +944,16 @@ impl Mailbox {
 
 	/// The cache changed: refresh folder counts and the list. A change in any folder can touch the
 	/// list on show, as conversations span folders; unchanged rows stay as they are.
+	/// For the screenshot scenes: whether the sidebar offers to clean up.
+	pub fn cleanup_offered(&self) -> bool {
+		self.broom.button.is_visible()
+	}
+
+	/// The folder on screen, if any.
+	pub fn current_folder(&self) -> Option<FolderId> {
+		self.current.borrow().as_ref().map(|f| f.id.clone())
+	}
+
 	pub fn cache_changed(self: &Rc<Self>, _folder: Option<&FolderId>) {
 		let Some(cache) = self.ctx.cache() else { return };
 		if let Ok(folders) = cache.folders() {

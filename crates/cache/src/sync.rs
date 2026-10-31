@@ -73,6 +73,7 @@ pub async fn folder(backend: &dyn Backend, cache: &Cache, folder: &FolderId, kee
 		let page = backend.list(folder, next.clone(), PAGE).await?;
 		let last = page.next.is_none();
 		let changes = cache.merge_page(folder, &page.mails, first, last).map_err(cache_error)?;
+		remember_cursor(cache, &page)?;
 		fetched += page.mails.len();
 		changed |= changes > 0;
 		// The deepest point reached so far is where "load more" continues.
@@ -91,23 +92,43 @@ pub async fn folder(backend: &dyn Backend, cache: &Cache, folder: &FolderId, kee
 	Ok(changed)
 }
 
-/// Fetches the next page of older mail of `folder`, beyond what is stored. Returns whether the
-/// folder has more.
+/// The cursor after a page's last mail, so mail trimmed past it can be fetched again from there.
+fn remember_cursor(cache: &Cache, page: &tern_core::MailPage) -> Result<()> {
+	match (page.mails.last(), &page.next) {
+		(Some(mail), Some(next)) => cache.set_cursor(&mail.id, next).map_err(cache_error),
+		_ => Ok(()),
+	}
+}
+
+/// Pages fetched at most for one "load more", passing those already stored.
+const OLDER_PAGES: usize = 100;
+
+/// Fetches older mail of `folder`, beyond what is stored: pages on until one brings mail not
+/// stored yet, as after a trim that could not cut at a page's edge. Returns whether the folder
+/// has more.
 pub async fn older(backend: &dyn Backend, cache: &Cache, folder: &FolderId) -> Result<bool> {
-	let state = cache.folder_state(folder).map_err(cache_error)?;
+	let mut state = cache.folder_state(folder).map_err(cache_error)?;
 	if state.complete {
 		return Ok(false);
 	}
+	let before = cache.count(folder).map_err(cache_error)?;
 	if state.next.is_none() {
-		// Never synced: the first page is the older mail.
+		// Never synced, or trimmed back to the start: the first page comes first.
 		self::folder(backend, cache, folder, PAGE).await?;
-		return Ok(!cache.folder_state(folder).map_err(cache_error)?.complete);
+		state = cache.folder_state(folder).map_err(cache_error)?;
 	}
-	let page = backend.list(folder, state.next.clone(), PAGE).await?;
-	let last = page.next.is_none();
-	cache.merge_page(folder, &page.mails, false, last).map_err(cache_error)?;
-	cache.set_folder_state(folder, &FolderState { next: page.next, complete: last, ..state }).map_err(cache_error)?;
-	Ok(!last)
+	for _ in 0..OLDER_PAGES {
+		if state.complete || cache.count(folder).map_err(cache_error)? > before {
+			break;
+		}
+		let page = backend.list(folder, state.next.clone(), PAGE).await?;
+		let last = page.next.is_none();
+		cache.merge_page(folder, &page.mails, false, last).map_err(cache_error)?;
+		remember_cursor(cache, &page)?;
+		state = FolderState { next: page.next, complete: last, ..state };
+		cache.set_folder_state(folder, &state).map_err(cache_error)?;
+	}
+	Ok(!state.complete)
 }
 
 /// Mails whose meaning is worked out at a time.
@@ -184,6 +205,45 @@ mod tests {
 		folder(&demo, &cache, &inbox, 1).await.unwrap();
 		assert_eq!(cache.count(&inbox).unwrap(), 7, "a page is the smallest step");
 		assert!(!older(&demo, &cache, &inbox).await.unwrap(), "that page was the whole folder");
+	}
+
+	/// The demo's Sent folder with `n` more mails, synced to its newest page.
+	async fn many_sent(n: usize) -> (DemoBackend, Cache, FolderId) {
+		let demo = DemoBackend::new();
+		for i in 0..n {
+			demo.send(Draft { to: vec![Address::new("", "mia@tuta.com")], subject: format!("Sent {i}"), ..Default::default() }).await.unwrap();
+		}
+		let cache = Cache::in_memory();
+		let all = folders(&demo, &cache).await.unwrap();
+		let sent = all.iter().find(|f| f.kind == FolderKind::Sent).unwrap().id.clone();
+		folder(&demo, &cache, &sent, PAGE).await.unwrap();
+		(demo, cache, sent)
+	}
+
+	#[tokio::test]
+	async fn after_a_trim_older_mail_comes_back_where_it_was_cut() {
+		let (demo, cache, sent) = many_sent(130).await;
+		assert!(older(&demo, &cache, &sent).await.unwrap());
+		assert!(!older(&demo, &cache, &sent).await.unwrap(), "50, 50 and the last 31");
+		assert_eq!(cache.count(&sent).unwrap(), 131);
+		// Trimmed back to the first page's edge, the next "load more" brings the second page again.
+		assert_eq!(cache.trim(&sent, PAGE).unwrap(), 81);
+		assert!(older(&demo, &cache, &sent).await.unwrap());
+		assert_eq!(cache.count(&sent).unwrap(), 2 * PAGE);
+	}
+
+	#[tokio::test]
+	async fn without_a_cursor_older_passes_the_pages_already_stored() {
+		let (demo, cache, sent) = many_sent(130).await;
+		older(&demo, &cache, &sent).await.unwrap();
+		older(&demo, &cache, &sent).await.unwrap();
+		cache.conn().execute("DELETE FROM cursors", []).unwrap();
+		cache.trim(&sent, 2 * PAGE).unwrap();
+		assert_eq!(cache.folder_state(&sent).unwrap().next, None);
+		// A sync sets the cursor after its first page, which is already stored.
+		folder(&demo, &cache, &sent, PAGE).await.unwrap();
+		assert!(!older(&demo, &cache, &sent).await.unwrap(), "the third page was the last");
+		assert_eq!(cache.count(&sent).unwrap(), 131);
 	}
 
 	#[tokio::test]

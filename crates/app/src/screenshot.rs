@@ -3,6 +3,7 @@
 //! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|folders-fail|refresh-race|sign-out-race|draft|suggest|keys|arrows|busy|panes|search|focus-first|spam|rules|inbox|reading|invoice|newsletter|compose|spam-dialog|rule-edit|narrow|narrow-reading`
 //! (with `TERN_DEMO=1` for all but login and sign-in; sign-in types "demo" on the sign-in page). For dark mode add `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -271,6 +272,45 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if sent_from("Re: This week") != Some("news@you.example") || sent_from("From the main address") != Some("you@tuta.com") {
 				return Err(format!("Sent holds {senders:?}"));
 			}
+			Ok(())
+		}
+		// The sidebar's broom past the limit, and Clean Up clearing everything, which then fetches again.
+		"cleanup" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			sleep(500).await;
+			crate::cleanup::check(&win.ctx).await;
+			if mailbox.cleanup_offered() {
+				return Err("the demo's small cache is offered for cleanup".into());
+			}
+			win.ctx.offer_cleanup(Some(1_300_000_000));
+			if !mailbox.cleanup_offered() {
+				return Err("no broom past the limit".into());
+			}
+			let usage = crate::cleanup::measure(&win.ctx).await.ok_or("not signed in")?;
+			let freed = Rc::new(Cell::new(None));
+			let f = freed.clone();
+			let (dialog, all) = crate::cleanup::dialog(&win.ctx, usage, move |bytes| f.set(Some(bytes)));
+			dialog.present(Some(&win.ctx.window));
+			let older = format!("_Free {}", gtk::glib::format_size(usage.older));
+			if dialog.response_label("clean") != older || dialog.is_response_enabled("clean") != (usage.older > 0) {
+				return Err(format!("the button reads {:?} for {older:?}", dialog.response_label("clean")));
+			}
+			all.set_active(true);
+			if dialog.response_label("clean") != "_Delete All Mail" || dialog.response_appearance("clean") != adw::ResponseAppearance::Destructive || !dialog.is_response_enabled("clean") {
+				return Err(format!("with All Mail ticked the button reads {:?}", dialog.response_label("clean")));
+			}
+			dialog.emit_by_name::<()>("response", &[&"clean"]);
+			dialog.force_close();
+			wait_for(|| freed.get().is_some()).await;
+			let cache = win.ctx.cache().ok_or("no cache")?;
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			let inbox = cache.folders().map_err(|e| e.to_string())?.into_iter().find(|f| f.kind == tern_core::FolderKind::Inbox).ok_or("no inbox")?;
+			if cache.count(&inbox.id).map_err(|e| e.to_string())? == 0 {
+				return Err("the Inbox did not fetch again".into());
+			}
+			win.ctx.offer_cleanup(Some(1_300_000_000));
+			let (dialog, _) = crate::cleanup::dialog(&win.ctx, crate::cleanup::Usage { total: 1_300_000_000, older: 940_000_000, vectors: 210_000_000, model: 30_000_000 }, |_| {});
+			dialog.present(Some(&win.ctx.window));
 			Ok(())
 		}
 		// Typing in To suggests contacts and people written to.
@@ -682,7 +722,7 @@ pub fn drive(win: Rc<Window>) {
 	if scene == "sign-in" {
 		return sign_in(Rc::downgrade(&win), path);
 	}
-	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first" | "spam" | "rules" | "menu" | "from" | "rule-edit" | "quote") {
+	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first" | "spam" | "rules" | "menu" | "from" | "rule-edit" | "quote" | "cleanup") {
 		glib::spawn_future_local(async move {
 			if let Err(e) = check(&win, &scene).await {
 				// No picture, so the check fails.

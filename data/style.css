@@ -181,3 +181,20 @@ button.delete-rule:hover {
   opacity: 0.55;
   background-color: alpha(currentColor, 0.04);
 }
+
+/* The sidebar's offer to clean up: a broom with a dot, at the foot of the folders. */
+button.cleanup {
+  margin: 6px;
+  padding: 6px 10px;
+}
+.cleanup-dot {
+  min-width: 7px;
+  min-height: 7px;
+  margin: -2px -3px 0 0;
+  border-radius: 999px;
+  background: var(--accent-bg-color);
+}
+/* Clean Up's "All Mail" choice reads as the one that deletes. */
+row.cleanup-all label.title {
+  color: var(--error-color);
+}

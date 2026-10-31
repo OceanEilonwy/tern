@@ -434,3 +434,36 @@ Built from the approved mockups (rule editor A; the quoting design with its four
   already there. Preferences → Offline Mail → "Forget Mail on Sign Out" brings back the old
   behaviour: the database and its keyring key are deleted. The cache stays encrypted either way; the
   saved session is always deleted.
+
+## Cache cleanup (2026-10-31)
+
+Built to the "Cache cleanup" boards on the design canvas.
+
+- **Mail past Keep Ready is trimmed after each folder's sync**, oldest first, with its body,
+  search words and meaning. Drafts and pinned conversations stay. The folder on screen is skipped,
+  since older mail you scrolled to should not vanish while you look at it. Before this, the cache
+  only ever grew.
+- **Trimming cuts at a page's edge.** Each page's cursor is kept (`cursors` table) on its last mail.
+  A trim keeps up to a page more than Keep Ready, so it can cut where a cursor is and "load more"
+  continues right after. When no cursor is near (mail cached before this change), it cuts at
+  exactly Keep Ready and "load more" pages from the newest, passing pages already stored, up to
+  100 pages.
+- **The broom** shows at the foot of the folders once Tern takes more than "Offer Cleanup Past"
+  (500 MB, 1 GB by default, 2, 5 or 10 GB, or Never). It also shows when the disk has less than
+  5% free, whatever the setting, but only once Tern takes at least 100 MB, as below that cleaning
+  would not help. Sizes are decimal (1 GB = 10^9 bytes), as GNOME shows them. The check runs after
+  each sync round and after a cleanup.
+- **Clean Up's choices:**
+  - Older Mail (ticked to start): trims every folder, the open one too, and drops the text of all
+    but the newest Keep Ready "opened ahead" mails. Their search words stay, so search still finds
+    them; they open from the server.
+  - Search by Meaning Data: only listed when there is some.
+  - Language Model: only listed while search by meaning is off. When it is on, the model would
+    just be downloaded again.
+  - All Mail: drops every mail and fetches again. Folders, pins, draft quotes, addresses and
+    rule marks stay.
+- After cleaning, the database is VACUUMed and its log truncated, so the room goes back to the
+  disk. The toast gives the real size difference, not the estimate. Estimates in the dialog are the
+  stored text's length plus free pages, so they are approximate.
+- The dialog is an AdwAlertDialog. It is narrower than the mockup, as AlertDialog sets its own
+  width.

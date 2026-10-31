@@ -12,11 +12,12 @@ use tern_core::{demo::DemoBackend, Backend, Error, FolderKind};
 
 use crate::activity::Activity;
 use crate::fetcher::{Fetcher, Tuning};
-use crate::settings::Settings;
-use crate::{background, format, keyring, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot, semantic};
+use crate::settings::{Settings, CLEANUP_MB};
+use crate::{background, cleanup, format, keyring, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot, semantic};
 
 type ChangedHook = Box<dyn Fn(&[FolderKind])>;
 type RuleHook = Box<dyn Fn(&str)>;
+type OfferHook = Box<dyn Fn(Option<u64>)>;
 
 /// What every part of the window shares: the window, its toasts, the signed-in account and its cache.
 #[derive(Clone)]
@@ -31,6 +32,7 @@ pub struct Ctx {
 	wake: Arc<tokio::sync::Notify>,
 	changed: Rc<RefCell<Option<ChangedHook>>>,
 	show_rule: Rc<RefCell<Option<RuleHook>>>,
+	offer: Rc<RefCell<Option<OfferHook>>>,
 	/// What Tern is doing now, in a word.
 	pub activity: Activity,
 }
@@ -113,10 +115,21 @@ impl Ctx {
 	pub fn connect_show_rule(&self, f: impl Fn(&str) + 'static) {
 		*self.show_rule.borrow_mut() = Some(Box::new(f));
 	}
+
+	/// Offers, in the sidebar, to clean up the `bytes` Tern takes on disk; None takes the offer back.
+	pub fn offer_cleanup(&self, bytes: Option<u64>) {
+		if let Some(f) = self.offer.borrow().as_ref() {
+			f(bytes);
+		}
+	}
+
+	pub fn connect_offer_cleanup(&self, f: impl Fn(Option<u64>) + 'static) {
+		*self.offer.borrow_mut() = Some(Box::new(f));
+	}
 }
 
 /// Where an account's mail cache lives.
-fn cache_path(email: &str) -> PathBuf {
+pub fn cache_path(email: &str) -> PathBuf {
 	let base = std::env::var_os("XDG_CACHE_HOME")
 		.map(PathBuf::from)
 		.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
@@ -147,6 +160,7 @@ impl Window {
 			wake: Arc::default(),
 			changed: Rc::default(),
 			show_rule: Rc::default(),
+			offer: Rc::default(),
 			activity: Activity::default(),
 		};
 
@@ -367,6 +381,8 @@ pub fn preferences_dialog(ctx: &Ctx) -> (adw::PreferencesDialog, Rc<rule_editor:
 		move |row| ctx.set_settings(Settings { forget_on_sign_out: row.is_active(), ..ctx.settings() })
 	});
 	group.add(&forget);
+	group.add(&cleanup_limit_row(ctx));
+	group.add(&storage_row(ctx, &dialog));
 	page.add(&group);
 	page.add(&search);
 	page.add(&rules.group);
@@ -377,6 +393,50 @@ pub fn preferences_dialog(ctx: &Ctx) -> (adw::PreferencesDialog, Rc<rule_editor:
 		keep.borrow_mut().take();
 	});
 	(dialog, rules)
+}
+
+/// When the sidebar offers to clean up.
+fn cleanup_limit_row(ctx: &Ctx) -> adw::ComboRow {
+	let names: Vec<String> = CLEANUP_MB.iter().map(|&mb| if mb == 0 { "Never".to_string() } else { gtk::glib::format_size(u64::from(mb) * 1_000_000).to_string() }).collect();
+	let model = gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>());
+	let row = adw::ComboRow::builder().title("Offer Cleanup Past").subtitle("The sidebar offers to clean up once mail here takes more than this.").model(&model).build();
+	row.set_selected(CLEANUP_MB.iter().position(|&mb| mb == ctx.settings().cleanup_mb).unwrap_or(1) as u32);
+	let ctx = ctx.clone();
+	row.connect_selected_notify(move |row| {
+		if let Some(&mb) = CLEANUP_MB.get(row.selected() as usize) {
+			ctx.set_settings(Settings { cleanup_mb: mb, ..ctx.settings() });
+		}
+	});
+	row
+}
+
+/// How much Tern takes on disk, with Clean Up always to hand whatever the size.
+fn storage_row(ctx: &Ctx, dialog: &adw::PreferencesDialog) -> adw::ActionRow {
+	let button = gtk::Button::builder().label("Clean Up…").valign(gtk::Align::Center).build();
+	let row = adw::ActionRow::builder().title("Storage").subtitle("Measuring…").build();
+	row.add_suffix(&button);
+	let measure = {
+		let (ctx, row) = (ctx.clone(), row.clone());
+		move || {
+			let (ctx, row) = (ctx.clone(), row.clone());
+			runtime::spawn_local(async move {
+				match cleanup::measure(&ctx).await {
+					Some(usage) => row.set_subtitle(&cleanup::storage_text(usage)),
+					None => row.set_visible(false),
+				}
+			});
+		}
+	};
+	measure();
+	let (ctx, dialog) = (ctx.clone(), dialog.clone());
+	button.connect_clicked(move |_| {
+		let (d, measure) = (dialog.clone(), measure.clone());
+		cleanup::open(&ctx, dialog.upcast_ref(), move |freed| {
+			d.add_toast(adw::Toast::new(&cleanup::freed_toast(freed)));
+			measure();
+		});
+	});
+	row
 }
 
 /// Search by meaning is off until asked for, as it downloads a model once.
