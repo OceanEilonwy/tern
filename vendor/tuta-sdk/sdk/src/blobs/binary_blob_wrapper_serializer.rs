@@ -1,6 +1,7 @@
 #[cfg(test)]
 use crate::id::generated_id::GENERATED_ID_BYTES_LENGTH;
 use crypto_primitives::key::GenericAesKey;
+#[cfg(test)]
 use thiserror::Error;
 
 ///
@@ -53,6 +54,8 @@ pub struct SerializedBinaryWrapper {
 	pub(crate) binary: Vec<u8>,
 }
 
+/// Only the test-only deserializers return it.
+#[cfg(test)]
 #[derive(Error, Debug, uniffi::Error, Eq, PartialEq, Clone)]
 pub enum BinaryBlobWrapperSerializationError {
 	#[error("InvalidNumberOfBlobsError: expected: {expected}, actual: {actual}")]

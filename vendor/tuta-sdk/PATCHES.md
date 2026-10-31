@@ -31,5 +31,13 @@ tag, never to master. GPL-3.0.
 - `sdk/src/folder_system.rs`: `MailSetKind::Label` (8), so labels are told apart from unknown sets.
 - `sdk/src/tern.rs`: `create_label` (ManageLabelService POST), with a new session key encrypted with
   the mailbox key, as `MailModel.createLabel` at the same tag.
-- `sdk/src/tern.rs`: `TernAccount.aliases`, the mailbox's enabled alias addresses from its GroupInfo;
-  a draft is sent from one by setting `mail_address` to it.
+- `sdk/src/tern.rs`: `TernAccount.aliases`, the mailbox's enabled alias addresses; a draft is sent
+  from one by setting `mail_address` to it. A personal mailbox's addresses are read from the user's
+  GroupInfo, a shared one's from the mail group's, as `get_group_id_for_mail_address` does.
+- Build warnings, without changing behaviour:
+  - `sdk/src/lib.rs`: the crate-level `#![macro_use]`, which did nothing, is gone.
+  - `sdk/src/instance_mapper.rs`: `Unexpected<'_>` spelled out.
+  - `sdk/src/blobs/binary_blob_wrapper_serializer.rs`: `BinaryBlobWrapperSerializationError` is
+    `#[cfg(test)]`, like the deserializers that return it.
+  - `crypto-primitives/Cargo.toml`: takes the workspace's lints, like `sdk` and `util`. The clippy
+    style lints upstream code trips are allowed in the root `Cargo.toml`.

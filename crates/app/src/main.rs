@@ -31,9 +31,22 @@ use gtk::{gio, glib};
 
 pub const APP_ID: &str = "xyz.hollingworth.Tern";
 
+/// Desktops such as KDE Plasma write GTK's old `gtk-application-prefer-dark-theme` into
+/// settings.ini, and libadwaita warns about it at every start. Libadwaita takes the light or dark
+/// choice from the desktop's colour scheme instead, so clearing the old setting before libadwaita
+/// starts changes nothing but the warning.
+fn quiet_old_dark_setting() {
+	if gtk::init().is_ok() {
+		if let Some(settings) = gtk::Settings::default() {
+			settings.set_property("gtk-application-prefer-dark-theme", false);
+		}
+	}
+}
+
 fn main() -> glib::ExitCode {
 	gio::resources_register_include!("tern.gresource").expect("register resources");
 	glib::set_application_name("Tern");
+	quiet_old_dark_setting();
 
 	let app = adw::Application::builder().application_id(APP_ID).resource_base_path("/xyz/hollingworth/Tern").build();
 	if screenshot::scene().is_some() {

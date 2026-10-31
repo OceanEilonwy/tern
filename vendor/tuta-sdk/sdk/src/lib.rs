@@ -1,5 +1,3 @@
-#![macro_use]
-
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};

@@ -52,3 +52,6 @@ ctr = "0.9.2"
 crypto-primitives = { path = ".", default-features = false, features = ["test_utils"] }
 wasm-bindgen-test = "0.3.34"
 rand = { workspace = true }
+
+[lints]
+workspace = true
