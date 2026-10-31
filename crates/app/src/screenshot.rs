@@ -355,12 +355,13 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			let act = |name: &str| gtk::prelude::WidgetExt::activate_action(&window, name, None).map_err(|e| e.to_string());
 			mailbox.drag_folders(300);
 			mailbox.drag_list(500);
-			sleep(300).await;
+			// Waits for the layout rather than a set time: a slow machine, such as CI's, lays out later.
+			wait_for(|| mailbox.pane_widths() == (300, 500)).await;
 			if mailbox.pane_widths() != (300, 500) {
 				return Err(format!("dragged to 300 and 500, the panes are {:?}", mailbox.pane_widths()));
 			}
 			act("win.toggle-folders")?;
-			sleep(300).await;
+			wait_for(|| mailbox.is_rail() && mailbox.pane_widths().0 == RAIL as i32).await;
 			if !mailbox.is_rail() || mailbox.pane_widths().0 != RAIL as i32 {
 				return Err(format!("F9 did not make a rail: {:?}", mailbox.pane_widths()));
 			}
@@ -369,13 +370,13 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("the rail's icon is centred at {middle}, the rail is {RAIL} wide"));
 			}
 			act("win.toggle-folders")?;
-			sleep(300).await;
+			wait_for(|| mailbox.pane_widths().0 == 300).await;
 			if mailbox.pane_widths().0 != 300 {
 				return Err(format!("F9 again left the folders {} wide", mailbox.pane_widths().0));
 			}
 			// Dragged narrow, it snaps to the rail; the shot shows it.
 			mailbox.drag_folders(90);
-			sleep(300).await;
+			wait_for(|| mailbox.is_rail()).await;
 			if !mailbox.is_rail() || win.ctx.settings().folders_width != 300 {
 				return Err(format!("dragged narrow: rail {}, width kept {}", mailbox.is_rail(), win.ctx.settings().folders_width));
 			}
@@ -612,7 +613,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
 			dialog.present(Some(&win.ctx.window));
 			let edit = section.edit(Some(0));
-			sleep(1500).await;
+			// A squeezed line stays squeezed, so waiting for the layout still catches it.
+			wait_for(|| edit.line_height() >= 36 && edit.preview().1 == 4).await;
 			if edit.line_height() < 36 {
 				return Err(format!("the saved line shows {} px tall", edit.line_height()));
 			}

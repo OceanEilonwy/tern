@@ -39,5 +39,5 @@ tag, never to master. GPL-3.0.
   - `sdk/src/instance_mapper.rs`: `Unexpected<'_>` spelled out.
   - `sdk/src/blobs/binary_blob_wrapper_serializer.rs`: `BinaryBlobWrapperSerializationError` is
     `#[cfg(test)]`, like the deserializers that return it.
-  - `crypto-primitives/Cargo.toml`: takes the workspace's lints, like `sdk` and `util`. The clippy
-    style lints upstream code trips are allowed in the root `Cargo.toml`.
+  - `crypto-primitives/Cargo.toml`: takes the workspace's lints, like `sdk` and `util`. Clippy is
+    turned off for all three in the root `Cargo.toml`.

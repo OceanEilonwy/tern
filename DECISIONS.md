@@ -490,7 +490,8 @@ Built to the "Cache cleanup" boards on the design canvas.
   not ship the GTK Tern needs. Not built yet: aarch64, Void's musl variant, an AUR package, a Void
   template, a Flathub listing.
 - **Releases**: every push to main replaces the `latest-main` pre-release; a `v*` tag makes a release.
-- **CI runs on Arch** in a container, with kwin_wayland's virtual display for the window scenes, as
-  locally; under GTK's Broadway display the panes scene sizes differently. Clippy on stable 1.99 calls
-  async_trait's generated `#[must_use]` doubled, so that lint is allowed in each crate. kwin_wayland's
-  file capability is removed in the container, which otherwise refuses to start it.
+- **CI runs on Arch** in a container, with GNOME's mutter, headless, and GTK's cairo renderer for the window
+  scenes. Without a GPU, kwin and GTK's GL renderer draw nothing, so nothing is laid out; weston's
+  headless backend crashes on the composer's popups; under Broadway the panes size differently. Locally `make test-ui` still prefers kwin. Clippy on stable 1.99 calls
+  async_trait's generated `#[must_use]` doubled, so that lint is allowed in each Tern crate; clippy is
+  off altogether for the vendored Tuta SDK.

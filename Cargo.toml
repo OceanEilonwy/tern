@@ -35,37 +35,7 @@ tokio = { version = "1.43", default-features = false }
 uniffi = { git = "https://github.com/mozilla/uniffi-rs.git", rev = "13a1c559cb3708eeca40dcf95dc8b3ccccf3b88c", default-features = false }
 rand = { version = "0.8" }
 
-# Lints the vendored Tuta SDK expects from its own workspace. Only the vendored crates use this
-# table; Tern's own crates keep clippy's defaults. The style lints below fire on upstream code, which
-# is left as Tuta wrote it so new releases vendor cleanly.
+# Only the vendored Tuta SDK crates use this table, and clippy is off for them: the code stays as
+# Tuta wrote it so new releases vendor cleanly. Tern's own crates keep clippy's defaults.
 [workspace.lints.clippy]
-new_without_default = "allow"
-clone_on_copy = "allow"
-format_in_format_args = "allow"
-identity_op = "allow"
-iter_count = "allow"
-iter_nth_zero = "allow"
-manual_ok_err = "allow"
-manual_repeat_n = "allow"
-map_clone = "allow"
-needless_borrow = "allow"
-needless_range_loop = "allow"
-needless_return = "allow"
-ptr_arg = "allow"
-unnecessary_lazy_evaluations = "allow"
-unnecessary_unwrap = "allow"
-useless_conversion = "allow"
-zero_prefixed_literal = "allow"
-# async_trait marks the boxed futures it returns #[must_use], which clippy on Rust 1.99 calls doubled.
-double_must_use = "allow"
-enum_variant_names = "allow"
-let_and_return = "allow"
-too_many_arguments = "allow"
-
-[profile.release]
-lto = "thin"
-codegen-units = 4
-strip = true
-
-[profile.dev.package."*"]
-opt-level = 2
+all = { level = "allow", priority = -1 }
