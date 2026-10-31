@@ -1,19 +1,22 @@
-//! The signed-in view: folders, the mail list and the reading pane.
+//! The signed-in view: folders, the conversation list and the reading pane.
+//!
+//! Everything shown comes from the cache, so switching folders is instant; the folder on show is
+//! brought up to date in the background while a small spinner in its header turns.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
 
 use adw::prelude::*;
-use gtk::{gio, glib};
-use tern_core::{Folder, FolderId, FolderKind, MailSummary};
+use gtk::{gdk, gio, glib};
+use tern_cache::{sync, ThreadMail, ThreadRow};
+use tern_core::{Folder, FolderId, FolderKind, MailId, MailSummary};
 
 use crate::compose_model::{Answer, Fields};
-use crate::html_doc::Doc;
-use crate::reader::{Opened, Reader};
+use crate::reader::Reader;
 use crate::{composer, format, runtime, window::Ctx};
 
-const PAGE: usize = 50;
+/// Conversations taken from the cache at a time.
+const ROWS: usize = 100;
 
 type MailAction = fn(&Rc<Mailbox>);
 
@@ -25,19 +28,23 @@ pub struct Mailbox {
 	account: adw::WindowTitle,
 	folder_list: gtk::ListBox,
 	folders: RefCell<Vec<(Folder, gtk::Label)>>,
-	current: RefCell<Option<FolderId>>,
+	current: RefCell<Option<Folder>>,
 	list_title: adw::WindowTitle,
 	list_stack: gtk::Stack,
 	empty: adw::StatusPage,
+	syncing: adw::Spinner,
 	pub store: gio::ListStore,
 	selection: gtk::SingleSelection,
 	list_view: gtk::ListView,
-	next: RefCell<Option<String>>,
-	/// The generation of the list load in flight, if any; `load_more` waits for it.
-	loading: Cell<Option<u64>>,
-	generation: Cell<u64>,
-	/// Set while the list is swapped under an open mail, so the reader stays.
+	/// How many conversations the list asks the cache for; grows when scrolled to the end.
+	shown: Cell<usize>,
+	fetching_older: Cell<bool>,
+	/// Folders being brought up to date now.
+	in_flight: RefCell<Vec<FolderId>>,
+	/// Set while the list is swapped under an open conversation, so the reader stays.
 	hold: Cell<bool>,
+	/// The last selection came from the keyboard: on a narrow window it does not leave the list.
+	by_keyboard: Cell<bool>,
 	pub reader: Rc<Reader>,
 }
 
@@ -53,20 +60,22 @@ pub fn folder_icon(kind: FolderKind) -> &'static str {
 	}
 }
 
-fn summary_of(obj: &glib::Object) -> MailSummary {
-	obj.downcast_ref::<glib::BoxedAnyObject>().unwrap().borrow::<MailSummary>().clone()
+fn row_of(obj: &glib::Object) -> ThreadRow {
+	obj.downcast_ref::<glib::BoxedAnyObject>().unwrap().borrow::<ThreadRow>().clone()
 }
 
-/// One line of the mail list.
+/// One line of the conversation list.
 fn row_widget() -> gtk::Box {
 	let dot = gtk::Image::builder().icon_name("media-record-symbolic").pixel_size(8).css_classes(["accent"]).valign(gtk::Align::Center).build();
 	dot.set_tooltip_text(Some("Unread"));
 	let sender = gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build();
+	let count = gtk::Label::builder().css_classes(["caption", "numeric", "thread-count"]).valign(gtk::Align::Center).build();
 	let clip = gtk::Image::builder().icon_name("mail-attachment-symbolic").css_classes(["dim-label"]).build();
 	let date = gtk::Label::builder().css_classes(["caption", "dim-label", "numeric"]).build();
 	let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
 	top.append(&dot);
 	top.append(&sender);
+	top.append(&count);
 	top.append(&clip);
 	top.append(&date);
 	let subject = gtk::Label::builder().xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).build();
@@ -76,28 +85,38 @@ fn row_widget() -> gtk::Box {
 	row
 }
 
-fn bind_row(row: &gtk::Box, m: &MailSummary, now: i64, tz: &glib::TimeZone) {
+fn bind_row(row: &gtk::Box, t: &ThreadRow, now: i64, tz: &glib::TimeZone) {
+	let m = &t.latest;
 	let top = row.first_child().and_downcast::<gtk::Box>().unwrap();
 	let subject = top.next_sibling().and_downcast::<gtk::Label>().unwrap();
 	let dot = top.first_child().unwrap();
 	let sender = dot.next_sibling().and_downcast::<gtk::Label>().unwrap();
-	let clip = sender.next_sibling().unwrap();
+	let count = sender.next_sibling().and_downcast::<gtk::Label>().unwrap();
+	let clip = count.next_sibling().unwrap();
 	let date = clip.next_sibling().and_downcast::<gtk::Label>().unwrap();
-	dot.set_visible(m.unread);
-	match (&m.to, m.outgoing) {
-		(Some(to), true) => sender.set_label(&format!("To: {}", to.display())),
-		(None, true) => sender.set_label("(No Recipients)"),
-		_ => sender.set_label(if m.from.display().is_empty() { "(Unknown Sender)" } else { m.from.display() }),
+	dot.set_visible(t.unread);
+	let who = match (&m.to, m.outgoing) {
+		(Some(to), true) => format!("To: {}", to.display()),
+		(None, true) => "(No Recipients)".to_string(),
+		_ => if m.from.display().is_empty() { "(Unknown Sender)" } else { m.from.display() }.to_string(),
+	};
+	if m.draft {
+		sender.set_markup(&format!("<span foreground=\"#e01b24\">Draft</span>  {}", glib::markup_escape_text(&who)));
+	} else {
+		sender.set_label(&who);
 	}
-	if m.unread {
+	if t.unread {
 		sender.add_css_class("heading");
 	} else {
 		sender.remove_css_class("heading");
 	}
+	count.set_label(&t.count.to_string());
+	count.set_visible(t.count > 1);
+	count.set_tooltip_text(Some(&format!("{} messages", t.count)));
 	clip.set_visible(m.has_attachments);
 	date.set_label(&format::short_date(m.received_ms, now, tz));
 	subject.set_label(if m.subject.trim().is_empty() { "(No Subject)" } else { m.subject.as_str() });
-	if m.unread {
+	if t.unread {
 		subject.remove_css_class("dim-label");
 	} else {
 		subject.add_css_class("dim-label");
@@ -110,6 +129,7 @@ impl Mailbox {
 		let account = adw::WindowTitle::new("Tern", "");
 		let menu = gio::Menu::new();
 		let section = gio::Menu::new();
+		section.append(Some("_Preferences"), Some("app.preferences"));
 		section.append(Some("_Keyboard Shortcuts"), Some("app.shortcuts"));
 		section.append(Some("_About Tern"), Some("app.about"));
 		menu.append_section(None, &section);
@@ -120,12 +140,13 @@ impl Mailbox {
 		let folder_header = adw::HeaderBar::builder().title_widget(&account).build();
 		folder_header.pack_end(&menu_button);
 		let folder_list = gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build();
+		folder_list.update_property(&[gtk::accessible::Property::Label("Folders")]);
 		let folder_scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&folder_list).vexpand(true).build();
 		let folder_view = adw::ToolbarView::new();
 		folder_view.add_top_bar(&folder_header);
 		folder_view.set_content(Some(&folder_scroll));
 
-		// Mail list.
+		// Conversation list.
 		let store = gio::ListStore::new::<glib::BoxedAnyObject>();
 		let selection = gtk::SingleSelection::builder().model(&store).autoselect(false).can_unselect(true).build();
 		let factory = gtk::SignalListItemFactory::new();
@@ -137,14 +158,14 @@ impl Mailbox {
 		factory.connect_bind(move |_, item| {
 			let item = item.downcast_ref::<gtk::ListItem>().unwrap();
 			let (Some(row), Some(obj)) = (item.child().and_downcast::<gtk::Box>(), item.item()) else { return };
-			bind_row(&row, &summary_of(&obj), format::now_ms(), &tz);
+			bind_row(&row, &row_of(&obj), format::now_ms(), &tz);
 		});
 		let list_view = gtk::ListView::builder().model(&selection).factory(&factory).css_classes(["navigation-sidebar"]).build();
-		list_view.update_property(&[gtk::accessible::Property::Label("Messages")]);
+		list_view.update_property(&[gtk::accessible::Property::Label("Conversations")]);
 		let list_scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&list_view).vexpand(true).build();
 		let empty = adw::StatusPage::builder().icon_name("mail-read-symbolic").title("No Messages").css_classes(["compact"]).build();
 		let spinner = adw::Spinner::builder().width_request(32).height_request(32).halign(gtk::Align::Center).valign(gtk::Align::Center).build();
-		let list_stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).transition_duration(120).build();
+		let list_stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).transition_duration(100).build();
 		list_stack.add_named(&spinner, Some("loading"));
 		list_stack.add_named(&empty, Some("empty"));
 		list_stack.add_named(&list_scroll, Some("list"));
@@ -152,11 +173,14 @@ impl Mailbox {
 		let list_title = adw::WindowTitle::new("Inbox", "");
 		let list_header = adw::HeaderBar::builder().title_widget(&list_title).build();
 		let sidebar_toggle = gtk::ToggleButton::builder().icon_name("sidebar-show-symbolic").tooltip_text("Show Folders").build();
-		let compose = gtk::Button::builder().icon_name("mail-message-new-symbolic").action_name("win.compose").tooltip_text("New Message").build();
-		let refresh = gtk::Button::builder().icon_name("view-refresh-symbolic").action_name("win.refresh").tooltip_text("Refresh").build();
+		let compose_content = adw::ButtonContent::builder().icon_name("mail-message-new-symbolic").label("_New").use_underline(true).build();
+		let compose = gtk::Button::builder().child(&compose_content).action_name("win.compose").tooltip_text("New Message (Ctrl+N)").css_classes(["suggested-action"]).build();
+		let syncing = adw::Spinner::builder().tooltip_text("Checking for new mail").visible(false).build();
+		let refresh = gtk::Button::builder().icon_name("view-refresh-symbolic").action_name("win.refresh").tooltip_text("Check for New Mail (F5)").build();
 		list_header.pack_start(&sidebar_toggle);
 		list_header.pack_start(&compose);
 		list_header.pack_end(&refresh);
+		list_header.pack_end(&syncing);
 		let list_view_tb = adw::ToolbarView::new();
 		list_view_tb.add_top_bar(&list_header);
 		list_view_tb.set_content(Some(&list_stack));
@@ -194,24 +218,34 @@ impl Mailbox {
 			list_title,
 			list_stack,
 			empty,
+			syncing,
 			store,
 			selection,
 			list_view,
-			next: RefCell::default(),
-			loading: Cell::new(None),
-			generation: Cell::new(0),
+			shown: Cell::new(ROWS),
+			fetching_older: Cell::new(false),
+			in_flight: RefCell::default(),
 			hold: Cell::new(false),
+			by_keyboard: Cell::new(false),
 			reader,
 		});
 		this.connect_signals(&list_scroll);
-		// A sent mail shows up in Sent, and its counts change.
 		let weak = Rc::downgrade(&this);
-		this.ctx.connect_sent(move || {
-			let Some(this) = weak.upgrade() else { return };
-			let current = this.current.borrow().clone();
-			let in_sent = this.folders.borrow().iter().any(|(f, _)| Some(&f.id) == current.as_ref() && f.kind == FolderKind::Sent);
-			if in_sent {
-				this.refresh();
+		this.reader.connect_read(move |summary| {
+			if let Some(this) = weak.upgrade() {
+				this.set_unread(summary, false);
+			}
+		});
+		let weak = Rc::downgrade(&this);
+		this.reader.connect_discard(move |summary| {
+			if let Some(this) = weak.upgrade() {
+				this.trash(vec![summary.id.clone()], "Draft discarded");
+			}
+		});
+		let weak = Rc::downgrade(&this);
+		this.ctx.connect_changed(move |kinds| {
+			if let Some(this) = weak.upgrade() {
+				this.sync_kinds(kinds);
 			}
 		});
 		this.add_actions();
@@ -232,15 +266,21 @@ impl Mailbox {
 		let weak = Rc::downgrade(self);
 		self.folder_list.connect_row_selected(move |_, row| {
 			let (Some(this), Some(row)) = (weak.upgrade(), row) else { return };
-			let index = row.index() as usize;
-			let folder = this.folders.borrow().get(index).map(|(f, _)| f.clone());
+			let folder = this.folders.borrow().get(row.index() as usize).map(|(f, _)| f.clone());
 			if let Some(folder) = folder {
-				if this.current.borrow().as_ref() != Some(&folder.id) {
+				if this.current.borrow().as_ref().map(|f| &f.id) != Some(&folder.id) {
 					this.open_folder(&folder);
 				}
 				if this.outer.is_collapsed() {
 					this.outer.set_show_sidebar(false);
 				}
+			}
+		});
+		// Enter on a folder moves on to its conversations.
+		let weak = Rc::downgrade(self);
+		self.folder_list.connect_row_activated(move |_, _| {
+			if let Some(this) = weak.upgrade() {
+				this.focus_list();
 			}
 		});
 
@@ -251,28 +291,65 @@ impl Mailbox {
 				return;
 			}
 			match sel.selected_item() {
-				Some(obj) => this.open_mail(summary_of(&obj)),
+				Some(obj) => {
+					this.open_thread(&row_of(&obj));
+					if !this.by_keyboard.get() {
+						this.inner.set_show_content(true);
+					}
+				},
 				None => {
 					this.reader.clear();
 					this.update_actions();
+				},
+			}
+			this.by_keyboard.set(false);
+		});
+		// Arrow keys move through the list without leaving it, even on a narrow window.
+		let keys = gtk::EventControllerKey::new();
+		keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+		let weak = Rc::downgrade(self);
+		keys.connect_key_pressed(move |_, key, _, _| {
+			if let Some(this) = weak.upgrade() {
+				if matches!(key, gdk::Key::Up | gdk::Key::Down | gdk::Key::Page_Up | gdk::Key::Page_Down | gdk::Key::Home | gdk::Key::End) {
+					this.by_keyboard.set(true);
 				}
 			}
+			glib::Propagation::Proceed
 		});
-		// Activating the selected row again (narrow layout) shows it again.
+		self.list_view.add_controller(keys);
+		// Enter (or a click on the selected row) opens the conversation and moves focus into it.
 		let weak = Rc::downgrade(self);
 		self.list_view.connect_activate(move |_, _| {
-			if let Some(this) = weak.upgrade() {
-				this.inner.set_show_content(true);
+			let Some(this) = weak.upgrade() else { return };
+			if this.current.borrow().as_ref().is_some_and(|f| f.kind == FolderKind::Drafts) && this.reader.edit_current_draft() {
+				return;
 			}
+			this.inner.set_show_content(true);
+			this.reader.focus();
 		});
 		// Going back in the narrow layout drops the selection, so tapping the same mail opens it again.
 		let weak = Rc::downgrade(self);
 		self.inner.connect_show_content_notify(move |inner| {
 			let Some(this) = weak.upgrade() else { return };
 			if inner.is_collapsed() && !inner.shows_content() {
+				this.hold.set(true);
 				this.selection.set_selected(gtk::INVALID_LIST_POSITION);
+				this.hold.set(false);
 			}
 		});
+		// Escape in the reader goes back to the list.
+		let keys = gtk::EventControllerKey::new();
+		let weak = Rc::downgrade(self);
+		keys.connect_key_pressed(move |_, key, _, _| {
+			let Some(this) = weak.upgrade() else { return glib::Propagation::Proceed };
+			if key == gdk::Key::Escape {
+				this.inner.set_show_content(false);
+				this.focus_list();
+				return glib::Propagation::Stop;
+			}
+			glib::Propagation::Proceed
+		});
+		self.reader.page.add_controller(keys);
 
 		let weak = Rc::downgrade(self);
 		list_scroll.connect_edge_reached(move |_, pos| {
@@ -285,7 +362,7 @@ impl Mailbox {
 	}
 
 	fn add_actions(self: &Rc<Self>) {
-		let entries: [(&str, MailAction); 8] = [
+		let entries: [(&str, MailAction); 11] = [
 			("compose", |m| {
 				composer::Composer::open(&m.ctx, Fields::default(), None);
 			}),
@@ -298,7 +375,7 @@ impl Mailbox {
 			("forward", |m| {
 				m.reader.answer(Answer::Forward);
 			}),
-			("trash", |m| m.trash_selected()),
+			("trash", |m| m.trash_conversation()),
 			("refresh", |m| m.refresh()),
 			("mark-unread", |m| m.mark_unread()),
 			("open-in-tuta", |m| {
@@ -306,6 +383,9 @@ impl Mailbox {
 					crate::render::open_uri(&m.ctx.window, &url);
 				}
 			}),
+			("next", |m| m.step(1)),
+			("previous", |m| m.step(-1)),
+			("focus-list", |m| m.focus_list()),
 		];
 		for (name, f) in entries {
 			let action = gio::SimpleAction::new(name, None);
@@ -317,6 +397,17 @@ impl Mailbox {
 			});
 			self.ctx.window.add_action(&action);
 		}
+		// Ctrl+1…9 open the folders in order.
+		let folder = gio::SimpleAction::new("folder", Some(glib::VariantTy::INT32));
+		let weak = Rc::downgrade(self);
+		folder.connect_activate(move |_, param| {
+			let (Some(this), Some(i)) = (weak.upgrade(), param.and_then(|p| p.get::<i32>())) else { return };
+			if let Some(row) = this.folder_list.row_at_index(i) {
+				this.folder_list.select_row(Some(&row));
+				this.focus_list();
+			}
+		});
+		self.ctx.window.add_action(&folder);
 		self.set_enabled(false);
 	}
 
@@ -325,62 +416,75 @@ impl Mailbox {
 	}
 
 	fn set_enabled(&self, signed_in: bool) {
-		for name in ["compose", "refresh"] {
+		for name in ["compose", "refresh", "next", "previous", "focus-list", "folder"] {
 			self.action(name).set_enabled(signed_in);
 		}
 		self.update_actions();
 	}
 
-	/// Mail actions work only while a mail is open.
+	/// Mail actions work only while a conversation is open.
 	fn update_actions(&self) {
 		let open = self.reader.current.borrow().is_some() && self.ctx.backend().is_some();
-		for name in ["reply", "reply-all", "forward", "trash", "mark-unread", "open-in-tuta"] {
-			self.action(name).set_enabled(open);
+		let answerable = open && self.reader.current.borrow().as_ref().is_some_and(|o| !o.mail.summary.draft);
+		for name in ["reply", "reply-all", "forward"] {
+			self.action(name).set_enabled(answerable);
+		}
+		for name in ["trash", "mark-unread", "open-in-tuta"] {
+			self.action(name).set_enabled(open || self.reader.thread().is_some());
 		}
 	}
 
+	/// Shows the cached mailbox at once; the background sync fills in the rest.
 	pub fn start(self: &Rc<Self>) {
 		let Some(backend) = self.ctx.backend() else { return };
 		let account = backend.account();
 		self.account.set_subtitle(&account.address);
 		self.ctx.window.set_title(Some(&format!("Tern — {}", account.address)));
 		self.set_enabled(true);
-		self.load_folders(true);
+		let cached = self.ctx.cache().and_then(|c| c.folders().ok()).unwrap_or_default();
+		if cached.is_empty() {
+			self.list_stack.set_visible_child_name("loading");
+		} else {
+			self.set_folders(cached, true);
+		}
 	}
 
 	pub fn clear(&self) {
-		self.generation.set(self.generation.get() + 1);
 		self.folder_list.remove_all();
 		self.folders.borrow_mut().clear();
 		*self.current.borrow_mut() = None;
+		self.in_flight.borrow_mut().clear();
+		self.syncing.set_visible(false);
 		self.store.remove_all();
 		self.reader.clear();
 		self.set_enabled(false);
 	}
 
-	fn load_folders(self: &Rc<Self>, select_inbox: bool) {
-		let Some(backend) = self.ctx.backend() else { return };
-		let this = self.clone();
-		runtime::spawn_local(async move {
-			let b = backend.clone();
-			let result = runtime::run(async move { b.folders().await }).await;
-			// Signed out, or into another account, while this was loading.
-			if !this.ctx.backend().is_some_and(|now| Arc::ptr_eq(&now, &backend)) {
-				return;
+	/// The cache changed: refresh folder counts, and the list when `folder` is the one on show
+	/// (or always, for None).
+	pub fn cache_changed(self: &Rc<Self>, folder: Option<&FolderId>) {
+		let Some(cache) = self.ctx.cache() else { return };
+		if let Ok(folders) = cache.folders() {
+			if !folders.is_empty() {
+				self.set_folders(folders, false);
 			}
-			match result {
-				Ok(folders) => this.set_folders(folders, select_inbox),
-				Err(e) if this.folders.borrow().is_empty() => {
-					this.list_title.set_title("");
-					this.show_status("Could Not Load Folders", Some(&format!("{e}. Press F5 to try again.")));
-				}
-				Err(e) => this.ctx.error(&e),
-			}
-		});
+		}
+		let current = self.current.borrow().as_ref().map(|f| f.id.clone());
+		if current.is_some() && (folder.is_none() || folder == current.as_ref()) {
+			self.reload_list();
+		}
+	}
+
+	/// Shows that the first sync of the folder list failed, when there is nothing cached to show.
+	pub fn sync_failed(&self, err: &tern_core::Error) {
+		if self.folders.borrow().is_empty() {
+			self.list_title.set_title("");
+			self.show_status("Could Not Load Folders", Some(&format!("{err}. Press F5 to try again.")));
+		}
 	}
 
 	fn set_folders(self: &Rc<Self>, folders: Vec<Folder>, select_inbox: bool) {
-		let current = self.current.borrow().clone();
+		let current = self.current.borrow().as_ref().map(|f| f.id.clone());
 		let unchanged = {
 			let old = self.folders.borrow();
 			old.len() == folders.len() && old.iter().zip(&folders).all(|((a, _), b)| a.id == b.id && a.name == b.name)
@@ -391,12 +495,15 @@ impl Mailbox {
 			for ((f, label), new) in old.iter_mut().zip(folders) {
 				*f = new;
 				set_count(label, f.unread);
+				if Some(&f.id) == current.as_ref() {
+					self.list_title.set_subtitle(&unread_subtitle(f.unread));
+				}
 			}
 			return;
 		}
 		self.folder_list.remove_all();
 		let mut rows = Vec::new();
-		for folder in folders {
+		for (i, folder) in folders.into_iter().enumerate() {
 			let icon = gtk::Image::from_icon_name(folder_icon(folder.kind));
 			let name = gtk::Label::builder().label(&folder.name).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build();
 			let count = gtk::Label::builder().css_classes(["dim-label", "numeric", "caption-heading"]).build();
@@ -405,6 +512,9 @@ impl Mailbox {
 			row_box.append(&icon);
 			row_box.append(&name);
 			row_box.append(&count);
+			if i < 9 {
+				row_box.set_tooltip_text(Some(&format!("Ctrl+{}", i + 1)));
+			}
 			self.folder_list.append(&row_box);
 			rows.push((folder, count));
 		}
@@ -415,7 +525,7 @@ impl Mailbox {
 		let target = {
 			let folders = self.folders.borrow();
 			let by_current = current.and_then(|c| folders.iter().position(|(f, _)| f.id == c));
-			let inbox = folders.iter().position(|(f, _)| f.kind == FolderKind::Inbox).or(if folders.is_empty() { None } else { Some(0) });
+			let inbox = folders.iter().position(|(f, _)| f.kind == FolderKind::Inbox).or(Some(0));
 			if select_inbox { inbox } else { by_current.or(inbox) }
 		};
 		if let Some(row) = target.and_then(|i| self.folder_list.row_at_index(i as i32)) {
@@ -423,241 +533,265 @@ impl Mailbox {
 		}
 	}
 
-	/// Shows a status page in place of the mail list.
+	/// Shows a status page in place of the list.
 	fn show_status(&self, title: &str, description: Option<&str>) {
 		self.empty.set_title(title);
 		self.empty.set_description(description);
 		self.list_stack.set_visible_child_name("empty");
 	}
 
-	fn change_unread(&self, delta: i32) {
-		let current = self.current.borrow().clone();
-		let mut folders = self.folders.borrow_mut();
-		if let Some((f, label)) = folders.iter_mut().find(|(f, _)| Some(&f.id) == current.as_ref()) {
-			f.unread = (f.unread as i32 + delta).max(0) as u32;
-			set_count(label, f.unread);
-			self.list_title.set_subtitle(&unread_subtitle(f.unread));
-		}
+	fn change_title(&self, folder: &Folder) {
+		self.list_title.set_title(&folder.name);
+		self.list_title.set_subtitle(&unread_subtitle(folder.unread));
 	}
 
 	fn open_folder(self: &Rc<Self>, folder: &Folder) {
-		*self.current.borrow_mut() = Some(folder.id.clone());
-		self.list_title.set_title(&folder.name);
-		self.list_title.set_subtitle(&unread_subtitle(folder.unread));
+		*self.current.borrow_mut() = Some(folder.clone());
+		self.change_title(folder);
+		self.hold.set(true);
 		self.selection.set_selected(gtk::INVALID_LIST_POSITION);
+		self.store.remove_all();
+		self.hold.set(false);
 		self.reader.clear();
 		self.update_actions();
 		self.inner.set_show_content(false);
-		self.store.remove_all();
-		self.list_stack.set_visible_child_name("loading");
-		self.load_page(None);
+		self.shown.set(ROWS);
+		self.reload_list();
+		self.sync_folder(&folder.id);
 	}
 
-	/// Loads a page of the current folder; `next` None starts over.
-	fn load_page(self: &Rc<Self>, next: Option<String>) {
-		let (Some(backend), Some(folder)) = (self.ctx.backend(), self.current.borrow().clone()) else { return };
-		let restart = next.is_none();
-		let generation = if restart {
-			self.generation.set(self.generation.get() + 1);
-			self.generation.get()
+	/// Shows the current folder's conversations as the cache has them, keeping the selection.
+	fn reload_list(self: &Rc<Self>) {
+		let (Some(cache), Some(folder)) = (self.ctx.cache(), self.current.borrow().clone()) else { return };
+		let rows = cache.threads(&folder.id, self.shown.get()).unwrap_or_default();
+		let selected = self.selection.selected_item().map(|o| row_of(&o).key);
+		let position = self.selection.selected();
+		let items: Vec<glib::BoxedAnyObject> = rows.iter().cloned().map(glib::BoxedAnyObject::new).collect();
+		// Rows that did not change keep their widgets.
+		let same = self.store.n_items() as usize == rows.len()
+			&& (0..self.store.n_items()).all(|i| self.store.item(i).is_some_and(|o| row_of(&o) == rows[i as usize]));
+		if !same {
+			self.hold.set(true);
+			self.store.splice(0, self.store.n_items(), &items);
+			let again = selected.as_ref().and_then(|k| rows.iter().position(|r| &r.key == k));
+			self.selection.set_selected(again.map_or(gtk::INVALID_LIST_POSITION, |i| i as u32));
+			self.hold.set(false);
+			if selected.is_some() && again.is_none() {
+				// The open conversation left this folder: show its neighbour.
+				let next = position.min(self.store.n_items().saturating_sub(1));
+				if self.store.n_items() > 0 && position != gtk::INVALID_LIST_POSITION {
+					self.by_keyboard.set(true);
+					self.selection.set_selected(next);
+				} else {
+					self.reader.clear();
+				}
+			}
+		}
+		// The open conversation may have new mail.
+		if let Some(obj) = self.selection.selected_item() {
+			self.open_thread(&row_of(&obj));
+		}
+		let synced = cache.folder_state(&folder.id).map(|s| s.synced_ms > 0).unwrap_or(false);
+		if !rows.is_empty() {
+			self.list_stack.set_visible_child_name("list");
+		} else if synced || !self.in_flight.borrow().contains(&folder.id) {
+			self.show_status("No Messages", None);
 		} else {
-			self.generation.get()
-		};
-		self.loading.set(Some(generation));
-		let this = self.clone();
+			self.list_stack.set_visible_child_name("loading");
+		}
+		self.update_actions();
+	}
+
+	/// Brings `folder` up to date now, ahead of the background sync.
+	pub fn sync_folder(self: &Rc<Self>, folder: &FolderId) {
+		let (Some(backend), Some(cache)) = (self.ctx.backend(), self.ctx.cache()) else { return };
+		if self.in_flight.borrow().contains(folder) {
+			return;
+		}
+		self.in_flight.borrow_mut().push(folder.clone());
+		self.update_syncing();
+		let keep = self.ctx.settings().offline.headers();
+		let (this, id) = (self.clone(), folder.clone());
 		runtime::spawn_local(async move {
-			let result = runtime::run(async move { backend.list(&folder, next, PAGE).await }).await;
-			if this.generation.get() != generation {
+			let i = id.clone();
+			let b = backend.clone();
+			let result = runtime::run(async move { sync::folder(b.as_ref(), &cache, &i, keep).await }).await;
+			this.in_flight.borrow_mut().retain(|f| f != &id);
+			this.update_syncing();
+			// Signed out, or into another account, meanwhile.
+			if !this.ctx.backend().is_some_and(|now| std::sync::Arc::ptr_eq(&now, &backend)) {
 				return;
 			}
-			this.loading.set(None);
 			match result {
-				Ok(page) => {
-					let items: Vec<glib::BoxedAnyObject> = page.mails.into_iter().map(glib::BoxedAnyObject::new).collect();
-					if restart {
-						this.store.splice(0, this.store.n_items(), &items);
-					} else {
-						this.store.extend_from_slice(&items);
-					}
-					*this.next.borrow_mut() = page.next;
-					this.empty.set_title("No Messages");
-					this.empty.set_description(None);
-					this.list_stack.set_visible_child_name(if this.store.n_items() == 0 { "empty" } else { "list" });
-				}
+				Ok(_) => this.cache_changed(Some(&id)),
 				Err(e) => {
-					if this.store.n_items() == 0 {
-						this.show_status("Could Not Load Messages", Some(&e.to_string()));
-					} else {
+					let current = this.current.borrow().as_ref().map(|f| f.id.clone());
+					if current.as_ref() == Some(&id) && this.store.n_items() == 0 {
+						this.show_status("Could Not Load Messages", Some(&format!("{e}. Press F5 to try again.")));
+					} else if current.as_ref() == Some(&id) {
 						this.ctx.error(&e);
 					}
-				}
+				},
 			}
 		});
 	}
 
-	fn load_more(self: &Rc<Self>) {
-		if self.is_loading() {
-			return;
-		}
-		let next = self.next.borrow().clone();
-		if let Some(next) = next {
-			self.load_page(Some(next));
+	fn update_syncing(&self) {
+		let current = self.current.borrow().as_ref().map(|f| f.id.clone());
+		let busy = current.is_some_and(|c| self.in_flight.borrow().contains(&c)) || self.fetching_older.get();
+		self.syncing.set_visible(busy);
+	}
+
+	/// Brings the folders of these kinds up to date, as after sending or saving a draft.
+	fn sync_kinds(self: &Rc<Self>, kinds: &[FolderKind]) {
+		let ids: Vec<FolderId> = self.folders.borrow().iter().filter(|(f, _)| kinds.contains(&f.kind)).map(|(f, _)| f.id.clone()).collect();
+		for id in ids {
+			self.sync_folder(&id);
 		}
 	}
 
-	/// Reloads folder counts and the list, keeping the open mail selected if it is still there.
-	fn refresh(self: &Rc<Self>) {
-		if self.current.borrow().is_none() {
-			return self.load_folders(true);
-		}
-		self.load_folders(false);
-		let Some(backend) = self.ctx.backend() else { return };
-		let Some(folder) = self.current.borrow().clone() else { return };
-		self.generation.set(self.generation.get() + 1);
-		let generation = self.generation.get();
-		self.loading.set(Some(generation));
-		let open = self.reader.current.borrow().as_ref().map(|o| o.mail.summary.id.clone());
-		let this = self.clone();
-		runtime::spawn_local(async move {
-			let result = runtime::run(async move { backend.list(&folder, None, PAGE).await }).await;
-			if this.generation.get() != generation {
+	fn load_more(self: &Rc<Self>) {
+		let (Some(cache), Some(backend), Some(folder)) = (self.ctx.cache(), self.ctx.backend(), self.current.borrow().clone()) else { return };
+		if self.store.n_items() as usize >= self.shown.get() {
+			// The cache has more than shown.
+			self.shown.set(self.shown.get() + ROWS);
+			self.reload_list();
+			if self.store.n_items() as usize >= self.shown.get() - ROWS + 1 {
 				return;
 			}
-			this.loading.set(None);
+		}
+		if self.fetching_older.get() || cache.folder_state(&folder.id).map(|s| s.complete).unwrap_or(true) {
+			return;
+		}
+		self.fetching_older.set(true);
+		self.update_syncing();
+		let this = self.clone();
+		runtime::spawn_local(async move {
+			let id = folder.id.clone();
+			let result = runtime::run(async move { sync::older(backend.as_ref(), &cache, &id).await }).await;
+			this.fetching_older.set(false);
+			this.update_syncing();
 			match result {
-				Ok(page) => {
-					let selected = page.mails.iter().position(|m| Some(&m.id) == open.as_ref());
-					let items: Vec<glib::BoxedAnyObject> = page.mails.into_iter().map(glib::BoxedAnyObject::new).collect();
-					// The reader keeps what it shows while the list is swapped underneath.
-					this.hold.set(true);
-					this.store.splice(0, this.store.n_items(), &items);
-					this.selection.set_selected(selected.map_or(gtk::INVALID_LIST_POSITION, |i| i as u32));
-					this.hold.set(false);
-					*this.next.borrow_mut() = page.next;
-					this.list_stack.set_visible_child_name(if this.store.n_items() == 0 { "empty" } else { "list" });
-				}
+				Ok(_) => {
+					this.shown.set(this.shown.get() + ROWS);
+					this.cache_changed(Some(&folder.id));
+				},
 				Err(e) => this.ctx.error(&e),
 			}
 		});
 	}
 
-	fn open_mail(self: &Rc<Self>, summary: MailSummary) {
-		if self.reader.current.borrow().as_ref().is_some_and(|o| o.mail.summary.id == summary.id) {
-			self.inner.set_show_content(true);
+	fn refresh(self: &Rc<Self>) {
+		self.ctx.sync_now();
+		let current = self.current.borrow().as_ref().map(|f| f.id.clone());
+		match current {
+			Some(id) => self.sync_folder(&id),
+			None => self.list_stack.set_visible_child_name("loading"),
+		}
+	}
+
+	fn open_thread(self: &Rc<Self>, row: &ThreadRow) {
+		let (Some(cache), Some(folder)) = (self.ctx.cache(), self.current.borrow().clone()) else { return };
+		let mut mails = cache.thread(&row.key, &folder.id).unwrap_or_default();
+		if mails.is_empty() {
+			mails.push(ThreadMail { summary: row.latest.clone(), folder: folder.kind, folder_id: folder.id.clone() });
+		}
+		self.reader.show_thread(&row.key, &folder.id, mails, &row.latest.id);
+		self.update_actions();
+	}
+
+	/// Moves the selection by `delta` conversations, from anywhere in the window.
+	fn step(self: &Rc<Self>, delta: i32) {
+		let n = self.store.n_items() as i32;
+		if n == 0 {
 			return;
 		}
-		let Some(backend) = self.ctx.backend() else { return };
-		let generation = self.reader.loading();
-		self.inner.set_show_content(true);
-		let this = self.clone();
-		let id = summary.id.clone();
-		runtime::spawn_local(async move {
-			let b = backend.clone();
-			let result = runtime::run(async move {
-				let mail = b.open(&id).await?;
-				let doc = Doc::parse(&mail.body_html);
-				Ok::<_, tern_core::Error>(Opened { mail, doc })
-			})
-			.await;
-			if !this.reader.is_current(generation) {
-				return;
-			}
-			match result {
-				Ok(opened) => {
-					this.reader.show(opened);
-					this.update_actions();
-					if summary.unread {
-						this.set_unread(&summary, false);
-					}
-				}
-				Err(e) => {
-					this.reader.clear();
-					this.update_actions();
-					this.ctx.error(&e);
-				}
-			}
-		});
+		let at = self.selection.selected();
+		let next = if at == gtk::INVALID_LIST_POSITION { 0 } else { (at as i32 + delta).clamp(0, n - 1) };
+		self.by_keyboard.set(true);
+		self.selection.set_selected(next as u32);
+		self.list_view.scroll_to(next as u32, gtk::ListScrollFlags::FOCUS, None);
 	}
 
-	fn position_of(&self, id: &tern_core::MailId) -> Option<u32> {
-		(0..self.store.n_items()).find(|&i| self.store.item(i).is_some_and(|o| &summary_of(&o).id == id))
-	}
-
-	/// Marks a mail read or unread on the server and in the list.
-	fn set_unread(self: &Rc<Self>, summary: &MailSummary, unread: bool) {
-		let Some(backend) = self.ctx.backend() else { return };
-		if let Some(pos) = self.position_of(&summary.id) {
-			// A new object, so the list view binds the row again; the selection stays put.
-			let mut m = summary_of(&self.store.item(pos).unwrap());
-			m.unread = unread;
-			let selected = self.selection.selected();
-			self.hold.set(true);
-			self.store.splice(pos, 1, &[glib::BoxedAnyObject::new(m)]);
-			self.selection.set_selected(selected);
-			self.hold.set(false);
+	fn focus_list(&self) {
+		if self.store.n_items() == 0 {
+			return;
 		}
-		self.change_unread(if unread { 1 } else { -1 });
+		let at = match self.selection.selected() {
+			gtk::INVALID_LIST_POSITION => 0,
+			at => at,
+		};
+		self.list_view.scroll_to(at, gtk::ListScrollFlags::FOCUS, None);
+	}
+
+	/// Marks a mail read or unread on the server and in the cache.
+	fn set_unread(self: &Rc<Self>, summary: &MailSummary, unread: bool) {
+		let (Some(backend), Some(cache)) = (self.ctx.backend(), self.ctx.cache()) else { return };
+		let _ = cache.set_unread(&summary.id, unread);
+		self.cache_changed(None);
 		let id = summary.id.clone();
 		let ctx = self.ctx.clone();
 		runtime::spawn_local(async move {
-			if let Err(e) = runtime::run(async move { backend.set_unread(&id, unread).await }).await {
+			let i = id.clone();
+			if let Err(e) = runtime::run(async move { backend.set_unread(&i, unread).await }).await {
+				let _ = cache.set_unread(&id, !unread);
 				ctx.error(&e);
 			}
 		});
 	}
 
 	fn mark_unread(self: &Rc<Self>) {
-		let Some(summary) = self.reader.current.borrow().as_ref().map(|o| o.mail.summary.clone()) else { return };
-		let listed = self.position_of(&summary.id).and_then(|p| self.store.item(p)).map(|o| summary_of(&o));
-		if listed.is_some_and(|m| !m.unread) {
+		let target = self.reader.current.borrow().as_ref().map(|o| o.mail.summary.clone());
+		if let Some(summary) = target {
+			// Keep it unread: leave the conversation, or opening it marks it read again.
+			self.hold.set(true);
+			self.selection.set_selected(gtk::INVALID_LIST_POSITION);
+			self.hold.set(false);
+			self.reader.clear();
 			self.set_unread(&summary, true);
+			self.focus_list();
 		}
 	}
 
-	fn trash_selected(self: &Rc<Self>) {
-		let Some(backend) = self.ctx.backend() else { return };
-		let Some(summary) = self.reader.current.borrow().as_ref().map(|o| o.mail.summary.clone()) else { return };
-		let pos = self.position_of(&summary.id);
-		if let Some(pos) = pos {
-			let unread = summary_of(&self.store.item(pos).unwrap()).unread;
-			self.store.remove(pos);
-			if unread {
-				self.change_unread(-1);
-			}
+	/// Moves the open conversation's mails in this folder to Trash.
+	fn trash_conversation(self: &Rc<Self>) {
+		let (Some(cache), Some((key, folder))) = (self.ctx.cache(), self.reader.thread()) else { return };
+		let ids: Vec<MailId> = cache.thread(&key, &folder).unwrap_or_default().into_iter().filter(|m| m.folder_id == folder).map(|m| m.summary.id).collect();
+		let message = if ids.len() > 1 { "Conversation moved to Trash" } else { "Moved to Trash" };
+		self.trash(ids, message);
+	}
+
+	fn trash(self: &Rc<Self>, ids: Vec<MailId>, message: &'static str) {
+		let (Some(backend), Some(cache)) = (self.ctx.backend(), self.ctx.cache()) else { return };
+		if ids.is_empty() {
+			return;
 		}
-		self.reader.clear();
-		self.selection.set_selected(gtk::INVALID_LIST_POSITION);
-		self.update_actions();
-		if self.inner.is_collapsed() {
-			self.inner.set_show_content(false);
+		let trash = self.folders.borrow().iter().find(|(f, _)| f.kind == FolderKind::Trash).map(|(f, _)| f.id.clone());
+		for id in &ids {
+			let _ = match &trash {
+				Some(t) => cache.move_to(id, t),
+				None => cache.remove(id),
+			};
 		}
-		if self.store.n_items() == 0 {
-			self.list_stack.set_visible_child_name("empty");
-		}
+		self.cache_changed(None);
+		self.focus_list();
 		let this = self.clone();
 		runtime::spawn_local(async move {
-			let id = summary.id.clone();
-			match runtime::run(async move { backend.trash(&id).await }).await {
-				Ok(()) => {
-					this.ctx.toast("Moved to Trash");
-					this.load_folders(false);
+			let result = runtime::run(async move {
+				for id in &ids {
+					backend.trash(id).await?;
 				}
+				Ok::<_, tern_core::Error>(())
+			})
+			.await;
+			match result {
+				Ok(()) => this.ctx.toast(message),
 				Err(e) => {
 					this.ctx.error(&e);
 					this.refresh();
-				}
+				},
 			}
 		});
-	}
-
-	/// A page of the current list is on its way.
-	pub fn is_loading(&self) -> bool {
-		self.loading.get() == Some(self.generation.get())
-	}
-
-	/// For the screenshot scenes: the title of the status page shown instead of the list, if one is.
-	pub fn status(&self) -> Option<String> {
-		(self.list_stack.visible_child_name().as_deref() == Some("empty")).then(|| self.empty.title().to_string())
 	}
 
 	/// For the screenshot scenes: opens the first folder of a kind.
@@ -668,13 +802,23 @@ impl Mailbox {
 		}
 	}
 
-	/// For the screenshot scenes: selects the first mail whose subject contains `text`.
+	/// For the screenshot scenes: selects the first conversation whose subject contains `text`.
 	pub fn select_by_subject(&self, text: &str) -> bool {
-		let found = (0..self.store.n_items()).find(|&i| self.store.item(i).is_some_and(|o| summary_of(&o).subject.contains(text)));
+		let found = (0..self.store.n_items()).find(|&i| self.store.item(i).is_some_and(|o| row_of(&o).latest.subject.contains(text)));
 		if let Some(i) = found {
 			self.selection.set_selected(i);
 		}
 		found.is_some()
+	}
+
+	/// For the screenshot scenes: the title of the status page shown instead of the list, if one is.
+	pub fn status(&self) -> Option<String> {
+		(self.list_stack.visible_child_name().as_deref() == Some("empty")).then(|| self.empty.title().to_string())
+	}
+
+	/// For the screenshot scenes: a folder is being brought up to date.
+	pub fn is_loading(&self) -> bool {
+		!self.in_flight.borrow().is_empty() || self.fetching_older.get()
 	}
 }
 

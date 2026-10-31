@@ -47,3 +47,32 @@ pub async fn forget() {
 		let _ = keyring.delete(&attrs(None)).await;
 	}
 }
+
+/// Kept apart from the session items, which are replaced as a whole.
+const CACHE_KEY_APP: &str = "xyz.hollingworth.Tern.CacheKey";
+
+fn cache_attrs(email: &str) -> HashMap<&str, &str> {
+	HashMap::from([("application", CACHE_KEY_APP), ("account", email)])
+}
+
+/// The key of `email`'s mail cache, made and stored on first use. None when there is no keyring:
+/// then nothing is cached on disk.
+pub async fn cache_key(email: &str) -> Option<[u8; 32]> {
+	let keyring = oo7::Keyring::new().await.ok()?;
+	let _ = keyring.unlock().await;
+	if let Some(item) = keyring.search_items(&cache_attrs(email)).await.ok()?.into_iter().next() {
+		if let Ok(key) = <[u8; 32]>::try_from(item.secret().await.ok()?.as_bytes()) {
+			return Some(key);
+		}
+	}
+	let mut key = [0u8; 32];
+	std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut key)).ok()?;
+	keyring.create_item(&format!("Tern mail cache key for {email}"), &cache_attrs(email), key.to_vec(), true).await.ok()?;
+	Some(key)
+}
+
+pub async fn forget_cache_key(email: &str) {
+	if let Ok(keyring) = oo7::Keyring::new().await {
+		let _ = keyring.delete(&cache_attrs(email)).await;
+	}
+}

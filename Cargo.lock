@@ -3314,6 +3314,8 @@ dependencies = [
  "libadwaita",
  "oo7",
  "scraper",
+ "serde_json",
+ "tern-cache",
  "tern-core",
  "tern-tuta",
  "tokio",

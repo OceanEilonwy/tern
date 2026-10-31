@@ -5,10 +5,10 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
-use tern_core::{mime_for, Attachment, MailId, NewAttachment};
+use tern_core::{mime_for, Attachment, FolderKind, MailId, NewAttachment};
 
 use crate::compose_model::{Fields, MAX_TOTAL_BYTES};
-use crate::{attachments::icon_for, format, runtime, window::Ctx};
+use crate::{attachments::icon_for, format, runtime, suggest, window::Ctx};
 
 pub struct Composer {
 	ctx: Ctx,
@@ -26,7 +26,13 @@ pub struct Composer {
 	files_box: gtk::Box,
 	files_summary: gtk::Label,
 	attachments: RefCell<Vec<NewAttachment>>,
+	/// Attachments already on the saved draft this continues.
+	kept: RefCell<Vec<Attachment>>,
 	previous: Option<(MailId, tern_core::ReplyKind)>,
+	/// The saved draft this continues, replaced on every save.
+	existing: RefCell<Option<MailId>>,
+	/// The fields as last saved or opened, to tell whether closing needs to save.
+	saved: RefCell<(String, String, String, String, String, usize, usize)>,
 	pending: Cell<usize>,
 	sending: Cell<bool>,
 	done: Cell<bool>,
@@ -48,10 +54,12 @@ impl Composer {
 	pub fn open(ctx: &Ctx, fields: Fields, forward: Option<(MailId, Vec<Attachment>)>) -> Rc<Composer> {
 		let title = adw::WindowTitle::new("New Message", "");
 		let send = gtk::Button::builder().label("Send").css_classes(["suggested-action"]).tooltip_text("Send (Ctrl+Enter)").build();
-		let attach = gtk::Button::builder().icon_name("mail-attachment-symbolic").tooltip_text("Attach Files…").build();
+		let attach = gtk::Button::builder().icon_name("mail-attachment-symbolic").tooltip_text("Attach Files… (Ctrl+Shift+A)").build();
+		let discard = gtk::Button::builder().icon_name("user-trash-symbolic").tooltip_text("Discard").build();
 		let header = adw::HeaderBar::builder().title_widget(&title).build();
 		header.pack_start(&attach);
 		header.pack_end(&send);
+		header.pack_end(&discard);
 
 		let (to_row, to) = field("To");
 		let (cc_row, cc) = field("Cc");
@@ -134,7 +142,10 @@ impl Composer {
 			files_box,
 			files_summary,
 			attachments: RefCell::new(fields.attachments.clone()),
+			kept: RefCell::new(fields.kept.clone()),
 			previous: fields.previous.clone(),
+			existing: RefCell::new(fields.existing.clone()),
+			saved: RefCell::default(),
 			pending: Cell::new(0),
 			sending: Cell::new(false),
 			done: Cell::new(false),
@@ -185,6 +196,15 @@ impl Composer {
 				this.pick_files();
 			}
 		});
+		let weak = Rc::downgrade(&this);
+		discard.connect_clicked(move |_| {
+			if let Some(this) = weak.upgrade() {
+				this.ask_discard();
+			}
+		});
+		for entry in [&this.to, &this.cc, &this.bcc] {
+			suggest::attach(entry, &this.ctx);
+		}
 		this.connect_drop(&content);
 		this.connect_keys();
 		this.connect_close();
@@ -195,6 +215,8 @@ impl Composer {
 			}
 		}
 
+		// A draft opened again counts as saved until it changes.
+		*this.saved.borrow_mut() = snapshot(&this.fields());
 		this.window.present();
 		for entry in [&this.to, &this.cc, &this.bcc, &this.subject] {
 			entry.select_region(0, 0);
@@ -232,7 +254,8 @@ impl Composer {
 			body: buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).into(),
 			attachments: self.attachments.borrow().clone(),
 			previous: self.previous.clone(),
-			..Default::default()
+			existing: self.existing.borrow().clone(),
+			kept: self.kept.borrow().clone(),
 		}
 	}
 
@@ -254,6 +277,24 @@ impl Composer {
 
 	fn refresh_files(self: &Rc<Self>) {
 		self.files.remove_all();
+		let kept = self.kept.borrow();
+		for (i, att) in kept.iter().enumerate() {
+			let row = adw::ActionRow::builder().title(glib::markup_escape_text(&att.name)).subtitle(format::size(att.size)).build();
+			row.add_prefix(&gtk::Image::from_gicon(&icon_for(&att.mime)));
+			let remove = gtk::Button::builder().icon_name("edit-delete-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Remove").build();
+			let weak = Rc::downgrade(self);
+			remove.connect_clicked(move |_| {
+				if let Some(this) = weak.upgrade() {
+					this.kept.borrow_mut().remove(i);
+					this.refresh_files();
+				}
+			});
+			row.add_suffix(&remove);
+			self.files.append(&row);
+		}
+		let kept_count = kept.len();
+		let kept_size: u64 = kept.iter().map(|a| a.size).sum();
+		drop(kept);
 		let atts = self.attachments.borrow();
 		for (i, att) in atts.iter().enumerate() {
 			let row = adw::ActionRow::builder().title(glib::markup_escape_text(&att.name)).subtitle(format::size(att.data.len() as u64)).build();
@@ -271,8 +312,8 @@ impl Composer {
 			self.files.append(&row);
 		}
 		let pending = self.pending.get();
-		let total: u64 = atts.iter().map(|a| a.data.len() as u64).sum();
-		let mut summary = match atts.len() {
+		let total: u64 = atts.iter().map(|a| a.data.len() as u64).sum::<u64>() + kept_size;
+		let mut summary = match atts.len() + kept_count {
 			0 => String::new(),
 			1 => format!("1 attachment · {}", format::size(total)),
 			n => format!("{n} attachments · {}", format::size(total)),
@@ -284,7 +325,7 @@ impl Composer {
 			summary.push_str(&format!("downloading {pending}…"));
 		}
 		self.files_summary.set_label(&summary);
-		self.files_box.set_visible(!atts.is_empty() || pending > 0);
+		self.files_box.set_visible(atts.len() + kept_count > 0 || pending > 0);
 	}
 
 	fn add_attachment(self: &Rc<Self>, att: NewAttachment) {
@@ -380,37 +421,46 @@ impl Composer {
 		});
 		keys.add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string("<Control>Return|<Control>KP_Enter"), Some(send)));
 		let window = self.window.clone();
+		let entries = [self.to.clone(), self.cc.clone(), self.bcc.clone()];
 		let close = gtk::CallbackAction::new(move |_, _| {
-			window.close();
+			// Escape first closes open address suggestions.
+			if !entries.iter().any(suggest::dismiss) {
+				window.close();
+			}
 			glib::Propagation::Stop
 		});
 		keys.add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string("<Control>w|Escape"), Some(close)));
+		let weak = Rc::downgrade(self);
+		let attach = gtk::CallbackAction::new(move |_, _| {
+			if let Some(this) = weak.upgrade() {
+				this.pick_files();
+			}
+			glib::Propagation::Stop
+		});
+		keys.add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string("<Control><Shift>a"), Some(attach)));
 		self.window.add_controller(keys);
 	}
 
 	fn connect_close(self: &Rc<Self>) {
 		let weak = Rc::downgrade(self);
-		self.window.connect_close_request(move |window| {
+		self.window.connect_close_request(move |_| {
 			let Some(this) = weak.upgrade() else { return glib::Propagation::Proceed };
-			if this.done.get() || this.fields().is_empty() {
+			if this.done.get() {
 				return glib::Propagation::Proceed;
 			}
 			if this.sending.get() {
 				return glib::Propagation::Stop;
 			}
-			let dialog = adw::AlertDialog::new(Some("Discard Message?"), Some("The message has not been sent and will be lost."));
-			dialog.add_responses(&[("cancel", "_Cancel"), ("discard", "_Discard")]);
-			dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
-			dialog.set_default_response(Some("cancel"));
-			dialog.set_close_response("cancel");
-			let this = this.clone();
-			dialog.connect_response(None, move |_, response| {
-				if response == "discard" {
-					this.done.set(true);
-					this.window.close();
-				}
-			});
-			dialog.present(Some(window));
+			let fields = this.fields();
+			let unchanged = snapshot(&fields) == *this.saved.borrow();
+			if (fields.is_empty() && fields.existing.is_none()) || unchanged {
+				return glib::Propagation::Proceed;
+			}
+			if this.pending.get() > 0 {
+				this.toast("Attachments are still downloading");
+				return glib::Propagation::Stop;
+			}
+			this.save_and_close(fields);
 			glib::Propagation::Stop
 		});
 		// Break the window ↔ composer cycle once it is gone.
@@ -418,6 +468,72 @@ impl Composer {
 		self.window.connect_destroy(move |_| {
 			keep.borrow_mut().take();
 		});
+	}
+
+	/// Closing keeps the message: it is saved to Drafts, with the window hidden meanwhile. If saving
+	/// fails the window comes back with the reason.
+	fn save_and_close(self: &Rc<Self>, fields: Fields) {
+		let Some(backend) = self.ctx.backend() else { return };
+		self.window.set_visible(false);
+		let draft = fields.saved_draft();
+		let replaced = draft.existing.clone();
+		let this = self.clone();
+		runtime::spawn_local(async move {
+			let result = runtime::run(async move { backend.save_draft(draft).await }).await;
+			match result {
+				Ok(id) => {
+					if let (Some(old), Some(cache)) = (replaced, this.ctx.cache()) {
+						if old != id {
+							let _ = cache.remove(&old);
+						}
+					}
+					this.done.set(true);
+					this.window.close();
+					this.ctx.toast("Saved to Drafts");
+					this.ctx.changed(&[FolderKind::Drafts]);
+				},
+				Err(e) => {
+					this.window.present();
+					this.toast(&format!("Could not save the draft: {e}"));
+				},
+			}
+		});
+	}
+
+	/// Throws the message away, and its saved draft with it, after asking.
+	fn ask_discard(self: &Rc<Self>) {
+		let fields = self.fields();
+		if fields.is_empty() && fields.existing.is_none() {
+			self.done.set(true);
+			self.window.close();
+			return;
+		}
+		let dialog = adw::AlertDialog::new(Some("Discard Message?"), Some("The message and its draft will be deleted."));
+		dialog.add_responses(&[("cancel", "_Cancel"), ("discard", "_Discard")]);
+		dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+		dialog.set_default_response(Some("cancel"));
+		dialog.set_close_response("cancel");
+		let this = self.clone();
+		dialog.connect_response(None, move |_, response| {
+			if response != "discard" {
+				return;
+			}
+			this.done.set(true);
+			this.window.close();
+			let existing = this.existing.borrow().clone();
+			if let (Some(id), Some(backend), Some(cache)) = (existing, this.ctx.backend(), this.ctx.cache()) {
+				let _ = cache.remove(&id);
+				this.ctx.changed(&[FolderKind::Drafts]);
+				let ctx = this.ctx.clone();
+				runtime::spawn_local(async move {
+					match runtime::run(async move { backend.trash(&id).await }).await {
+						Ok(()) => ctx.changed(&[FolderKind::Drafts, FolderKind::Trash]),
+						Err(e) => ctx.error(&e),
+					}
+				});
+			}
+		});
+		dialog.present(Some(&self.window));
 	}
 
 	pub fn send(self: &Rc<Self>) {
@@ -454,6 +570,9 @@ impl Composer {
 			this.update_send();
 			match result {
 				Ok(()) => {
+					if let (Some(old), Some(cache)) = (this.existing.borrow().clone(), this.ctx.cache()) {
+						let _ = cache.remove(&old);
+					}
 					this.done.set(true);
 					this.window.close();
 					this.ctx.sent();
@@ -462,4 +581,9 @@ impl Composer {
 			}
 		});
 	}
+}
+
+/// What decides whether a message changed since it was saved.
+fn snapshot(f: &Fields) -> (String, String, String, String, String, usize, usize) {
+	(f.to.clone(), f.cc.clone(), f.bcc.clone(), f.subject.clone(), f.body.clone(), f.attachments.len(), f.kept.len())
 }

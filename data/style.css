@@ -1,0 +1,24 @@
+/* The mail of a conversation that the reply and trash buttons act on. */
+.thread-card.current {
+  box-shadow: 0 0 0 2px alpha(var(--accent-bg-color), 0.55), 0 1px 3px alpha(black, 0.1);
+}
+
+.thread-card > .card-header {
+  padding: 12px;
+  border-radius: 12px;
+}
+
+.thread-card > revealer > box {
+  padding-top: 4px;
+}
+
+/* Messages in a conversation, beside the sender in the list. */
+.thread-count {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: alpha(currentColor, 0.1);
+}
+
+.pill.small-pill {
+  padding: 6px 16px;
+}

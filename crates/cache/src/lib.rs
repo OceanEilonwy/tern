@@ -80,6 +80,7 @@ pub struct ThreadRow {
 pub struct ThreadMail {
 	pub summary: MailSummary,
 	pub folder: FolderKind,
+	pub folder_id: FolderId,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -154,6 +155,8 @@ impl Cache {
 
 	fn open_existing(path: &Path, key: &[u8; 32]) -> Result<Cache> {
 		let conn = Connection::open(path)?;
+		// A wrong key is handled by starting afresh; SQLCipher need not log it.
+		let _ = conn.execute_batch("PRAGMA cipher_log_level = NONE;");
 		let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
 		// The key is hex digits only, so it cannot break out of the quotes.
 		conn.execute_batch(&format!("PRAGMA key = \"x'{hex}'\";"))?;
@@ -299,14 +302,14 @@ impl Cache {
 	pub fn thread(&self, key: &str, folder: &FolderId) -> Result<Vec<ThreadMail>> {
 		let conn = self.conn();
 		let mut stmt = conn.prepare(
-			"SELECT m.summary, coalesce(f.kind, '') FROM mails m LEFT JOIN folders f ON f.id = m.folder
+			"SELECT m.summary, coalesce(f.kind, ''), m.folder FROM mails m LEFT JOIN folders f ON f.id = m.folder
 			 WHERE m.thread = ?1 AND (m.folder = ?2 OR coalesce(f.kind, '') NOT IN ('Trash', 'Spam'))
 			 ORDER BY m.received",
 		)?;
-		let rows = stmt.query_map(params![key, folder.0], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+		let rows = stmt.query_map(params![key, folder.0], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
 		rows.map(|row| {
-			let (summary, kind) = row?;
-			Ok(ThreadMail { summary: serde_json::from_str(&summary)?, folder: kind_from(&kind) })
+			let (summary, kind, folder_id) = row?;
+			Ok(ThreadMail { summary: serde_json::from_str(&summary)?, folder: kind_from(&kind), folder_id: FolderId(folder_id) })
 		})
 		.collect()
 	}

@@ -211,6 +211,20 @@ pub fn answer_fields(mail: &Mail, text: &str, date: &str, answer: Answer, me: &s
 	}
 }
 
+/// The fields of a saved draft, to continue writing it. `text` is its body as plain text.
+pub fn draft_fields(draft: &Mail, text: &str) -> Fields {
+	Fields {
+		to: format_addresses(&draft.to),
+		cc: format_addresses(&draft.cc),
+		bcc: format_addresses(&draft.bcc),
+		subject: draft.summary.subject.clone(),
+		body: text.to_string(),
+		existing: Some(draft.summary.id.clone()),
+		kept: draft.attachments.clone(),
+		..Default::default()
+	}
+}
+
 /// A file name safe to create in a directory of ours: no paths, no hidden files.
 pub fn safe_file_name(name: &str) -> String {
 	let base = name.rsplit(['/', '\\']).next().unwrap_or("");
@@ -226,6 +240,32 @@ pub fn safe_file_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn a_draft_reopens_with_its_recipients_and_attachments() {
+		let mut draft = mail();
+		draft.summary.draft = true;
+		draft.bcc = vec![Address::new("", "boss@x.org")];
+		draft.attachments = vec![tern_core::Attachment { id: "f/1".into(), name: "a.pdf".into(), mime: "application/pdf".into(), size: 3, cid: None }];
+		let fields = draft_fields(&draft, "Hello");
+		assert_eq!(fields.to, "You <you@tuta.com>, sam@x.org");
+		assert_eq!(fields.bcc, "boss@x.org");
+		assert_eq!(fields.existing, Some(draft.summary.id.clone()));
+		assert_eq!(fields.kept.len(), 1);
+		assert_eq!(fields.total_size(), 3);
+		// Saving it again goes over the same draft and keeps the file.
+		let saved = fields.saved_draft();
+		assert_eq!(saved.existing, fields.existing);
+		assert_eq!(saved.kept, fields.kept);
+		assert_eq!(saved.bcc, vec![Address::new("", "boss@x.org")]);
+	}
+
+	#[test]
+	fn a_saved_draft_leaves_out_what_is_not_an_address() {
+		let fields = Fields { to: "mia@tuta.com, not yet".into(), subject: "Plan".into(), ..Default::default() };
+		assert_eq!(fields.saved_draft().to, vec![Address::new("", "mia@tuta.com")]);
+		assert!(fields.build_draft().is_err());
+	}
 	use tern_core::demo::DemoBackend;
 	use tern_core::{Backend, FolderId, MailSummary};
 

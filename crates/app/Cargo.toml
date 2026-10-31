@@ -8,9 +8,11 @@ publish = false
 [dependencies]
 tern-core = { workspace = true }
 tern-tuta = { workspace = true }
+tern-cache = { workspace = true }
+serde_json = { workspace = true }
 gtk = { package = "gtk4", version = "0.11", features = ["v4_22"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_8"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync", "macros"] }
 oo7 = { version = "0.6", default-features = false, features = ["tokio", "native_crypto"] }
 scraper = { version = "0.29", default-features = false }
 ego-tree = "0.11"

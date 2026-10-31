@@ -1,6 +1,7 @@
 //! Tern, a small GNOME mail client for Tuta.
 
 mod attachments;
+mod background;
 mod compose_model;
 mod composer;
 mod format;
@@ -12,6 +13,8 @@ mod reader;
 mod render;
 mod runtime;
 mod screenshot;
+mod settings;
+mod suggest;
 mod window;
 
 use adw::prelude::*;
@@ -38,6 +41,13 @@ fn main() -> glib::ExitCode {
 		app.set_accels_for_action("win.forward", &["<Control>l"]);
 		app.set_accels_for_action("win.trash", &["Delete"]);
 		app.set_accels_for_action("win.refresh", &["F5"]);
+		app.set_accels_for_action("win.mark-unread", &["<Control>u"]);
+		app.set_accels_for_action("win.next", &["<Alt>Down"]);
+		app.set_accels_for_action("win.previous", &["<Alt>Up"]);
+		app.set_accels_for_action("app.preferences", &["<Control>comma"]);
+		for i in 0..9 {
+			app.set_accels_for_action(&format!("win.folder({i})"), &[&format!("<Control>{}", i + 1)]);
+		}
 		let quit = gio::ActionEntry::builder("quit").activate(|app: &adw::Application, _, _| app.quit()).build();
 		app.add_action_entries([quit]);
 	});

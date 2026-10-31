@@ -1,29 +1,59 @@
 //! The main window: the sign-in page or the mailbox, and the app-wide actions.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::gio;
-use tern_core::{demo::DemoBackend, Backend, Error};
+use tern_cache::{sync::Level, Cache};
+use tern_core::{demo::DemoBackend, Backend, Error, FolderKind};
 
-use crate::{keyring, login::Login, mailbox::Mailbox, runtime, screenshot};
+use crate::settings::Settings;
+use crate::{background, keyring, login::Login, mailbox::Mailbox, runtime, screenshot};
 
-type Callback = Box<dyn Fn()>;
+type ChangedHook = Box<dyn Fn(&[FolderKind])>;
 
-/// What every part of the window shares: the window, its toasts and the signed-in account.
+/// What every part of the window shares: the window, its toasts, the signed-in account and its cache.
 #[derive(Clone)]
 pub struct Ctx {
 	pub window: adw::ApplicationWindow,
 	pub toasts: adw::ToastOverlay,
 	backend: Rc<RefCell<Option<Arc<dyn Backend>>>>,
-	sent: Rc<RefCell<Option<Callback>>>,
+	cache: Rc<RefCell<Option<Arc<Cache>>>>,
+	settings: Rc<Cell<Settings>>,
+	/// Wakes the background sync.
+	wake: Arc<tokio::sync::Notify>,
+	changed: Rc<RefCell<Option<ChangedHook>>>,
 }
 
 impl Ctx {
 	pub fn backend(&self) -> Option<Arc<dyn Backend>> {
 		self.backend.borrow().clone()
+	}
+
+	pub fn cache(&self) -> Option<Arc<Cache>> {
+		self.cache.borrow().clone()
+	}
+
+	pub fn settings(&self) -> Settings {
+		self.settings.get()
+	}
+
+	pub fn set_settings(&self, settings: Settings) {
+		self.settings.set(settings);
+		settings.save();
+		self.sync_now();
+	}
+
+	/// Starts the background sync's next round now.
+	pub fn sync_now(&self) {
+		self.wake.notify_one();
+	}
+
+	pub fn wake(&self) -> Arc<tokio::sync::Notify> {
+		self.wake.clone()
 	}
 
 	pub fn toast(&self, text: &str) {
@@ -39,14 +69,29 @@ impl Ctx {
 	/// Called by a composer once its mail is sent.
 	pub fn sent(&self) {
 		self.toast("Sent");
-		if let Some(f) = self.sent.borrow().as_ref() {
-			f();
+		self.changed(&[FolderKind::Sent, FolderKind::Drafts]);
+	}
+
+	/// Mail in folders of these kinds changed on the server, as after saving a draft.
+	pub fn changed(&self, kinds: &[FolderKind]) {
+		if let Some(f) = self.changed.borrow().as_ref() {
+			f(kinds);
 		}
 	}
 
-	pub fn connect_sent(&self, f: impl Fn() + 'static) {
-		*self.sent.borrow_mut() = Some(Box::new(f));
+	pub fn connect_changed(&self, f: impl Fn(&[FolderKind]) + 'static) {
+		*self.changed.borrow_mut() = Some(Box::new(f));
 	}
+}
+
+/// Where an account's mail cache lives.
+fn cache_path(email: &str) -> PathBuf {
+	let base = std::env::var_os("XDG_CACHE_HOME")
+		.map(PathBuf::from)
+		.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+		.unwrap_or_else(std::env::temp_dir);
+	let name: String = email.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '@' { c } else { '_' }).collect();
+	base.join("tern").join("mail").join(format!("{name}.db"))
 }
 
 pub struct Window {
@@ -61,7 +106,15 @@ impl Window {
 		let window = adw::ApplicationWindow::builder().application(app).title("Tern").default_width(1280).default_height(800).build();
 		window.set_size_request(360, 294);
 		let toasts = adw::ToastOverlay::new();
-		let ctx = Ctx { window: window.clone(), toasts: toasts.clone(), backend: Rc::default(), sent: Rc::default() };
+		let ctx = Ctx {
+			window: window.clone(),
+			toasts: toasts.clone(),
+			backend: Rc::default(),
+			cache: Rc::default(),
+			settings: Rc::new(Cell::new(Settings::load())),
+			wake: Arc::default(),
+			changed: Rc::default(),
+		};
 
 		let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build();
 		let starting = adw::Spinner::builder().width_request(32).height_request(32).halign(gtk::Align::Center).valign(gtk::Align::Center).build();
@@ -89,7 +142,9 @@ impl Window {
 			let weak = Rc::downgrade(&this);
 			this.login.connect_signed_in(move |backend, saved| {
 				if let Some(this) = weak.upgrade() {
-					this.signed_in(backend, saved);
+					// Only a real account keeps its mail on disk.
+					let persistent = saved.is_some();
+					this.signed_in(backend, saved, persistent);
 				}
 			});
 		}
@@ -121,6 +176,11 @@ impl Window {
 		about.connect_activate(move |_, _| about_dialog().present(Some(&window)));
 		app.add_action(&about);
 
+		let ctx = self.ctx.clone();
+		let preferences = gio::SimpleAction::new("preferences", None);
+		preferences.connect_activate(move |_, _| preferences_dialog(&ctx).present(Some(&ctx.window)));
+		app.add_action(&preferences);
+
 		let window = self.ctx.window.clone();
 		let shortcuts = gio::SimpleAction::new("shortcuts", None);
 		shortcuts.connect_activate(move |_, _| shortcuts_dialog().present(Some(&window)));
@@ -131,7 +191,7 @@ impl Window {
 	fn start(self: Rc<Self>) {
 		if std::env::var_os("TERN_DEMO").is_some() {
 			let backend: Arc<dyn Backend> = if screenshot::scene().is_some() { screenshot::backend() } else { Arc::new(DemoBackend::new()) };
-			self.signed_in(backend, None);
+			self.signed_in(backend, None, false);
 			screenshot::drive(self);
 			return;
 		}
@@ -145,7 +205,7 @@ impl Window {
 			let Some(saved) = saved else { return self.show_login(None) };
 			let session = saved.session.clone();
 			match runtime::run(async move { tern_tuta::resume(&session).await }).await {
-				Ok(backend) => self.signed_in(backend, None),
+				Ok(backend) => self.signed_in(backend, None, true),
 				Err(err) => {
 					if err != Error::SessionExpired {
 						self.ctx.error(&err);
@@ -163,20 +223,48 @@ impl Window {
 		self.login.focus();
 	}
 
-	/// `saved` is the session to remember, with the address it belongs to.
-	fn signed_in(&self, backend: Arc<dyn Backend>, saved: Option<(String, String)>) {
+	/// `saved` is the session to remember, with the address it belongs to. A `persistent` account
+	/// keeps its mail in an encrypted cache on disk; the demo's lives in memory.
+	fn signed_in(self: &Rc<Self>, backend: Arc<dyn Backend>, saved: Option<(String, String)>, persistent: bool) {
 		tern_tuta::trace("opening the mailbox");
 		*self.ctx.backend.borrow_mut() = Some(backend.clone());
 		if let Some((email, session)) = saved {
 			runtime::spawn_local(async move { runtime::run(async move { keyring::store(&email, &session).await }).await });
 		}
-		self.mailbox.start();
 		self.stack.set_visible_child_name("mailbox");
-		tern_tuta::trace("mailbox shown");
+		let email = backend.account().address;
+		let this = self.clone();
+		runtime::spawn_local(async move {
+			let cache = if persistent {
+				let key = runtime::run({
+					let email = email.clone();
+					async move { keyring::cache_key(&email).await }
+				})
+				.await;
+				let path = cache_path(&email);
+				match key {
+					Some(key) => runtime::run(async move { Cache::open(&path, &key).ok() }).await,
+					None => None,
+				}
+			} else {
+				None
+			};
+			// Without a keyring nothing is kept on disk.
+			let cache = Arc::new(cache.unwrap_or_else(Cache::in_memory));
+			if !this.ctx.backend().is_some_and(|now| Arc::ptr_eq(&now, &backend)) {
+				return;
+			}
+			*this.ctx.cache.borrow_mut() = Some(cache);
+			this.mailbox.start();
+			background::start(&this.ctx, Rc::downgrade(&this.mailbox));
+			tern_tuta::trace("mailbox shown");
+		});
 	}
 
+	/// Ends the session and forgets the account's mail on this computer.
 	fn sign_out(self: &Rc<Self>) {
 		let Some(backend) = self.ctx.backend.borrow_mut().take() else { return };
+		let cache = self.ctx.cache.borrow_mut().take();
 		let email = backend.account().address;
 		self.mailbox.clear();
 		self.show_login(Some(&email));
@@ -184,9 +272,49 @@ impl Window {
 			runtime::run(async move {
 				let _ = backend.sign_out().await;
 				keyring::forget().await;
+				drop(cache);
+				let path = cache_path(&email);
+				for suffix in ["", "-wal", "-shm"] {
+					let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+				}
+				keyring::forget_cache_key(&email).await;
 			})
 			.await
 		});
+	}
+}
+
+fn preferences_dialog(ctx: &Ctx) -> adw::PreferencesDialog {
+	let dialog = adw::PreferencesDialog::new();
+	let page = adw::PreferencesPage::new();
+	let group = adw::PreferencesGroup::builder()
+		.title("Offline Mail")
+		.description("Tern keeps recent mail on this computer, encrypted, so it shows at once and can be read offline. It checks for new mail every few minutes.")
+		.build();
+	let labels: Vec<String> = Level::ALL
+		.iter()
+		.map(|l| format!("{} — {} per folder, {} opened ahead", level_label(*l), l.headers(), l.bodies()))
+		.collect();
+	let model = gtk::StringList::new(&labels.iter().map(String::as_str).collect::<Vec<_>>());
+	let row = adw::ComboRow::builder().title("Keep Ready").model(&model).build();
+	row.set_selected(Level::ALL.iter().position(|l| *l == ctx.settings().offline).unwrap_or(1) as u32);
+	let ctx = ctx.clone();
+	row.connect_selected_notify(move |row| {
+		if let Some(level) = Level::ALL.get(row.selected() as usize) {
+			ctx.set_settings(Settings { offline: *level, ..ctx.settings() });
+		}
+	});
+	group.add(&row);
+	page.add(&group);
+	dialog.add(&page);
+	dialog
+}
+
+fn level_label(level: Level) -> &'static str {
+	match level {
+		Level::Low => "Low",
+		Level::Medium => "Medium",
+		Level::High => "High",
 	}
 }
 
@@ -203,7 +331,18 @@ fn about_dialog() -> adw::AboutDialog {
 
 fn shortcuts_dialog() -> adw::ShortcutsDialog {
 	let dialog = adw::ShortcutsDialog::new();
-	let sections: [(&str, &[(&str, &str)]); 3] = [
+	let sections: [(&str, &[(&str, &str)]); 4] = [
+		(
+			"Moving Around",
+			&[
+				("Next Conversation", "<Alt>Down"),
+				("Previous Conversation", "<Alt>Up"),
+				("Read Conversation", "Return"),
+				("Back to the List", "Escape"),
+				("Open a Message in the Conversation", "space"),
+				("Go to Folder 1…9", "<Control>1"),
+			],
+		),
 		(
 			"Mail",
 			&[
@@ -211,12 +350,21 @@ fn shortcuts_dialog() -> adw::ShortcutsDialog {
 				("Reply", "<Control>r"),
 				("Reply All", "<Control><Shift>r"),
 				("Forward", "<Control>l"),
-				("Move to Trash", "Delete"),
-				("Refresh", "F5"),
+				("Mark as Unread", "<Control>u"),
+				("Move Conversation to Trash", "Delete"),
+				("Check for New Mail", "F5"),
 			],
 		),
-		("Composer", &[("Send", "<Control>Return"), ("Close", "<Control>w Escape")]),
-		("General", &[("Keyboard Shortcuts", "<Control>question"), ("Quit", "<Control>q")]),
+		(
+			"Writing",
+			&[
+				("Send", "<Control>Return"),
+				("Attach Files", "<Control><Shift>a"),
+				("Close and Keep as Draft", "<Control>w Escape"),
+				("Accept a Suggested Address", "Tab Return"),
+			],
+		),
+		("General", &[("Preferences", "<Control>comma"), ("Keyboard Shortcuts", "<Control>question"), ("Quit", "<Control>q")]),
 	];
 	for (title, items) in sections {
 		let section = adw::ShortcutsSection::new(Some(title));
