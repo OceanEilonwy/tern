@@ -19,6 +19,8 @@ const RESULTS: usize = 100;
 /// The search on show instead of a folder.
 pub struct Searching {
 	pub query: Query,
+	/// A rule's line shown from its page: the mail it catches, instead of what the words find.
+	pub rule: Option<tern_core::rules::Expr>,
 	/// The folder each conversation found opens in: its best match's.
 	pub folders: HashMap<String, FolderId>,
 }
@@ -35,6 +37,19 @@ pub fn widgets() -> (gtk::ToggleButton, gtk::SearchBar, gtk::SearchEntry) {
 	let button = gtk::ToggleButton::builder().icon_name("system-search-symbolic").tooltip_text("Search (Ctrl+F)").build();
 	button.bind_property("active", &bar, "search-mode-enabled").sync_create().bidirectional().build();
 	(button, bar, entry)
+}
+
+/// The conversations with mail `rule` catches, off the UI thread.
+pub async fn find_rule(cache: Arc<Cache>, rule: tern_core::rules::Expr) -> (Vec<ThreadRow>, HashMap<String, FolderId>) {
+	let hits = runtime::run(async move {
+		cache.rule_hits(&rule, RESULTS).unwrap_or_else(|e| {
+			eprintln!("tern: rule search failed: {e}");
+			Vec::new()
+		})
+	})
+	.await;
+	let folders = hits.iter().map(|h| (h.row.key.clone(), h.folder.clone())).collect();
+	(hits.into_iter().map(|h| h.row).collect(), folders)
 }
 
 /// Runs `query` on the cache off the UI thread; by meaning too when `semantic` is on and the model is loaded.

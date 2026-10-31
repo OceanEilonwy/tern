@@ -377,3 +377,33 @@ Mail is now fetched in batches, and the keys and tokens a batch needs are loaded
 - **The display name stays the account's**: Tuta keeps per-alias sender names in mailbox properties,
   which Tern does not read yet.
 - The demo account has a second address, `news@you.example`, which its newsletter came to.
+
+## Rule page and quoting, as designed (2026-10-31)
+
+Built from the approved mockups (rule editor A; the quoting design with its four scenarios).
+
+- **The rule's line** is a one-line text view coloured as it reads (`rules::parts`, which never
+  fails, so half-typed lines colour too): fields blue, purple and orange, operators and brackets
+  grey. Enter saves; pasted line breaks become spaces. Buttons under it put in `from:`, `to:`,
+  `subject:`, `and`, `or`, `not` and brackets at the cursor, spaced from their neighbours; brackets
+  wrap a selection. The help moved behind "How to Write a Rule".
+- **The preview never grows past four mails**: a message (no match, how many, or why the line does
+  not read), the newest four, then "and N more, older" with Show All in Search. That closes
+  Preferences and lists, in the main window's search, the conversations the rule catches outside
+  Trash and Spam (`Cache::rule_hits`); typing over the line in the bar goes back to an ordinary
+  search, as the search syntax differs from the rules'.
+- **What happens** is three linked buttons; Delete Rule is a red card of its own.
+- **A saved rule's line showed squeezed** when its page opened as Preferences opened (24 px for a
+  42 px line): the text view's height was worked out before it showed. It is worked out again once
+  shown; the `rule-edit` scene (now a check) fails without that.
+- **Replies quote nothing unless asked.** Lines selected in the mail before Reply are quoted above
+  the answer, with an × to leave them out. The whole mail waits in a dashed pill under the text:
+  `•••` shows it, "+ Quote …" adds it and turns the pill blue with an ×. A forward starts with the
+  pill blue (the mail goes along) and its × leaves the mail's text out; forwarded attachments stay
+  in the attachment list either way.
+- **Quotes are sent as HTML blockquotes** (picked lines with "Sam wrote:", the whole mail with
+  "On …, Sam wrote:"), which other mail apps indent and fold; a forward's text follows its header
+  unquoted, as before. They are kept out of the text being written, so a saved draft carries them
+  in its body and reopens with them as text.
+- The pill sits at the bottom of the writing area, not straight under the last line: the text area
+  fills the window so a click anywhere in it types.

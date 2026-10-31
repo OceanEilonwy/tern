@@ -258,6 +258,68 @@ impl Expr {
 	}
 }
 
+/// What a stretch of a rule's line is, for showing it in colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+	/// `from:`, `to:` or `subject:` (and their other names), colon included.
+	Field(Field),
+	/// `and`, `or`, `not` and a leading `-`.
+	Operator,
+	Bracket,
+	/// What is looked for.
+	Value,
+}
+
+/// The parts of a rule's line in order, as char ranges, even while it is being typed and does not
+/// read yet. A word before a colon that names no field is a value.
+pub fn parts(line: &str) -> Vec<(std::ops::Range<usize>, Part)> {
+	let chars: Vec<char> = line.chars().collect();
+	let mut out = Vec::new();
+	let mut i = 0;
+	while i < chars.len() {
+		let c = chars[i];
+		if c.is_whitespace() {
+			i += 1;
+			continue;
+		}
+		let start = i;
+		if matches!(c, '(' | ')') {
+			out.push((start..start + 1, Part::Bracket));
+			i += 1;
+			continue;
+		}
+		if c == '-' {
+			out.push((start..start + 1, Part::Operator));
+			i += 1;
+			continue;
+		}
+		if c == '"' {
+			i += 1;
+			while i < chars.len() && chars[i] != '"' {
+				i += 1;
+			}
+			i = (i + 1).min(chars.len());
+			out.push((start..i, Part::Value));
+			continue;
+		}
+		while i < chars.len() && !chars[i].is_whitespace() && !matches!(chars[i], '(' | ')' | '"' | ':') {
+			i += 1;
+		}
+		let word: String = chars[start..i].iter().collect();
+		if i < chars.len() && chars[i] == ':' {
+			i += 1;
+			match field(&word) {
+				Some(f) => out.push((start..i, Part::Field(f))),
+				None => out.push((start..i, Part::Value)),
+			}
+			continue;
+		}
+		let part = if matches!(word.to_lowercase().as_str(), "and" | "or" | "not") { Part::Operator } else { Part::Value };
+		out.push((start..i, part));
+	}
+	out
+}
+
 /// A term for a rule's line that matches `value` in `field` as it is: quoted when it has spaces
 /// or brackets. Quotes inside it cannot be written, so they are left out; matching skips them too.
 pub fn term(field: &str, value: &str) -> String {
@@ -335,6 +397,27 @@ mod tests {
 		assert_eq!(at("and a"), Err(0), "and at the start");
 		assert_eq!(at("from:"), Err(0), "nothing after the field");
 		assert!(parse("from:a b").is_ok());
+	}
+
+	#[test]
+	fn parts_colour_a_line_even_half_typed() {
+		let shown = |line: &str| parts(line).into_iter().map(|(r, p)| (line.chars().skip(r.start).take(r.len()).collect::<String>(), p)).collect::<Vec<_>>();
+		assert_eq!(shown("(from:@deals.example or Title:\"50% off\") and not -to:me"), [
+			("(".to_string(), Part::Bracket),
+			("from:".into(), Part::Field(Field::From)),
+			("@deals.example".into(), Part::Value),
+			("or".into(), Part::Operator),
+			("Title:".into(), Part::Field(Field::Subject)),
+			("\"50% off\"".into(), Part::Value),
+			(")".into(), Part::Bracket),
+			("and".into(), Part::Operator),
+			("not".into(), Part::Operator),
+			("-".into(), Part::Operator),
+			("to:".into(), Part::Field(Field::To)),
+			("me".into(), Part::Value),
+		]);
+		assert_eq!(shown("subject:\"half"), [("subject:".to_string(), Part::Field(Field::Subject)), ("\"half".into(), Part::Value)], "an open quote runs to the end");
+		assert_eq!(shown("date:x é"), [("date:".to_string(), Part::Value), ("x".into(), Part::Value), ("é".into(), Part::Value)]);
 	}
 
 	#[test]

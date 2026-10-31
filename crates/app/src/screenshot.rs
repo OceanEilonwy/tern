@@ -150,6 +150,70 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			wait_for(|| mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.attachments.len() == 1)).await;
 			if mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.attachments.len() == 1) { Ok(()) } else { Err("the sent mail lost its attachment".into()) }
 		}
+		// A reply carries only the lines picked in the mail until the whole mail is added; a forward
+		// carries the mail until it is left out.
+		"quote" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			let backend = win.ctx.backend().ok_or("signed out")?;
+			let sent = win.ctx.cache().and_then(|c| c.folders().ok()?.into_iter().find(|f| f.kind == FolderKind::Sent)).ok_or("no Sent")?;
+			let newest_sent = || {
+				let (backend, sent) = (backend.clone(), sent.clone());
+				async move {
+					let page = backend.list(&sent.id, None, 50).await.map_err(|e| e.to_string())?;
+					let newest = page.mails.into_iter().max_by_key(|m| m.received_ms).ok_or("Sent is empty")?;
+					backend.open(&newest.id).await.map(|m| m.body_html).map_err(|e| e.to_string())
+				}
+			};
+			mailbox.select_by_subject("Lunch");
+			wait_for(|| mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.summary.subject.starts_with("Re:"))).await;
+			sleep(300).await;
+			if !mailbox.reader.select_in_current("12:30 at the usual place?") {
+				return Err("the reply's text is not in the open mail".into());
+			}
+			let reply = mailbox.reader.answer(crate::compose_model::Answer::Reply).ok_or("no reply")?;
+			let quote = reply.quote();
+			if quote.picked != Some(("Sam Okafor".into(), "12:30 at the usual place?".into())) || quote.whole.as_ref().is_none_or(|w| w.included || w.forward) {
+				return Err(format!("the reply quotes {quote:?}"));
+			}
+			reply.send();
+			wait_for(|| !reply.window.is_visible()).await;
+			let html = newest_sent().await?;
+			if !html.starts_with("<div>Sam Okafor wrote:</div><blockquote") || html.contains("Friday works") {
+				return Err(format!("a reply with a pick sent {html}"));
+			}
+			// Nothing picked, the pick left out, the whole mail added.
+			let reply = mailbox.reader.answer(crate::compose_model::Answer::Reply).ok_or("no reply")?;
+			if reply.quote().picked.is_some() {
+				reply.drop_picked();
+			}
+			reply.include_whole(true);
+			reply.send();
+			wait_for(|| !reply.window.is_visible()).await;
+			let html = newest_sent().await?;
+			if html.contains("Sam Okafor wrote:</div>") || !html.contains("wrote:</div><blockquote") || !html.contains("Friday works") {
+				return Err(format!("a reply with the whole mail sent {html}"));
+			}
+			// A forward carries the mail; × leaves it out.
+			let forward = mailbox.reader.answer(crate::compose_model::Answer::Forward).ok_or("no forward")?;
+			if !forward.quote().whole.is_some_and(|w| w.included && w.forward) {
+				return Err(format!("the forward carries {:?}", forward.quote()));
+			}
+			forward.type_to("mia@tuta.com");
+			forward.send();
+			wait_for(|| !forward.window.is_visible()).await;
+			if !newest_sent().await?.contains("---------- Forwarded message ----------") {
+				return Err("the forward went without the mail".into());
+			}
+			let forward = mailbox.reader.answer(crate::compose_model::Answer::Forward).ok_or("no forward")?;
+			forward.include_whole(false);
+			forward.type_to("mia@tuta.com");
+			forward.send();
+			wait_for(|| !forward.window.is_visible()).await;
+			if newest_sent().await?.contains("Forwarded message") {
+				return Err("the forward left out still carried the mail".into());
+			}
+			Ok(())
+		}
 		// A reply goes out from the address the mail came to; a new mail from the main one, unless
 		// another is picked.
 		"from" => {
@@ -472,6 +536,23 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			mailbox.select_by_subject("Lunch");
 			Ok(())
 		}
+		// A saved rule that catches more than its page lists: the newest few, a count, and its
+		// line shown whole, not squeezed to the height worked out before the page showed.
+		"rule-edit" => {
+			rules::save(&[Rule { when: "(from:@deals.example or subject:invoice) or not to:sam".into(), action: Action::Move("Archive".into()) }]);
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
+			dialog.present(Some(&win.ctx.window));
+			let edit = section.edit(Some(0));
+			sleep(1500).await;
+			if edit.line_height() < 36 {
+				return Err(format!("the saved line shows {} px tall", edit.line_height()));
+			}
+			if edit.preview() != ("Catches 7 mails here already. Rules only sort new mail.".into(), 4, Some("and 3 more, older".into())) {
+				return Err(format!("the preview shows {:?}", edit.preview()));
+			}
+			Ok(())
+		}
 		// Rules in Preferences: one added, labelled, then changed to move to a folder and deleted; one
 		// labels with a label it makes.
 		"rules" => {
@@ -479,9 +560,37 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
 			dialog.present(Some(&win.ctx.window));
+			// What a line catches shows as typed: nothing, one mail, or the newest few and a count.
 			let edit = section.edit(None);
-			edit.line.set_text("subject:invoice or from:@example.org");
-			edit.does.set_selected(2);
+			edit.put(crate::rule_editor::Piece::Field("from"));
+			edit.set_line(&format!("{}@nowhere.example", edit.line()));
+			sleep(300).await;
+			let (message, mails, more) = edit.preview();
+			if edit.line() != "from:@nowhere.example" || !message.starts_with("No mail here matches") || mails != 0 || more.is_some() {
+				return Err(format!("no match shows {message:?} {mails} {more:?} for {:?}", edit.line()));
+			}
+			edit.set_line("subject:coupon");
+			sleep(300).await;
+			if edit.preview() != ("Catches 1 mail here already. Rules only sort new mail.".into(), 1, None) {
+				return Err(format!("one match shows {:?}", edit.preview()));
+			}
+			edit.set_line("not zzz");
+			sleep(300).await;
+			if edit.preview() != ("Catches 7 mails here already. Rules only sort new mail.".into(), 4, Some("and 3 more, older".into())) {
+				return Err(format!("many matches show {:?}", edit.preview()));
+			}
+			// Show All lists them in the main window, in place of the folder.
+			edit.show_all();
+			wait_for(|| mailbox.shown().0 == "Mail the Rule Catches" && mailbox.store.n_items() == 7).await;
+			if mailbox.shown().0 != "Mail the Rule Catches" || mailbox.store.n_items() != 7 || dialog.is_mapped() {
+				return Err(format!("Show All shows {:?}, dialog open {}", mailbox.shown(), dialog.is_mapped()));
+			}
+			gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.search", None).map_err(|e| e.to_string())?;
+			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
+			dialog.present(Some(&win.ctx.window));
+			let edit = section.edit(None);
+			edit.set_line("subject:invoice or from:@example.org");
+			edit.set_does(2);
 			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 3)).await;
 			edit.label.set_selected(0);
 			if !edit.save.is_sensitive() {
@@ -494,15 +603,15 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			let edit = section.edit(Some(0));
 			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 3)).await;
-			if edit.does.selected() != 2 || edit.label.selected() != 0 || edit.line.text() != labelled.when {
+			if edit.does() != 2 || edit.label.selected() != 0 || edit.line() != labelled.when {
 				return Err("the rule did not open as saved".into());
 			}
-			edit.line.set_text("subject:(invoice");
+			edit.set_line("subject:(invoice");
 			if edit.save.is_sensitive() {
 				return Err("a broken line can be saved".into());
 			}
-			edit.line.set_text("subject:invoice");
-			edit.does.set_selected(1);
+			edit.set_line("subject:invoice");
+			edit.set_does(1);
 			edit.folder.set_selected(1);
 			edit.save.emit_clicked();
 			let moved = Rule { when: "subject:invoice".into(), action: Action::Move("Archive".into()) };
@@ -510,8 +619,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("changed to {:?}", rules::load()));
 			}
 			let edit = section.edit(None);
-			edit.line.set_text("from:news@example.org");
-			edit.does.set_selected(2);
+			edit.set_line("from:news@example.org");
+			edit.set_does(2);
 			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 3)).await;
 			edit.label.set_selected(2);
 			if !edit.new_label.is_visible() || edit.save.is_sensitive() {
@@ -527,7 +636,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			// A third rule, then the first deleted; the shot shows what is left.
 			let edit = section.edit(None);
-			edit.line.set_text("from:@deals.example");
+			edit.set_line("from:@deals.example");
 			edit.save.emit_clicked();
 			section.delete(0);
 			if rules::load() != [made, Rule { when: "from:@deals.example".into(), action: Action::Spam }] {
@@ -545,7 +654,7 @@ pub fn drive(win: Rc<Window>) {
 	if scene == "sign-in" {
 		return sign_in(Rc::downgrade(&win), path);
 	}
-	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first" | "spam" | "rules" | "menu" | "from") {
+	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first" | "spam" | "rules" | "menu" | "from" | "rule-edit" | "quote") {
 		glib::spawn_future_local(async move {
 			if let Err(e) = check(&win, &scene).await {
 				// No picture, so the check fails.
@@ -579,6 +688,11 @@ pub fn drive(win: Rc<Window>) {
 			"forward" => Some(crate::compose_model::Answer::Forward),
 			_ => None,
 		};
+		if scene == "reply" {
+			// The line answered is picked in the mail first.
+			sleep(300).await;
+			mailbox.reader.select_in_current("12:30 at the usual place?");
+		}
 		let target: gtk::Widget = if let Some(composer) = answer.and_then(|a| mailbox.reader.answer(a)) {
 			composer.window.clone().upcast()
 		} else if scene == "sent" {
@@ -619,14 +733,7 @@ pub fn drive(win: Rc<Window>) {
 				picker.all.set_active(true);
 			}
 			win.ctx.window.clone().upcast()
-		} else if scene == "rule-edit" {
-			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
-			dialog.present(Some(&win.ctx.window));
-			let edit = section.edit(None);
-			edit.line.set_text("(from:@example.org or subject:invoice) and not lunch");
-			edit.does.set_selected(1);
-			edit.folder.set_selected(1);
-			win.ctx.window.clone().upcast()
+
 		} else if scene == "compose" {
 			let fields = Fields {
 				to: "Mia Chen <mia@tuta.com>".into(),

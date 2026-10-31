@@ -12,6 +12,57 @@ pub enum Answer {
 	Forward,
 }
 
+/// The earlier mail a reply or forward carries, kept apart from what is written so it can be left
+/// out with a click.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Quote {
+	/// Lines picked in the reader before answering, and whose they are: quoted above the reply.
+	pub picked: Option<(String, String)>,
+	/// The whole mail answered or forwarded.
+	pub whole: Option<Whole>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Whole {
+	/// What it is, in a few words: "Sam's message", "Forwarded: Accounts, 26 Oct".
+	pub label: String,
+	/// The line or lines before it: "On …, Sam <sam@x> wrote:", or a forward's From, Date…
+	pub head: String,
+	pub text: String,
+	/// It goes with the mail; a forward's does from the start, a reply's when asked.
+	pub included: bool,
+	pub forward: bool,
+}
+
+impl Quote {
+	/// The HTML sent for it around `body` (already HTML): picked lines above, the whole mail below.
+	pub fn around(&self, body: &str) -> String {
+		let mut html = String::new();
+		if let Some((who, lines)) = &self.picked {
+			html.push_str(&format!("<div>{}</div>{}", escape(&format!("{who} wrote:")), blockquote(lines)));
+		}
+		html.push_str(body);
+		if let Some(whole) = self.whole.as_ref().filter(|w| w.included) {
+			html.push_str("<br>");
+			if whole.forward {
+				html.push_str(&format!("{}{}", text_to_html(&whole.head), text_to_html(&whole.text)));
+			} else {
+				html.push_str(&format!("{}{}", text_to_html(&whole.head), blockquote(&whole.text)));
+			}
+		}
+		html
+	}
+}
+
+fn escape(text: &str) -> String {
+	text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// Quoted text as mail apps show it: indented under a line, and folded away by those that fold quotes.
+fn blockquote(text: &str) -> String {
+	format!("<blockquote style=\"margin:0 0 0 0.8ex;border-left:1px solid #ccc;padding-left:1ex\">{}</blockquote>", text_to_html(text))
+}
+
 /// What the composer's fields hold.
 #[derive(Clone, Debug, Default)]
 pub struct Fields {
@@ -28,6 +79,7 @@ pub struct Fields {
 	pub kept: Vec<Attachment>,
 	/// The address to send from; empty for the account's main one.
 	pub from: String,
+	pub quote: Quote,
 }
 
 /// Which fields hold text that is not an address, and that text.
@@ -79,7 +131,7 @@ impl Fields {
 			cc,
 			bcc,
 			subject: self.subject.trim().to_string(),
-			body_html: text_to_html(&self.body),
+			body_html: self.quote.around(&text_to_html(&self.body)),
 			attachments: self.attachments.clone(),
 			previous: self.previous.clone(),
 			existing: self.existing.clone(),
@@ -168,35 +220,45 @@ pub fn reply_recipients(mail: &Mail, all: bool, me: &Account) -> (Vec<Address>, 
 	(to, cc)
 }
 
-fn quote_lines(text: &str) -> String {
-	text.lines().map(|l| if l.is_empty() { ">".to_string() } else { format!("> {l}") }).collect::<Vec<_>>().join("\n")
-}
-
-/// The composer's starting text for answering a mail whose readable text is `text`.
-pub fn answer_body(mail: &Mail, text: &str, date: &str, answer: Answer) -> String {
+/// What answering `mail` (whose readable text is `text`) carries of it: a reply the lines `picked`
+/// in it, with the whole mail ready to add; a forward the whole mail.
+pub fn answer_quote(mail: &Mail, text: &str, date: &str, answer: Answer, picked: Option<&str>) -> Quote {
 	let from = &mail.summary.from;
+	let name = if from.name.trim().is_empty() { from.address.clone() } else { from.name.trim().to_string() };
 	match answer {
-		Answer::Reply | Answer::ReplyAll => {
-			format!("\n\nOn {date}, {} wrote:\n{}\n", format_address(from), quote_lines(text))
-		}
+		Answer::Reply | Answer::ReplyAll => Quote {
+			picked: picked.map(str::trim).filter(|p| !p.is_empty()).map(|p| (name.clone(), p.to_string())),
+			whole: Some(Whole {
+				label: format!("{name}’s message"),
+				head: format!("On {date}, {} wrote:", format_address(from)),
+				text: text.trim_end().to_string(),
+				included: false,
+				forward: false,
+			}),
+		},
 		Answer::Forward => {
 			let mut head = format!(
-				"\n\n---------- Forwarded message ----------\nFrom: {}\nDate: {date}\nSubject: {}\nTo: {}\n",
+				"---------- Forwarded message ----------\nFrom: {}\nDate: {date}\nSubject: {}\nTo: {}",
 				format_address(from),
 				mail.summary.subject,
 				format_addresses(&mail.to)
 			);
 			if !mail.cc.is_empty() {
-				head.push_str(&format!("Cc: {}\n", format_addresses(&mail.cc)));
+				head.push_str(&format!("\nCc: {}", format_addresses(&mail.cc)));
 			}
-			format!("{head}\n{text}\n")
-		}
+			let files = match mail.attachments.len() {
+				0 => String::new(),
+				1 => " · 1 attachment".into(),
+				n => format!(" · {n} attachments"),
+			};
+			Quote { picked: None, whole: Some(Whole { label: format!("Forwarded: {name}, {date}{files}"), head: format!("{head}\n"), text: text.trim_end().to_string(), included: true, forward: true }) }
+		},
 	}
 }
 
 /// The fields for answering `mail`, from the address of `me` it was sent to. Forwarded attachments
 /// are added by the caller as they download.
-pub fn answer_fields(mail: &Mail, text: &str, date: &str, answer: Answer, me: &Account) -> Fields {
+pub fn answer_fields(mail: &Mail, text: &str, date: &str, answer: Answer, me: &Account, picked: Option<&str>) -> Fields {
 	let (to, cc, subject, kind) = match answer {
 		Answer::Reply | Answer::ReplyAll => {
 			let (to, cc) = reply_recipients(mail, answer == Answer::ReplyAll, me);
@@ -208,7 +270,7 @@ pub fn answer_fields(mail: &Mail, text: &str, date: &str, answer: Answer, me: &A
 		to,
 		cc,
 		subject,
-		body: answer_body(mail, text, date, answer),
+		quote: answer_quote(mail, text, date, answer, picked),
 		previous: Some((mail.summary.id.clone(), kind)),
 		from: mail.to.iter().chain(&mail.cc).find_map(|a| me.addresses().into_iter().find(|mine| mine.eq_ignore_ascii_case(&a.address))).unwrap_or_default(),
 		..Default::default()
@@ -338,40 +400,62 @@ mod tests {
 	}
 
 	#[test]
-	fn reply_quotes_the_original() {
-		let f = answer_fields(&mail(), "Hi\n\nThe photos", "3 Oct 2026, 14:05", Answer::Reply, &me());
+	fn a_reply_quotes_only_what_was_picked_until_the_whole_mail_is_added() {
+		let mut f = answer_fields(&mail(), "Hi\n\nThe photos\n", "3 Oct 2026, 14:05", Answer::Reply, &me(), None);
 		assert_eq!(f.to, "Mia Chen <mia@tuta.com>");
 		assert_eq!(f.subject, "Re: Photos");
-		assert_eq!(f.body, "\n\nOn 3 Oct 2026, 14:05, Mia Chen <mia@tuta.com> wrote:\n> Hi\n>\n> The photos\n");
+		assert_eq!(f.body, "", "the reply starts empty");
 		assert_eq!(f.previous, Some((mail().summary.id, ReplyKind::Reply)));
-		// The recipients the reply prefills parse back.
-		assert!(f.build_draft().is_ok());
+		f.body = "Lovely!".into();
+		assert_eq!(f.build_draft().unwrap().body_html, "<div>Lovely!</div>", "nothing quoted");
+		let whole = f.quote.whole.as_mut().unwrap();
+		assert_eq!((whole.label.as_str(), whole.head.as_str()), ("Mia Chen’s message", "On 3 Oct 2026, 14:05, Mia Chen <mia@tuta.com> wrote:"));
+		whole.included = true;
+		let html = f.build_draft().unwrap().body_html;
+		assert!(html.starts_with("<div>Lovely!</div><br><div>On 3 Oct 2026, 14:05, Mia Chen &lt;mia@tuta.com&gt; wrote:</div><blockquote"), "{html}");
+		assert!(html.ends_with(">Hi<br><br>The photos</div></blockquote>"), "{html}");
+
+		// Lines picked in the reader go above the reply.
+		let mut f = answer_fields(&mail(), "Hi\n\nThe photos", "today", Answer::ReplyAll, &me(), Some("  The photos \n"));
+		assert_eq!(f.quote.picked, Some(("Mia Chen".to_string(), "The photos".to_string())));
+		f.body = "Thanks".into();
+		assert!(f.build_draft().unwrap().body_html.starts_with("<div>Mia Chen wrote:</div><blockquote"));
+		assert!(f.build_draft().unwrap().body_html.ends_with("The photos</div></blockquote><div>Thanks</div>"));
+		assert!(answer_fields(&mail(), "x", "today", Answer::Reply, &me(), Some("  ")).quote.picked.is_none(), "a blank pick quotes nothing");
 	}
 
 	#[test]
 	fn an_answer_goes_out_from_the_address_the_mail_came_to() {
 		let mut m = mail();
-		assert_eq!(answer_fields(&m, "", "", Answer::Reply, &me()).from, "you@tuta.com");
+		assert_eq!(answer_fields(&m, "", "", Answer::Reply, &me(), None).from, "you@tuta.com");
 		m.to = vec![Address::new("", "Shop@You.example")];
 		m.cc = vec![Address::new("", "ann@x.org")];
-		let f = answer_fields(&m, "", "", Answer::ReplyAll, &me());
+		let f = answer_fields(&m, "", "", Answer::ReplyAll, &me(), None);
 		assert_eq!(f.from, "shop@you.example", "as the account spells it");
 		assert_eq!(f.cc, "ann@x.org", "the alias is not copied in");
 		assert_eq!(f.build_draft().unwrap().from.as_deref(), Some("shop@you.example"));
 		// Sent to none of them (a list, Bcc): the main address.
 		m.to = vec![Address::new("", "list@x.org")];
-		assert_eq!(answer_fields(&m, "", "", Answer::Reply, &me()).from, "");
-		assert_eq!(answer_fields(&m, "", "", Answer::Reply, &me()).build_draft().unwrap().from, None);
+		assert_eq!(answer_fields(&m, "", "", Answer::Reply, &me(), None).from, "");
+		assert_eq!(answer_fields(&m, "", "", Answer::Reply, &me(), None).build_draft().unwrap().from, None);
 	}
 
 	#[test]
 	fn forward_has_a_header_and_no_recipients() {
-		let f = answer_fields(&mail(), "Body", "today", Answer::Forward, &me());
+		let mut f = answer_fields(&mail(), "Body", "today", Answer::Forward, &me(), None);
 		assert!(f.to.is_empty());
 		assert_eq!(f.subject, "Fwd: Photos");
-		assert!(f.body.contains("---------- Forwarded message ----------\nFrom: Mia Chen <mia@tuta.com>\n"));
-		assert!(f.body.contains("Cc: Ann <ann@x.org>, MIA@tuta.com\n\nBody\n"));
-		assert_eq!(f.previous.unwrap().1, ReplyKind::Forward);
+		assert_eq!(f.previous.clone().unwrap().1, ReplyKind::Forward);
+		let whole = f.quote.whole.clone().unwrap();
+		assert!(whole.included && whole.forward, "a forward carries the mail from the start");
+		assert_eq!(whole.label, "Forwarded: Mia Chen, today");
+		assert!(whole.head.starts_with("---------- Forwarded message ----------\nFrom: Mia Chen <mia@tuta.com>\n"));
+		assert!(whole.head.ends_with("Cc: Ann <ann@x.org>, MIA@tuta.com\n"));
+		f.to = "sam@x.org".into();
+		let html = f.build_draft().unwrap().body_html;
+		assert!(html.starts_with("<div></div><br><div>---------- Forwarded message ----------<br>From: Mia Chen &lt;mia@tuta.com&gt;<br>") && html.ends_with("<div>Body</div>"), "{html}");
+		f.quote.whole.as_mut().unwrap().included = false;
+		assert_eq!(f.build_draft().unwrap().body_html, "<div></div>", "left out with ×");
 	}
 
 	#[test]

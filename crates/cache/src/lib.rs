@@ -45,6 +45,16 @@ const SCHEMA: &str = "
 	CREATE TABLE vectors (mail INTEGER PRIMARY KEY, model TEXT NOT NULL, vector BLOB NOT NULL);
 ";
 
+/// Conversation `key` as a list shows it, from the folder of its mail `mail` (a row id).
+fn hit(conn: &Connection, key: String, mail: i64) -> Result<SearchHit> {
+	let folder: String = conn.query_row("SELECT folder FROM mails WHERE id = ?1", [mail], |r| r.get(0))?;
+	let from_here = "FROM mails m LEFT JOIN folders f ON f.id = m.folder WHERE m.thread = ?1 AND (m.folder = ?2 OR coalesce(f.kind, '') NOT IN ('Trash', 'Spam'))";
+	let latest: String = conn.query_row(&format!("SELECT m.summary {from_here} ORDER BY m.received DESC LIMIT 1"), params![key, folder], |r| r.get(0))?;
+	let (count, unread): (u32, bool) = conn.query_row(&format!("SELECT count(*), max(m.unread) {from_here}"), params![key, folder], |r| Ok((r.get(0)?, r.get(1)?)))?;
+	let pinned = conn.query_row("SELECT 1 FROM pins WHERE thread = ?1", [&key], |_| Ok(())).optional()?.is_some();
+	Ok(SearchHit { row: ThreadRow { key, latest: serde_json::from_str(&latest)?, count, unread, pinned }, folder: FolderId(folder) })
+}
+
 /// How close a mail's meaning must be to the query's (as a cosine) to be found by meaning; below
 /// it every mail would be found, ranked.
 pub const MEANING_MIN: f32 = 0.25;
@@ -617,16 +627,30 @@ impl Cache {
 			by_meaning = close.into_iter().take(DEPTH).map(|(f, _)| f).collect();
 		}
 
-		let mut hits = Vec::new();
-		for (key, mail) in search::fuse(&[&by_words, &by_meaning]).into_iter().take(limit) {
-			let folder: String = conn.query_row("SELECT folder FROM mails WHERE id = ?1", [mail], |r| r.get(0))?;
-			let from_here = "FROM mails m LEFT JOIN folders f ON f.id = m.folder WHERE m.thread = ?1 AND (m.folder = ?2 OR coalesce(f.kind, '') NOT IN ('Trash', 'Spam'))";
-			let latest: String = conn.query_row(&format!("SELECT m.summary {from_here} ORDER BY m.received DESC LIMIT 1"), params![key, folder], |r| r.get(0))?;
-			let (count, unread): (u32, bool) = conn.query_row(&format!("SELECT count(*), max(m.unread) {from_here}"), params![key, folder], |r| Ok((r.get(0)?, r.get(1)?)))?;
-			let pinned = conn.query_row("SELECT 1 FROM pins WHERE thread = ?1", [&key], |_| Ok(())).optional()?.is_some();
-			hits.push(SearchHit { row: ThreadRow { key, latest: serde_json::from_str(&latest)?, count, unread, pinned }, folder: FolderId(folder) });
+		search::fuse(&[&by_words, &by_meaning]).into_iter().take(limit).map(|(key, mail)| hit(&conn, key, mail)).collect()
+	}
+
+	/// The conversations with mail `rule` catches outside Trash and Spam, newest first: at most
+	/// `limit`, each opening in the folder of its newest caught mail.
+	pub fn rule_hits(&self, rule: &Expr, limit: usize) -> Result<Vec<SearchHit>> {
+		let conn = self.conn();
+		let mut stmt = conn.prepare(
+			"SELECT m.id, m.thread, m.summary FROM mails m LEFT JOIN folders f ON f.id = m.folder
+			 WHERE coalesce(f.kind, '') NOT IN ('Trash', 'Spam') ORDER BY m.received DESC",
+		)?;
+		let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+		let mut found: Vec<(String, i64)> = Vec::new();
+		for row in rows {
+			let (mail, key, json) = row?;
+			if found.len() == limit {
+				break;
+			}
+			if !found.iter().any(|(k, _)| k == &key) && rule.matches(&serde_json::from_str(&json)?) {
+				found.push((key, mail));
+			}
 		}
-		Ok(hits)
+		drop(stmt);
+		found.into_iter().map(|(key, mail)| hit(&conn, key, mail)).collect()
 	}
 
 	/// Up to `limit` mails, newest first, whose meaning `model` has not worked out yet, with the
@@ -851,6 +875,19 @@ mod tests {
 		cache.merge_page(&inbox, &[summary(5, "x", 300), summary(2, "b", 200)], false, false).unwrap();
 		let ids: Vec<String> = cache.list(&inbox, 0, 10).unwrap().into_iter().map(|m| m.id.element).collect();
 		assert_eq!(ids, ["e4", "e5", "e2", "e1"]);
+	}
+
+	#[test]
+	fn a_rule_lists_its_conversations_newest_first_outside_trash() {
+		let (cache, inbox, sent) = setup();
+		let trash = FolderId("trash".into());
+		cache.merge_page(&inbox, &[summary(4, "Re: 50% off", 400), summary(3, "Lunch", 300), summary(1, "50% off", 100)], true, true).unwrap();
+		cache.merge_page(&sent, &[summary(2, "Re: 50% off", 200)], true, true).unwrap();
+		cache.merge_page(&trash, &[summary(5, "Old 50% off", 500)], true, true).unwrap();
+		let rule = tern_core::rules::parse("subject:\"50% off\" or lunch").unwrap();
+		let hits = cache.rule_hits(&rule, 10).unwrap();
+		assert_eq!(hits.iter().map(|h| (h.row.latest.id.element.as_str(), h.row.count, h.folder.0.as_str())).collect::<Vec<_>>(), [("e4", 3, "in"), ("e3", 1, "in")], "one row per conversation; Trash left out");
+		assert_eq!(cache.rule_hits(&rule, 1).unwrap().len(), 1);
 	}
 
 	#[test]

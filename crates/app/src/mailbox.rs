@@ -75,6 +75,9 @@ pub struct Mailbox {
 	searching: RefCell<Option<Searching>>,
 	/// Counts searches, so one that finishes after a newer one started is dropped.
 	search_generation: Cell<u64>,
+	/// A rule's line put in the search bar from its page: while the bar holds exactly it, the list
+	/// shows what the rule catches.
+	rule_search: RefCell<Option<String>>,
 	/// The conversation whose menu was opened last, which the menu's actions act on.
 	menu_row: RefCell<Option<ThreadRow>>,
 	pub reader: Rc<Reader>,
@@ -350,6 +353,7 @@ impl Mailbox {
 			search_entry,
 			searching: RefCell::default(),
 			search_generation: Cell::new(0),
+			rule_search: RefCell::default(),
 			menu_row: RefCell::default(),
 			reader,
 		});
@@ -379,6 +383,12 @@ impl Mailbox {
 		this.ctx.connect_changed(move |kinds| {
 			if let Some(this) = weak.upgrade() {
 				this.sync_kinds(kinds);
+			}
+		});
+		let weak = Rc::downgrade(&this);
+		this.ctx.connect_show_rule(move |line| {
+			if let Some(this) = weak.upgrade() {
+				this.show_rule(line);
 			}
 		});
 		this.add_actions();
@@ -1184,9 +1194,28 @@ impl Mailbox {
 		gtk::prelude::GtkWindowExt::focus(&self.ctx.window).is_some_and(|f| f == *self.search_entry.upcast_ref::<gtk::Widget>() || f.is_ancestor(&self.search_entry))
 	}
 
+	/// Shows what a rule's `line` catches, in the search bar's place: Show All in Search on the
+	/// rule's page.
+	pub fn show_rule(&self, line: &str) {
+		*self.rule_search.borrow_mut() = Some(line.to_string());
+		self.inner.set_show_content(false);
+		self.search_bar.set_search_mode(true);
+		self.search_entry.set_text(line);
+		self.search_entry.grab_focus();
+	}
+
 	fn search_changed(self: &Rc<Self>) {
-		let query = tern_cache::search::Query::parse(&self.search_entry.text());
-		if query.is_empty() {
+		let text = self.search_entry.text().to_string();
+		let rule = match self.rule_search.borrow().as_deref() {
+			Some(line) if line == text => tern_core::rules::parse(line).ok(),
+			_ => None,
+		};
+		if rule.is_none() {
+			// Typed over: an ordinary search again.
+			self.rule_search.borrow_mut().take();
+		}
+		let query = tern_cache::search::Query::parse(&text);
+		if query.is_empty() && rule.is_none() {
 			// Cleared (also on the way to new text): back to the folder, the bar stays open.
 			if self.searching.borrow_mut().take().is_some() {
 				let current = self.current.borrow().clone();
@@ -1197,7 +1226,7 @@ impl Mailbox {
 			return;
 		}
 		let entering = self.searching.borrow().is_none();
-		if self.searching.borrow().as_ref().is_some_and(|s| s.query == query) {
+		if self.searching.borrow().as_ref().is_some_and(|s| s.query == query && s.rule == rule) {
 			return;
 		}
 		// Other words: nothing stays open, so no result opens (and is marked read) in its place.
@@ -1209,23 +1238,28 @@ impl Mailbox {
 		self.hold.set(false);
 		self.reader.clear();
 		self.update_actions();
-		if entering {
-			self.list_title.set_title("Search");
+		if entering || rule.is_some() {
+			self.list_title.set_title(if rule.is_some() { "Mail the Rule Catches" } else { "Search" });
 			self.list_title.set_subtitle("");
+		} else {
+			self.list_title.set_title("Search");
 		}
-		*self.searching.borrow_mut() = Some(Searching { query, folders: HashMap::new() });
+		*self.searching.borrow_mut() = Some(Searching { query, rule, folders: HashMap::new() });
 		self.run_search();
 	}
 
 	/// Runs the search on show again, as after typing or when the cache changed.
 	fn run_search(self: &Rc<Self>) {
-		let (Some(cache), Some(query)) = (self.ctx.cache(), self.searching.borrow().as_ref().map(|s| s.query.clone())) else { return };
+		let (Some(cache), Some((query, rule))) = (self.ctx.cache(), self.searching.borrow().as_ref().map(|s| (s.query.clone(), s.rule.clone()))) else { return };
 		let generation = self.search_generation.get() + 1;
 		self.search_generation.set(generation);
 		let this = self.clone();
 		let semantic = self.ctx.settings().semantic;
 		runtime::spawn_local(async move {
-			let (rows, folders) = search::find(cache, query, semantic).await;
+			let (rows, folders) = match rule {
+				Some(rule) => search::find_rule(cache, rule).await,
+				None => search::find(cache, query, semantic).await,
+			};
 			if this.search_generation.get() != generation {
 				return;
 			}

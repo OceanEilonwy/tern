@@ -48,3 +48,136 @@ row.rule .title > .title {
 .pill.small-pill {
   padding: 6px 16px;
 }
+
+/* A rule's line on its page: one line of text in a card, coloured as it reads. */
+textview.rule-line {
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 1px alpha(currentColor, 0.1);
+}
+
+textview.rule-line > text {
+  background-color: var(--card-bg-color);
+}
+
+textview.rule-line:focus-within {
+  box-shadow: inset 0 0 0 2px var(--accent-color);
+}
+
+/* The buttons that put a part of a rule in its line, coloured as the line shows that part. */
+button.rule-chip {
+  min-height: 0;
+  padding: 4px 12px;
+  font-size: 0.9em;
+}
+
+button.rule-chip.rule-from { color: #1c71d8; background: alpha(#1c71d8, 0.12); }
+button.rule-chip.rule-to { color: #9141ac; background: alpha(#9141ac, 0.12); }
+button.rule-chip.rule-subject { color: #c64600; background: alpha(#c64600, 0.12); }
+
+@media (prefers-color-scheme: dark) {
+  button.rule-chip.rule-from { color: #78aeed; background: alpha(#78aeed, 0.16); }
+  button.rule-chip.rule-to { color: #dc8add; background: alpha(#dc8add, 0.16); }
+  button.rule-chip.rule-subject { color: #ffa348; background: alpha(#ffa348, 0.16); }
+}
+
+.rule-does > button {
+  min-height: 38px;
+}
+
+/* Deleting a rule: a card of its own in red. */
+button.delete-rule {
+  min-height: 46px;
+  border-radius: 12px;
+  background-color: var(--card-bg-color);
+  color: var(--destructive-color);
+  font-weight: bold;
+}
+
+button.delete-rule:hover {
+  background-color: color-mix(in srgb, var(--card-bg-color), currentColor 8%);
+}
+
+/* The earlier mail under a reply or forward: a pill, dashed while left out and blue once it goes
+   with the mail, with ••• to look at it and × to leave it out, both as light buttons. */
+.quote-pill {
+  min-height: 30px;
+  border-radius: 999px;
+  border: 1px dashed alpha(currentColor, 0.3);
+}
+
+.quote-pill.included {
+  border: 1px solid transparent;
+  background-color: alpha(var(--accent-bg-color), 0.22);
+}
+
+.quote-pill > separator {
+  min-width: 1px;
+  margin: 0;
+  background-color: alpha(currentColor, 0.16);
+}
+
+.quote-pill > button {
+  min-height: 30px;
+  border-radius: 0;
+}
+
+.quote-pill > button.quote-button {
+  min-width: 42px;
+  padding: 0;
+  background-color: alpha(currentColor, 0.1);
+}
+
+.quote-pill > button.quote-button:hover,
+.quote-pill > button.quote-dots:checked {
+  background-color: alpha(currentColor, 0.18);
+}
+
+.quote-pill > :first-child {
+  border-top-left-radius: 999px;
+  border-bottom-left-radius: 999px;
+}
+
+.quote-pill > :last-child {
+  border-top-right-radius: 999px;
+  border-bottom-right-radius: 999px;
+}
+
+.quote-pill > .quote-label,
+.quote-pill > button.quote-add {
+  padding: 0 12px;
+}
+
+.quote-dots {
+  font-weight: bold;
+  letter-spacing: 2px;
+}
+
+/* Lines picked in the reader, quoted above a reply. */
+.quote-picked {
+  padding: 10px 8px 12px 14px;
+  border-radius: 12px;
+  background-color: alpha(var(--accent-bg-color), 0.14);
+}
+
+.quote-picked button.quote-button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  background-color: alpha(currentColor, 0.1);
+}
+
+.quote-picked .quote-who {
+  opacity: 0.75;
+}
+
+/* The whole earlier mail, opened with •••; faded while it is left out. */
+.quote-whole {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background-color: alpha(var(--accent-bg-color), 0.08);
+}
+
+.quote-whole.left-out {
+  opacity: 0.55;
+  background-color: alpha(currentColor, 0.04);
+}

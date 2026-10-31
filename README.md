@@ -24,6 +24,9 @@ images are never loaded, and anything too rich has an "Open in Tuta" button.
   `~/.config/tern/rules.toml`.
 - **Several addresses**: with aliases on the Tuta account, the composer has a From list; a reply starts
   from the address the mail was sent to.
+- **Replies quote only what you pick**: select lines in a mail before Reply and only they are quoted, above
+  your answer. The whole earlier mail waits under a `•••` pill to add; a forward carries it until you
+  leave it out.
 - **Conversation menu**: right-click a conversation (or press Shift+F10) to pin it to the top of the
   list, mark it read or unread, or move it to Spam or Trash. Pins stay on this computer.
 - **Keyboard**: Alt+Up/Down between conversations, Enter to read, Escape back, Delete, Ctrl+1…9 for

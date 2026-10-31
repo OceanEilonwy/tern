@@ -8,7 +8,7 @@ use gtk::{gdk, gio, glib};
 use tern_core::{mime_for, Attachment, FolderKind, MailId, NewAttachment};
 
 use crate::activity::Word;
-use crate::compose_model::{Fields, MAX_TOTAL_BYTES};
+use crate::compose_model::{Fields, Quote, MAX_TOTAL_BYTES};
 use crate::{attachments::icon_for, format, runtime, suggest, window::Ctx};
 
 pub struct Composer {
@@ -25,6 +25,14 @@ pub struct Composer {
 	cc_rows: [gtk::Widget; 4],
 	subject: gtk::Entry,
 	body: gtk::TextView,
+	/// The earlier mail this carries, kept out of the text.
+	quote: RefCell<Quote>,
+	/// The lines picked in the reader, above the text, with an × to leave them out.
+	picked: gtk::Box,
+	/// The whole earlier mail, under the text: ••• to look at it, and a button to add it or an × to
+	/// leave it out.
+	pill: gtk::Box,
+	whole: gtk::Revealer,
 	send: gtk::Button,
 	files: gtk::ListBox,
 	files_box: gtk::Box,
@@ -118,7 +126,15 @@ impl Composer {
 			.accepts_tab(false)
 			.build();
 		body.update_property(&[gtk::accessible::Property::Label("Message")]);
-		let body_scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&body).vexpand(true).build();
+		let picked = gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["quote-picked"]).margin_top(18).margin_start(24).margin_end(24).visible(false).build();
+		let pill = gtk::Box::builder().css_classes(["quote-pill"]).halign(gtk::Align::Start).margin_start(24).margin_bottom(12).visible(false).build();
+		let whole = gtk::Revealer::builder().transition_type(gtk::RevealerTransitionType::SlideDown).build();
+		let writing = gtk::Box::new(gtk::Orientation::Vertical, 0);
+		writing.append(&picked);
+		writing.append(&body);
+		writing.append(&pill);
+		writing.append(&whole);
+		let body_scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&writing).vexpand(true).build();
 
 		let files = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
 		let files_summary = gtk::Label::builder().xalign(0.0).css_classes(["caption", "dim-label"]).build();
@@ -162,6 +178,10 @@ impl Composer {
 			cc_rows,
 			subject,
 			body,
+			quote: RefCell::new(fields.quote.clone()),
+			picked,
+			pill,
+			whole,
 			send,
 			files,
 			files_box,
@@ -186,6 +206,7 @@ impl Composer {
 		cc_toggle.set_active(show_cc);
 		this.show_cc(show_cc);
 		this.refresh_files();
+		this.show_quote();
 		this.update_title();
 
 		let weak = Rc::downgrade(&this);
@@ -283,7 +304,103 @@ impl Composer {
 			kept: self.kept.borrow().clone(),
 			// The main address is sent as none, so a draft from it stays as it was.
 			from: self.addresses.get(self.from.selected() as usize).filter(|_| self.from.selected() > 0).cloned().unwrap_or_default(),
+			quote: self.quote.borrow().clone(),
 		}
+	}
+
+	/// Leaves out the lines picked in the reader.
+	pub fn drop_picked(self: &Rc<Self>) {
+		self.quote.borrow_mut().picked = None;
+		self.show_quote();
+	}
+
+	/// Puts the whole earlier mail in the mail, or leaves it out.
+	pub fn include_whole(self: &Rc<Self>, included: bool) {
+		if let Some(whole) = self.quote.borrow_mut().whole.as_mut() {
+			whole.included = included;
+		}
+		self.show_quote();
+	}
+
+	/// For the screenshot scenes: what the mail carries of the earlier one now.
+	pub fn quote(&self) -> Quote {
+		self.quote.borrow().clone()
+	}
+
+	/// Shows the picked lines and the whole mail's pill as the quote has them.
+	fn show_quote(self: &Rc<Self>) {
+		let quote = self.quote.borrow().clone();
+		while let Some(child) = self.picked.first_child() {
+			self.picked.remove(&child);
+		}
+		self.picked.set_visible(quote.picked.is_some());
+		if let Some((who, lines)) = &quote.picked {
+			let head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+			head.append(&gtk::Label::builder().label(format!("{who} wrote:")).xalign(0.0).hexpand(true).css_classes(["caption", "quote-who"]).build());
+			let drop = gtk::Button::builder().icon_name("window-close-symbolic").tooltip_text("Leave This Quote Out").css_classes(["circular", "quote-button"]).valign(gtk::Align::Start).build();
+			let weak = Rc::downgrade(self);
+			drop.connect_clicked(move |_| {
+				if let Some(this) = weak.upgrade() {
+					this.drop_picked();
+				}
+			});
+			head.append(&drop);
+			self.picked.append(&head);
+			self.picked.append(&gtk::Label::builder().label(lines).xalign(0.0).wrap(true).wrap_mode(gtk::pango::WrapMode::WordChar).selectable(true).build());
+		}
+
+		while let Some(child) = self.pill.first_child() {
+			self.pill.remove(&child);
+		}
+		let Some(whole) = quote.whole else {
+			self.pill.set_visible(false);
+			self.whole.set_child(None::<&gtk::Widget>);
+			return;
+		};
+		self.pill.set_visible(true);
+		if whole.included {
+			self.pill.add_css_class("included");
+		} else {
+			self.pill.remove_css_class("included");
+		}
+		let dots = gtk::ToggleButton::builder().label("•••").tooltip_text(if whole.forward { "Show the Forwarded Mail" } else { "Show the Earlier Mail" }).css_classes(["quote-button", "quote-dots"]).active(self.whole.reveals_child()).build();
+		let w = self.whole.clone();
+		dots.connect_toggled(move |b| w.set_reveal_child(b.is_active()));
+		self.pill.append(&dots);
+		self.pill.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+		if whole.included {
+			self.pill.append(&gtk::Label::builder().label(&whole.label).css_classes(["caption", "quote-label"]).ellipsize(gtk::pango::EllipsizeMode::End).build());
+			self.pill.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+			let drop = gtk::Button::builder().icon_name("window-close-symbolic").tooltip_text(if whole.forward { "Leave the Forwarded Mail Out" } else { "Leave the Quote Out" }).css_classes(["quote-button"]).build();
+			let weak = Rc::downgrade(self);
+			drop.connect_clicked(move |_| {
+				if let Some(this) = weak.upgrade() {
+					this.include_whole(false);
+				}
+			});
+			self.pill.append(&drop);
+		} else {
+			let add = gtk::Button::builder().label(format!("+ Quote {}", whole.label)).css_classes(["flat", "caption", "quote-add"]).build();
+			let weak = Rc::downgrade(self);
+			add.connect_clicked(move |_| {
+				if let Some(this) = weak.upgrade() {
+					this.include_whole(true);
+				}
+			});
+			self.pill.append(&add);
+		}
+		let text = gtk::Label::builder()
+			.label(format!("{}\n{}", whole.head.trim_end(), whole.text))
+			.xalign(0.0)
+			.wrap(true)
+			.wrap_mode(gtk::pango::WrapMode::WordChar)
+			.selectable(true)
+			.css_classes(if whole.included { vec!["quote-whole"] } else { vec!["quote-whole", "left-out"] })
+			.margin_start(24)
+			.margin_end(24)
+			.margin_bottom(18)
+			.build();
+		self.whole.set_child(Some(&text));
 	}
 
 	fn toast(&self, text: &str) {
@@ -637,7 +754,7 @@ impl Composer {
 
 /// What decides whether a message changed since it was saved.
 fn snapshot(f: &Fields) -> Snapshot {
-	(f.from.clone(), f.to.clone(), f.cc.clone(), f.bcc.clone(), f.subject.clone(), f.body.clone(), f.attachments.len(), f.kept.len())
+	(f.from.clone(), f.to.clone(), f.cc.clone(), f.bcc.clone(), f.subject.clone(), f.body.clone(), f.attachments.len(), f.kept.len(), f.quote.clone())
 }
 
-type Snapshot = (String, String, String, String, String, String, usize, usize);
+type Snapshot = (String, String, String, String, String, String, usize, usize, Quote);

@@ -16,6 +16,7 @@ use crate::settings::Settings;
 use crate::{background, format, keyring, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot, semantic};
 
 type ChangedHook = Box<dyn Fn(&[FolderKind])>;
+type RuleHook = Box<dyn Fn(&str)>;
 
 /// What every part of the window shares: the window, its toasts, the signed-in account and its cache.
 #[derive(Clone)]
@@ -29,6 +30,7 @@ pub struct Ctx {
 	/// Wakes the background sync.
 	wake: Arc<tokio::sync::Notify>,
 	changed: Rc<RefCell<Option<ChangedHook>>>,
+	show_rule: Rc<RefCell<Option<RuleHook>>>,
 	/// What Tern is doing now, in a word.
 	pub activity: Activity,
 }
@@ -100,6 +102,17 @@ impl Ctx {
 	pub fn connect_changed(&self, f: impl Fn(&[FolderKind]) + 'static) {
 		*self.changed.borrow_mut() = Some(Box::new(f));
 	}
+
+	/// Lists, in the main window, the mail a rule's line catches.
+	pub fn show_rule(&self, line: &str) {
+		if let Some(f) = self.show_rule.borrow().as_ref() {
+			f(line);
+		}
+	}
+
+	pub fn connect_show_rule(&self, f: impl Fn(&str) + 'static) {
+		*self.show_rule.borrow_mut() = Some(Box::new(f));
+	}
 }
 
 /// Where an account's mail cache lives.
@@ -133,6 +146,7 @@ impl Window {
 			settings: Rc::new(Cell::new(Settings::load())),
 			wake: Arc::default(),
 			changed: Rc::default(),
+			show_rule: Rc::default(),
 			activity: Activity::default(),
 		};
 

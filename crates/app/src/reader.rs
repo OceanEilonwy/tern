@@ -408,6 +408,15 @@ impl Reader {
 		}
 	}
 
+	/// For the screenshot scenes: selects `text` in the open mail, as dragging over it does.
+	pub fn select_in_current(&self, text: &str) -> bool {
+		let Some(card) = self.current_card() else { return false };
+		let buffer = card.body.buffer();
+		let Some((start, end)) = buffer.start_iter().forward_search(text, gtk::TextSearchFlags::empty(), None) else { return false };
+		buffer.select_range(&start, &end);
+		true
+	}
+
 	fn current_card(&self) -> Option<Rc<Card>> {
 		self.cards.borrow().iter().find(|c| c.root.has_css_class("current")).cloned()
 	}
@@ -548,7 +557,12 @@ impl Reader {
 			return None;
 		}
 		let date = format::long_date(mail.summary.received_ms, &glib::TimeZone::local());
-		let fields = compose_model::answer_fields(mail, &opened.doc.to_plain_text(), &date, answer, &me);
+		// Lines selected in the mail are what a reply answers.
+		let picked = self.current_card().and_then(|card| {
+			let (start, end) = card.body.buffer().selection_bounds()?;
+			Some(card.body.buffer().text(&start, &end, false).to_string())
+		});
+		let fields = compose_model::answer_fields(mail, &opened.doc.to_plain_text(), &date, answer, &me, picked.as_deref());
 		let forwarded = (answer == Answer::Forward).then(|| (mail.summary.id.clone(), mail.attachments.clone()));
 		Some(composer::Composer::open(&self.ctx, fields, forwarded))
 	}
