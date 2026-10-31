@@ -111,6 +111,11 @@ impl RestClient for TimedRestClient {
 		let what = format!("{method:?} {}", log_path(&url));
 		if self.log {
 			eprintln!("tern: {what} ...");
+			if what.ends_with("draftservice") {
+				if let Some(shape) = options.body.as_deref().and_then(request_shape) {
+					eprintln!("tern: {what} sends {shape}");
+				}
+			}
 		}
 		let started = std::time::Instant::now();
 		let result = tokio::time::timeout(REQUEST_TIMEOUT, self.inner.request_binary(url, method, options)).await;
@@ -131,6 +136,22 @@ impl RestClient for TimedRestClient {
 		}
 		result.unwrap_or(Err(RestClientError::NetworkError))
 	}
+}
+
+/// A JSON request body with every value that may hold a key or ciphertext replaced by its length,
+/// so the shape of a request can be compared with the official client's without showing secrets.
+fn request_shape(body: &[u8]) -> Option<String> {
+	fn mask(value: &mut serde_json::Value) {
+		match value {
+			serde_json::Value::String(s) if s.len() > 24 => *s = format!("<{} chars>", s.len()),
+			serde_json::Value::Array(items) => items.iter_mut().for_each(mask),
+			serde_json::Value::Object(fields) => fields.values_mut().for_each(mask),
+			_ => {},
+		}
+	}
+	let mut json: serde_json::Value = serde_json::from_slice(body).ok()?;
+	mask(&mut json);
+	Some(json.to_string())
 }
 
 /// The URL without host and query string.
@@ -386,6 +407,12 @@ impl FileClient for CacheFileClient {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn request_shape_hides_long_values() {
+		let shape = request_shape(br#"{"1":"0","2":["aGVsbG8gd29ybGQgaGVsbG8gd29ybGQ="],"3":{"4":null}}"#).unwrap();
+		assert_eq!(shape, r#"{"1":"0","2":["<32 chars>"],"3":{"4":null}}"#);
+	}
 
 	#[test]
 	fn ids_round_trip() {
