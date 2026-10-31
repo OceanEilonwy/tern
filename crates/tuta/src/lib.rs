@@ -264,7 +264,7 @@ impl TutaBackend {
 		let body = &opened.details.body;
 		let body_html = body.compressedText.clone().filter(|t| !t.is_empty()).or_else(|| body.text.clone()).unwrap_or_default();
 		let folder = opened.mail.sets.first().map(|set| set.element_id.to_string()).unwrap_or_default();
-		let summary = summary(&opened.mail, &self.account.mail_address).ok_or_else(|| Error::Other("mail has no id".into()))?;
+		let summary = summary(&opened.mail, &self.account).ok_or_else(|| Error::Other("mail has no id".into()))?;
 		let web_url = format!("{BASE_URL}/mail/{folder}/{}", summary.id.element);
 		Ok(Mail {
 			summary,
@@ -341,10 +341,23 @@ fn label(set: &MailSet) -> Option<Label> {
 	(set.folderType == MailSetKind::Label as i64).then(|| Label { id: FolderId(format!("{}/{element}", set.entries)), name: set.name.clone() })
 }
 
-fn summary(mail: &TutaMail, me: &str) -> Option<MailSummary> {
+/// The account as the sender of a mail from `from`, which must be one of its addresses.
+fn sender(account: &TernAccount, from: Option<&str>) -> Result<TernAccount> {
+	let address = match from {
+		None => account.mail_address.clone(),
+		Some(from) => std::iter::once(&account.mail_address)
+			.chain(&account.aliases)
+			.find(|a| a.eq_ignore_ascii_case(from))
+			.cloned()
+			.ok_or_else(|| Error::Other(format!("This account cannot send from {from}")))?,
+	};
+	Ok(TernAccount { mail_address: address, name: account.name.clone(), mail_group: account.mail_group.clone(), aliases: account.aliases.clone() })
+}
+
+fn summary(mail: &TutaMail, me: &TernAccount) -> Option<MailSummary> {
 	Some(MailSummary {
 		to: mail.firstRecipient.as_ref().map(|a| Address::new(a.name.clone(), a.address.clone())),
-		outgoing: mail.sender.address.eq_ignore_ascii_case(me),
+		outgoing: std::iter::once(&me.mail_address).chain(&me.aliases).any(|a| mail.sender.address.eq_ignore_ascii_case(a)),
 		id: id_string(mail._id.as_ref()?),
 		from: Address::new(mail.sender.name.clone(), mail.sender.address.clone()),
 		subject: mail.subject.clone(),
@@ -399,7 +412,7 @@ const MAIL_STATE_DRAFT: i64 = 0;
 #[async_trait]
 impl Backend for TutaBackend {
 	fn account(&self) -> Account {
-		Account { address: self.account.mail_address.clone(), name: self.account.name.clone() }
+		Account { address: self.account.mail_address.clone(), name: self.account.name.clone(), aliases: self.account.aliases.clone() }
 	}
 
 	async fn folders(&self) -> Result<Vec<Folder>> {
@@ -414,7 +427,7 @@ impl Backend for TutaBackend {
 		let entries = GeneratedId(folder.0.split('/').next().unwrap_or_default().to_string());
 		let mail = self.mail.clone();
 		let (items, next) = guarded(async move { mail.mail_page(&entries, next.map(CustomId), count).await.map_err(to_error) }).await?;
-		let me = &self.account.mail_address;
+		let me = &self.account;
 		let mails = items
 			.iter()
 			.filter_map(|item| match item {
@@ -457,14 +470,16 @@ impl Backend for TutaBackend {
 	}
 
 	async fn send(&self, draft: Draft) -> Result<()> {
+		let account = Arc::new(sender(&self.account, draft.from.as_deref())?);
 		let outgoing = outgoing_mail(draft)?;
-		let (mail, account) = (self.mail.clone(), self.account.clone());
+		let mail = self.mail.clone();
 		guarded(async move { mail.send(&account, outgoing).await.map(|_| ()).map_err(to_error) }).await
 	}
 
 	async fn save_draft(&self, draft: Draft) -> Result<MailId> {
+		let account = Arc::new(sender(&self.account, draft.from.as_deref())?);
 		let outgoing = outgoing_mail(draft)?;
-		let (mail, account) = (self.mail.clone(), self.account.clone());
+		let mail = self.mail.clone();
 		let id = guarded(async move { mail.save_draft(&account, outgoing).await.map_err(to_error) }).await?;
 		Ok(id_string(&id))
 	}
@@ -570,6 +585,19 @@ mod tests {
 	fn request_shape_hides_long_values() {
 		let shape = request_shape(br#"{"1":"0","2":["aGVsbG8gd29ybGQgaGVsbG8gd29ybGQ="],"3":{"4":null}}"#).unwrap();
 		assert_eq!(shape, r#"{"1":"0","2":["<32 chars>"],"3":{"4":null}}"#);
+	}
+
+	#[test]
+	fn mail_goes_out_from_an_alias_only_when_it_is_the_account_s() {
+		let account = TernAccount {
+			mail_address: "me@tuta.com".into(),
+			name: "Me".into(),
+			mail_group: tutasdk::GeneratedId("group".into()),
+			aliases: vec!["Shop@Me.example".into()],
+		};
+		assert_eq!(sender(&account, None).unwrap().mail_address, "me@tuta.com");
+		assert_eq!(sender(&account, Some("shop@me.example")).unwrap().mail_address, "Shop@Me.example", "as the server spells it");
+		assert!(sender(&account, Some("someone@else.example")).is_err());
 	}
 
 	#[test]

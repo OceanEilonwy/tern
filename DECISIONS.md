@@ -363,3 +363,17 @@ Mail is now fetched in batches, and the keys and tokens a batch needs are loaded
 - **A pin icon of Tern's own**: Breeze has no `view-pin-symbolic`.
 - **The rule page's look is not changed this round**: mockups of a nicer one are for the user to
   pick from first.
+
+## Sending from an alias (2026-10-31)
+
+- **Which addresses**: the mailbox's main address and its aliases that are turned on, read from its
+  GroupInfo at sign-in (a new alias shows after signing in again). Disabled aliases are left out:
+  Tuta refuses mail from them.
+- **The From list shows only with more than one address**, above To. A new mail starts from the main
+  address; a reply or forward from the first of the account's addresses in the mail's To or Cc (so
+  mail to an alias is answered from it), else the main one; a reopened draft from the address it was
+  saved with. Reply All leaves every one of the account's addresses out, not only the main one, and
+  mail from any of them counts as sent by the account.
+- **The display name stays the account's**: Tuta keeps per-alias sender names in mailbox properties,
+  which Tern does not read yet.
+- The demo account has a second address, `news@you.example`, which its newsletter came to.

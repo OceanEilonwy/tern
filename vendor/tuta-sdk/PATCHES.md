@@ -31,3 +31,5 @@ tag, never to master. GPL-3.0.
 - `sdk/src/folder_system.rs`: `MailSetKind::Label` (8), so labels are told apart from unknown sets.
 - `sdk/src/tern.rs`: `create_label` (ManageLabelService POST), with a new session key encrypted with
   the mailbox key, as `MailModel.createLabel` at the same tag.
+- `sdk/src/tern.rs`: `TernAccount.aliases`, the mailbox's enabled alias addresses from its GroupInfo;
+  a draft is sent from one by setting `mail_address` to it.

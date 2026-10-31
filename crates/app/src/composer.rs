@@ -16,6 +16,9 @@ pub struct Composer {
 	pub window: adw::Window,
 	title: adw::WindowTitle,
 	toasts: adw::ToastOverlay,
+	/// The address to send from, among the account's; shown only when it has more than one.
+	pub from: gtk::DropDown,
+	addresses: Vec<String>,
 	to: gtk::Entry,
 	cc: gtk::Entry,
 	bcc: gtk::Entry,
@@ -33,7 +36,7 @@ pub struct Composer {
 	/// The saved draft this continues, replaced on every save.
 	existing: RefCell<Option<MailId>>,
 	/// The fields as last saved or opened, to tell whether closing needs to save.
-	saved: RefCell<(String, String, String, String, String, usize, usize)>,
+	saved: RefCell<Snapshot>,
 	pending: Cell<usize>,
 	sending: Cell<bool>,
 	done: Cell<bool>,
@@ -63,6 +66,22 @@ impl Composer {
 		header.pack_end(&discard);
 		header.pack_end(&ctx.activity.indicator());
 
+		// The account's addresses, and which one this mail goes out from.
+		let addresses = ctx.backend().map(|b| b.account().addresses()).unwrap_or_default();
+		let from = gtk::DropDown::from_strings(&addresses.iter().map(String::as_str).collect::<Vec<_>>());
+		from.update_property(&[gtk::accessible::Property::Label("From")]);
+		from.add_css_class("flat");
+		if let Some(at) = addresses.iter().position(|a| a.eq_ignore_ascii_case(&fields.from)) {
+			from.set_selected(at as u32);
+		}
+		let from_name = gtk::Label::builder().label("From").xalign(1.0).width_chars(7).css_classes(["dim-label"]).build();
+		let from_row = gtk::Box::builder().spacing(12).margin_start(12).margin_end(12).margin_top(4).margin_bottom(4).build();
+		from_row.append(&from_name);
+		from_row.append(&from);
+		let from_sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+		from_row.set_visible(addresses.len() > 1);
+		from_sep.set_visible(addresses.len() > 1);
+
 		let (to_row, to) = field("To");
 		let (cc_row, cc) = field("Cc");
 		let (bcc_row, bcc) = field("Bcc");
@@ -75,7 +94,9 @@ impl Composer {
 
 		let fields_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
 		for w in [
-			to_row.upcast_ref::<gtk::Widget>(),
+			from_row.upcast_ref::<gtk::Widget>(),
+			from_sep.upcast_ref(),
+			to_row.upcast_ref(),
 			cc_sep.upcast_ref(),
 			cc_row.upcast_ref(),
 			bcc_sep.upcast_ref(),
@@ -133,6 +154,8 @@ impl Composer {
 			window,
 			title,
 			toasts,
+			from,
+			addresses,
 			to,
 			cc,
 			bcc,
@@ -258,6 +281,8 @@ impl Composer {
 			previous: self.previous.clone(),
 			existing: self.existing.borrow().clone(),
 			kept: self.kept.borrow().clone(),
+			// The main address is sent as none, so a draft from it stays as it was.
+			from: self.addresses.get(self.from.selected() as usize).filter(|_| self.from.selected() > 0).cloned().unwrap_or_default(),
 		}
 	}
 
@@ -611,6 +636,8 @@ impl Composer {
 }
 
 /// What decides whether a message changed since it was saved.
-fn snapshot(f: &Fields) -> (String, String, String, String, String, usize, usize) {
-	(f.to.clone(), f.cc.clone(), f.bcc.clone(), f.subject.clone(), f.body.clone(), f.attachments.len(), f.kept.len())
+fn snapshot(f: &Fields) -> Snapshot {
+	(f.from.clone(), f.to.clone(), f.cc.clone(), f.bcc.clone(), f.subject.clone(), f.body.clone(), f.attachments.len(), f.kept.len())
 }
+
+type Snapshot = (String, String, String, String, String, String, usize, usize);

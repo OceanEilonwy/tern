@@ -542,7 +542,7 @@ impl Reader {
 	pub fn answer(&self, answer: Answer) -> Option<Rc<composer::Composer>> {
 		let opened = self.current.borrow().clone()?;
 		let backend = self.ctx.backend()?;
-		let me = backend.account().address;
+		let me = backend.account();
 		let mail = &opened.mail;
 		if mail.summary.draft {
 			return None;

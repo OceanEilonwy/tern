@@ -150,6 +150,37 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			wait_for(|| mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.attachments.len() == 1)).await;
 			if mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.attachments.len() == 1) { Ok(()) } else { Err("the sent mail lost its attachment".into()) }
 		}
+		// A reply goes out from the address the mail came to; a new mail from the main one, unless
+		// another is picked.
+		"from" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			mailbox.select_by_subject("five small things");
+			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
+			let reply = mailbox.reader.answer(crate::compose_model::Answer::Reply).ok_or("no reply")?;
+			let picked = reply.from.selected_item().and_downcast::<gtk::StringObject>().map(|s| s.string().to_string());
+			if !reply.from.is_visible() || picked.as_deref() != Some("news@you.example") {
+				return Err(format!("the reply is from {picked:?}"));
+			}
+			reply.send();
+			wait_for(|| !reply.window.is_visible()).await;
+			drop(reply);
+			let fresh = Composer::open(&win.ctx, Fields { to: "mia@tuta.com".into(), subject: "From the main address".into(), ..Default::default() }, None);
+			if fresh.from.selected() != 0 {
+				return Err("a new mail is not from the main address".into());
+			}
+			fresh.send();
+			wait_for(|| !fresh.window.is_visible()).await;
+			drop(fresh);
+			mailbox.select_folder(tern_core::FolderKind::Sent);
+			wait_for(|| mailbox.select_by_subject("Re: This week")).await;
+			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
+			let senders: Vec<(String, String)> = mailbox.listed().iter().map(|r| (r.latest.subject.clone(), r.latest.from.address.clone())).collect();
+			let sent_from = |subject: &str| senders.iter().find(|(s, _)| s.contains(subject)).map(|(_, f)| f.as_str());
+			if sent_from("Re: This week") != Some("news@you.example") || sent_from("From the main address") != Some("you@tuta.com") {
+				return Err(format!("Sent holds {senders:?}"));
+			}
+			Ok(())
+		}
 		// Typing in To suggests contacts and people written to.
 		"suggest" => {
 			wait_for(|| mailbox.store.n_items() > 0).await;
@@ -514,7 +545,7 @@ pub fn drive(win: Rc<Window>) {
 	if scene == "sign-in" {
 		return sign_in(Rc::downgrade(&win), path);
 	}
-	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first" | "spam" | "rules" | "menu") {
+	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first" | "spam" | "rules" | "menu" | "from") {
 		glib::spawn_future_local(async move {
 			if let Err(e) = check(&win, &scene).await {
 				// No picture, so the check fails.

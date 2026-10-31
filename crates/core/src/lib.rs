@@ -153,6 +153,8 @@ pub struct Draft {
 	pub existing: Option<MailId>,
 	/// Attachments of `existing` that stay on the draft; the others are removed.
 	pub kept: Vec<Attachment>,
+	/// The address to send from, one of [`Account::addresses`]; `None` for the main one.
+	pub from: Option<String>,
 }
 
 /// The signed-in account.
@@ -160,6 +162,20 @@ pub struct Draft {
 pub struct Account {
 	pub address: String,
 	pub name: String,
+	/// Other addresses of the mailbox that mail can be sent from.
+	pub aliases: Vec<String>,
+}
+
+impl Account {
+	/// Every address mail can be sent from, the main one first.
+	pub fn addresses(&self) -> Vec<String> {
+		std::iter::once(self.address.clone()).chain(self.aliases.iter().cloned()).collect()
+	}
+
+	/// `address` is one of this account's, in any case.
+	pub fn owns(&self, address: &str) -> bool {
+		self.addresses().iter().any(|a| a.eq_ignore_ascii_case(address))
+	}
 }
 
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]

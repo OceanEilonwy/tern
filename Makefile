@@ -19,7 +19,7 @@ test: test-ui
 # Drives the real window on a headless display: KDE's kwin_wayland in virtual mode when installed
 # (it draws real frames, so layout settles as on screen), else GTK's broadway. Each scene saves a
 # picture only if its check passed.
-UI_SCENES = sign-in folders-fail refresh-race sign-out-race draft suggest keys arrows busy panes search focus-first spam rules menu
+UI_SCENES = sign-in folders-fail refresh-race sign-out-race draft suggest keys arrows busy panes search focus-first spam rules menu from
 test-ui:
 	cargo build -p tern
 	@dir=$$(mktemp -d); \

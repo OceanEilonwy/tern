@@ -1,6 +1,6 @@
 //! What the composer does that needs no GTK: subjects, quoting, recipients and building the draft.
 
-use tern_core::{parse_addresses, text_to_html, Address, Attachment, Draft, Mail, MailId, NewAttachment, ReplyKind};
+use tern_core::{parse_addresses, text_to_html, Account, Address, Attachment, Draft, Mail, MailId, NewAttachment, ReplyKind};
 
 /// Tuta refuses mails much bigger than this.
 pub const MAX_TOTAL_BYTES: u64 = 25 * 1024 * 1024;
@@ -26,6 +26,8 @@ pub struct Fields {
 	pub existing: Option<MailId>,
 	/// Attachments already on `existing`.
 	pub kept: Vec<Attachment>,
+	/// The address to send from; empty for the account's main one.
+	pub from: String,
 }
 
 /// Which fields hold text that is not an address, and that text.
@@ -82,6 +84,7 @@ impl Fields {
 			previous: self.previous.clone(),
 			existing: self.existing.clone(),
 			kept: self.kept.clone(),
+			from: Some(self.from.trim().to_string()).filter(|f| !f.is_empty()),
 		}
 	}
 
@@ -144,20 +147,19 @@ pub fn format_addresses(list: &[Address]) -> String {
 	list.iter().map(format_address).collect::<Vec<_>>().join(", ")
 }
 
-/// To and Cc for answering `mail`, leaving out `me`.
-pub fn reply_recipients(mail: &Mail, all: bool, me: &str) -> (Vec<Address>, Vec<Address>) {
+/// To and Cc for answering `mail`, leaving out `me`'s addresses.
+pub fn reply_recipients(mail: &Mail, all: bool, me: &Account) -> (Vec<Address>, Vec<Address>) {
 	let mut to: Vec<Address> = if mail.reply_to.is_empty() { vec![mail.summary.from.clone()] } else { mail.reply_to.clone() };
 	let mut cc = Vec::new();
 	// Answering a mail you sent goes back to its recipients.
-	if to.iter().all(|a| a.address.eq_ignore_ascii_case(me)) {
+	if to.iter().all(|a| me.owns(&a.address)) {
 		to = mail.to.clone();
 	}
 	if all {
 		let mut seen: Vec<String> = to.iter().map(|a| a.address.to_lowercase()).collect();
-		seen.push(me.to_lowercase());
 		for a in mail.to.iter().chain(&mail.cc) {
 			let key = a.address.to_lowercase();
-			if !seen.contains(&key) {
+			if !seen.contains(&key) && !me.owns(&key) {
 				seen.push(key);
 				cc.push(a.clone());
 			}
@@ -192,8 +194,9 @@ pub fn answer_body(mail: &Mail, text: &str, date: &str, answer: Answer) -> Strin
 	}
 }
 
-/// The fields for answering `mail`. Forwarded attachments are added by the caller as they download.
-pub fn answer_fields(mail: &Mail, text: &str, date: &str, answer: Answer, me: &str) -> Fields {
+/// The fields for answering `mail`, from the address of `me` it was sent to. Forwarded attachments
+/// are added by the caller as they download.
+pub fn answer_fields(mail: &Mail, text: &str, date: &str, answer: Answer, me: &Account) -> Fields {
 	let (to, cc, subject, kind) = match answer {
 		Answer::Reply | Answer::ReplyAll => {
 			let (to, cc) = reply_recipients(mail, answer == Answer::ReplyAll, me);
@@ -207,6 +210,7 @@ pub fn answer_fields(mail: &Mail, text: &str, date: &str, answer: Answer, me: &s
 		subject,
 		body: answer_body(mail, text, date, answer),
 		previous: Some((mail.summary.id.clone(), kind)),
+		from: mail.to.iter().chain(&mail.cc).find_map(|a| me.addresses().into_iter().find(|mine| mine.eq_ignore_ascii_case(&a.address))).unwrap_or_default(),
 		..Default::default()
 	}
 }
@@ -221,6 +225,7 @@ pub fn draft_fields(draft: &Mail, text: &str) -> Fields {
 		body: text.to_string(),
 		existing: Some(draft.summary.id.clone()),
 		kept: draft.attachments.clone(),
+		from: draft.summary.from.address.clone(),
 		..Default::default()
 	}
 }
@@ -269,6 +274,10 @@ mod tests {
 	use tern_core::demo::DemoBackend;
 	use tern_core::{Backend, FolderId, MailSummary};
 
+	fn me() -> Account {
+		Account { address: "you@tuta.com".into(), name: "You".into(), aliases: vec!["shop@you.example".into()] }
+	}
+
 	fn mail() -> Mail {
 		Mail {
 			summary: MailSummary {
@@ -307,10 +316,10 @@ mod tests {
 	#[test]
 	fn reply_all_leaves_out_me_and_duplicates() {
 		let m = mail();
-		let (to, cc) = reply_recipients(&m, false, "you@tuta.com");
+		let (to, cc) = reply_recipients(&m, false, &me());
 		assert_eq!(to, vec![m.summary.from.clone()]);
 		assert!(cc.is_empty());
-		let (to, cc) = reply_recipients(&m, true, "YOU@tuta.com");
+		let (to, cc) = reply_recipients(&m, true, &me());
 		assert_eq!(to.len(), 1);
 		assert_eq!(cc, vec![Address::new("", "sam@x.org"), Address::new("Ann", "ann@x.org")]);
 	}
@@ -319,15 +328,18 @@ mod tests {
 	fn reply_to_wins_and_own_mail_goes_back_to_recipients() {
 		let mut m = mail();
 		m.reply_to = vec![Address::new("", "list@x.org")];
-		assert_eq!(reply_recipients(&m, false, "you@tuta.com").0, vec![Address::new("", "list@x.org")]);
+		assert_eq!(reply_recipients(&m, false, &me()).0, vec![Address::new("", "list@x.org")]);
 		let mut sent = mail();
 		sent.summary.from = Address::new("You", "you@tuta.com");
-		assert_eq!(reply_recipients(&sent, false, "you@tuta.com").0, sent.to);
+		assert_eq!(reply_recipients(&sent, false, &me()).0, sent.to);
+		// Sent from an alias too.
+		sent.summary.from = Address::new("You", "SHOP@you.example");
+		assert_eq!(reply_recipients(&sent, false, &me()).0, sent.to);
 	}
 
 	#[test]
 	fn reply_quotes_the_original() {
-		let f = answer_fields(&mail(), "Hi\n\nThe photos", "3 Oct 2026, 14:05", Answer::Reply, "you@tuta.com");
+		let f = answer_fields(&mail(), "Hi\n\nThe photos", "3 Oct 2026, 14:05", Answer::Reply, &me());
 		assert_eq!(f.to, "Mia Chen <mia@tuta.com>");
 		assert_eq!(f.subject, "Re: Photos");
 		assert_eq!(f.body, "\n\nOn 3 Oct 2026, 14:05, Mia Chen <mia@tuta.com> wrote:\n> Hi\n>\n> The photos\n");
@@ -337,8 +349,24 @@ mod tests {
 	}
 
 	#[test]
+	fn an_answer_goes_out_from_the_address_the_mail_came_to() {
+		let mut m = mail();
+		assert_eq!(answer_fields(&m, "", "", Answer::Reply, &me()).from, "you@tuta.com");
+		m.to = vec![Address::new("", "Shop@You.example")];
+		m.cc = vec![Address::new("", "ann@x.org")];
+		let f = answer_fields(&m, "", "", Answer::ReplyAll, &me());
+		assert_eq!(f.from, "shop@you.example", "as the account spells it");
+		assert_eq!(f.cc, "ann@x.org", "the alias is not copied in");
+		assert_eq!(f.build_draft().unwrap().from.as_deref(), Some("shop@you.example"));
+		// Sent to none of them (a list, Bcc): the main address.
+		m.to = vec![Address::new("", "list@x.org")];
+		assert_eq!(answer_fields(&m, "", "", Answer::Reply, &me()).from, "");
+		assert_eq!(answer_fields(&m, "", "", Answer::Reply, &me()).build_draft().unwrap().from, None);
+	}
+
+	#[test]
 	fn forward_has_a_header_and_no_recipients() {
-		let f = answer_fields(&mail(), "Body", "today", Answer::Forward, "you@tuta.com");
+		let f = answer_fields(&mail(), "Body", "today", Answer::Forward, &me());
 		assert!(f.to.is_empty());
 		assert_eq!(f.subject, "Fwd: Photos");
 		assert!(f.body.contains("---------- Forwarded message ----------\nFrom: Mia Chen <mia@tuta.com>\n"));

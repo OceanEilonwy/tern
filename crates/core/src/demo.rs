@@ -7,6 +7,8 @@ use async_trait::async_trait;
 use crate::{Account, Address, Attachment, Backend, Draft, Error, Folder, FolderId, FolderKind, Label, Mail, MailId, MailPage, MailSummary, Result};
 
 const ME: (&str, &str) = ("You", "you@tuta.com");
+/// A second address of the demo mailbox, which the newsletter is sent to.
+const ALIAS: &str = "news@you.example";
 
 pub const DEMO_LOGIN: &str = "demo";
 
@@ -149,6 +151,11 @@ impl DemoBackend {
 		add(7, FolderKind::Inbox, deals.clone(), "Last chance: 50% off ends tonight", 90, false, "<p>Hurry.</p>", vec![]);
 		add(8, FolderKind::Inbox, deals, "Your exclusive coupon inside", 120, false, "<p>Just for you.</p>", vec![]);
 		add(5, FolderKind::Sent, Address::new("You", "you@tuta.com"), "Lunch on Friday?", 30, false, "<div>Are you free for lunch on Friday?</div>", vec![]);
+		// The newsletter came to the second address.
+		for stored in mails.iter_mut().filter(|m| m.mail.summary.from.address == "newsletter@example.com") {
+			stored.mail.to = vec![Address::new("", ALIAS)];
+			stored.mail.summary.to = Some(Address::new("", ALIAS));
+		}
 		// The one sent mail went to Sam.
 		let sam = Address::new("Sam Okafor", "sam@example.net");
 		for stored in mails.iter_mut().filter(|m| m.folder == FolderKind::Sent) {
@@ -189,7 +196,7 @@ impl DemoBackend {
 			mail: Mail {
 				summary: MailSummary {
 					id: id.clone(),
-					from: Address::new(ME.0, ME.1),
+					from: Address::new(ME.0, draft.from.as_deref().unwrap_or(ME.1)),
 					subject: draft.subject,
 					received_ms,
 					unread: false,
@@ -221,7 +228,7 @@ impl DemoBackend {
 #[async_trait]
 impl Backend for DemoBackend {
 	fn account(&self) -> Account {
-		Account { address: ME.1.into(), name: ME.0.into() }
+		Account { address: ME.1.into(), name: ME.0.into(), aliases: vec![ALIAS.into()] }
 	}
 
 	async fn folders(&self) -> Result<Vec<Folder>> {
@@ -263,6 +270,9 @@ impl Backend for DemoBackend {
 	}
 
 	async fn send(&self, draft: Draft) -> Result<()> {
+		if draft.from.as_deref().is_some_and(|f| !self.account().owns(f)) {
+			return Err(Error::Other("This account cannot send from that address".into()));
+		}
 		if draft.to.is_empty() && draft.cc.is_empty() && draft.bcc.is_empty() {
 			return Err(Error::Other("Add a recipient".into()));
 		}

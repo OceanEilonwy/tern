@@ -294,6 +294,8 @@ pub struct TernAccount {
 	pub mail_address: String,
 	pub name: String,
 	pub mail_group: GeneratedId,
+	/// The mailbox's other addresses that are turned on, which mail can be sent from too.
+	pub aliases: Vec<String>,
 }
 
 /// A mail opened for reading: the mail, its details and its attachments, all decrypted.
@@ -435,6 +437,7 @@ impl TernMail {
 				.as_ref()
 				.and_then(|g| g.mailAddress.clone())
 				.unwrap_or_else(|| login.to_string()),
+			aliases: group_info.as_ref().map(|g| g.mailAddressAliases.iter().filter(|a| a.enabled).map(|a| a.mailAddress.clone()).collect()).unwrap_or_default(),
 			name: group_info.map(|g| g.name).unwrap_or_default(),
 			mail_group: membership.group.clone(),
 		})
@@ -1815,6 +1818,7 @@ mod tests {
 			mail_address: "me@tuta.com".into(),
 			name: "Me".into(),
 			mail_group: GeneratedId("mailgroup".into()),
+			aliases: vec![],
 		}
 	}
 
