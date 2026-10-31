@@ -93,6 +93,8 @@ pub struct ThreadRow {
 	pub count: u32,
 	/// Any of the conversation's mails in this folder is unread.
 	pub unread: bool,
+	/// Pinned to the top of the list.
+	pub pinned: bool,
 }
 
 /// A conversation search found, with the folder of its best match, which opening it uses.
@@ -204,7 +206,7 @@ impl Cache {
 			// Virtual tables first: dropping one drops the tables behind it.
 			for virtual_only in [true, false] {
 				let tables: Vec<String> = conn
-					.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND (?1 = 0 OR sql LIKE 'CREATE VIRTUAL TABLE%')")?
+					.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name != 'pins' AND (?1 = 0 OR sql LIKE 'CREATE VIRTUAL TABLE%')")?
 					.query_map([virtual_only], |r| r.get(0))?
 					.collect::<std::result::Result<_, _>>()?;
 				for table in tables {
@@ -217,6 +219,9 @@ impl Cache {
 		// Named points in time, such as how far new mail has been through the rules. Kept apart from
 		// the schema's version: adding it does not start the cache afresh.
 		conn.execute_batch("CREATE TABLE IF NOT EXISTS marks (name TEXT PRIMARY KEY, value INTEGER NOT NULL);")?;
+		// The conversations pinned to the top of the list, by thread key. Only here, as Tuta has no
+		// pins, so a new schema keeps them.
+		conn.execute_batch("CREATE TABLE IF NOT EXISTS pins (thread TEXT PRIMARY KEY);")?;
 		// Every word in the search index with how many mails hold it, for finding what a typo meant.
 		// A view of the index, on this connection only: nothing more is stored.
 		conn.execute_batch("CREATE VIRTUAL TABLE temp.vocab USING fts5vocab(main, words, row);")?;
@@ -312,7 +317,7 @@ impl Cache {
 		rows.map(|json| Ok(serde_json::from_str(&json?)?)).collect()
 	}
 
-	/// The conversations of `folder`, newest first.
+	/// The conversations of `folder`: the pinned ones first, each part newest first.
 	pub fn threads(&self, folder: &FolderId, limit: usize) -> Result<Vec<ThreadRow>> {
 		let conn = self.conn();
 		let mut stmt = conn.prepare(
@@ -323,15 +328,16 @@ impl Cache {
 				FROM mails WHERE folder = ?1)
 			 SELECT here.thread, here.summary, here.any_unread,
 				(SELECT count(*) FROM mails m LEFT JOIN folders f ON f.id = m.folder
-				 WHERE m.thread = here.thread AND (m.folder = ?1 OR coalesce(f.kind, '') NOT IN ('Trash', 'Spam')))
-			 FROM here WHERE rank = 1 ORDER BY here.received DESC LIMIT ?2",
+				 WHERE m.thread = here.thread AND (m.folder = ?1 OR coalesce(f.kind, '') NOT IN ('Trash', 'Spam'))),
+				here.thread IN (SELECT thread FROM pins) AS pinned
+			 FROM here WHERE rank = 1 ORDER BY pinned DESC, here.received DESC LIMIT ?2",
 		)?;
 		let rows = stmt.query_map(params![folder.0, limit as i64], |r| {
-			Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?, r.get::<_, u32>(3)?))
+			Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?, r.get::<_, u32>(3)?, r.get::<_, bool>(4)?))
 		})?;
 		rows.map(|row| {
-			let (key, summary, unread, count) = row?;
-			Ok(ThreadRow { key, latest: serde_json::from_str(&summary)?, count, unread })
+			let (key, summary, unread, count, pinned) = row?;
+			Ok(ThreadRow { key, latest: serde_json::from_str(&summary)?, count, unread, pinned })
 		})
 		.collect()
 	}
@@ -439,6 +445,13 @@ impl Cache {
 			tx.execute("UPDATE bodies SET mail = ?3 WHERE list = ?1 AND element = ?2", params![id.list, id.element, serde_json::to_string(&m)?])?;
 		}
 		tx.commit()?;
+		Ok(())
+	}
+
+	/// Pins the conversation `key` to the top of the lists it is in, or unpins it.
+	pub fn set_pinned(&self, key: &str, pinned: bool) -> Result<()> {
+		let sql = if pinned { "INSERT OR IGNORE INTO pins (thread) VALUES (?1)" } else { "DELETE FROM pins WHERE thread = ?1" };
+		self.conn().execute(sql, [key])?;
 		Ok(())
 	}
 
@@ -610,7 +623,8 @@ impl Cache {
 			let from_here = "FROM mails m LEFT JOIN folders f ON f.id = m.folder WHERE m.thread = ?1 AND (m.folder = ?2 OR coalesce(f.kind, '') NOT IN ('Trash', 'Spam'))";
 			let latest: String = conn.query_row(&format!("SELECT m.summary {from_here} ORDER BY m.received DESC LIMIT 1"), params![key, folder], |r| r.get(0))?;
 			let (count, unread): (u32, bool) = conn.query_row(&format!("SELECT count(*), max(m.unread) {from_here}"), params![key, folder], |r| Ok((r.get(0)?, r.get(1)?)))?;
-			hits.push(SearchHit { row: ThreadRow { key, latest: serde_json::from_str(&latest)?, count, unread }, folder: FolderId(folder) });
+			let pinned = conn.query_row("SELECT 1 FROM pins WHERE thread = ?1", [&key], |_| Ok(())).optional()?.is_some();
+			hits.push(SearchHit { row: ThreadRow { key, latest: serde_json::from_str(&latest)?, count, unread, pinned }, folder: FolderId(folder) });
 		}
 		Ok(hits)
 	}
@@ -837,6 +851,24 @@ mod tests {
 		cache.merge_page(&inbox, &[summary(5, "x", 300), summary(2, "b", 200)], false, false).unwrap();
 		let ids: Vec<String> = cache.list(&inbox, 0, 10).unwrap().into_iter().map(|m| m.id.element).collect();
 		assert_eq!(ids, ["e4", "e5", "e2", "e1"]);
+	}
+
+	#[test]
+	fn pinned_conversations_come_first() {
+		let (cache, inbox, _) = setup();
+		cache.merge_page(&inbox, &[summary(3, "New", 300), summary(2, "Re: Old", 200), summary(1, "Older", 100)], true, true).unwrap();
+		let order = |cache: &Cache| cache.threads(&inbox, 10).unwrap().iter().map(|r| (r.latest.id.element.clone(), r.pinned)).collect::<Vec<_>>();
+		let key = cache.thread_key_of(&summary(2, "", 0).id).unwrap().unwrap();
+		cache.set_pinned(&key, true).unwrap();
+		cache.set_pinned(&key, true).unwrap();
+		assert_eq!(order(&cache), [("e2".into(), true), ("e3".into(), false), ("e1".into(), false)]);
+		// Only one row fits, and it is the pinned one.
+		assert_eq!(cache.threads(&inbox, 1).unwrap()[0].latest.id.element, "e2");
+		let hits = cache.search(&Query::parse("old"), None, 10).unwrap();
+		assert!(hits.iter().all(|h| h.row.pinned == (h.row.key == key)), "search shows the pin too");
+
+		cache.set_pinned(&key, false).unwrap();
+		assert_eq!(order(&cache), [("e3".into(), false), ("e2".into(), false), ("e1".into(), false)]);
 	}
 
 	#[test]
@@ -1086,12 +1118,13 @@ mod tests {
 	}
 
 	#[test]
-	fn an_older_layout_is_rebuilt_with_its_index() {
+	fn an_older_layout_is_rebuilt_with_its_index_and_pins_kept() {
 		let dir = std::env::temp_dir().join(format!("tern-cache-layout-{}", std::process::id()));
 		let path = dir.join("mail.db");
 		let cache = Cache::open(&path, &[7; 32]).unwrap();
 		cache.set_folders(&[folder("in", FolderKind::Inbox)]).unwrap();
 		cache.merge_page(&FolderId("in".into()), &[summary(1, "Kept?", 100)], true, true).unwrap();
+		cache.set_pinned("kept?", true).unwrap();
 		cache.conn().execute_batch("PRAGMA user_version = 1").unwrap();
 		drop(cache);
 		let cache = Cache::open(&path, &[7; 32]).unwrap();
@@ -1100,6 +1133,7 @@ mod tests {
 		cache.set_folders(&[folder("in", FolderKind::Inbox)]).unwrap();
 		cache.merge_page(&FolderId("in".into()), &[summary(1, "Kept?", 100)], true, true).unwrap();
 		assert_eq!(found(&cache, "kept"), ["e1"]);
+		assert!(cache.threads(&FolderId("in".into()), 10).unwrap()[0].pinned, "pins are not mail the server has: they stay");
 		drop(cache);
 		let _ = std::fs::remove_dir_all(dir);
 	}

@@ -29,3 +29,5 @@ tag, never to master. GPL-3.0.
   (ApplyLabelService), in batches of `MAX_MAIL_UPDATE_LIMIT` like the simple move beside them;
   `tern.rs` exposes both.
 - `sdk/src/folder_system.rs`: `MailSetKind::Label` (8), so labels are told apart from unknown sets.
+- `sdk/src/tern.rs`: `create_label` (ManageLabelService POST), with a new session key encrypted with
+  the mailbox key, as `MailModel.createLabel` at the same tag.

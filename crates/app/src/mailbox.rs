@@ -35,6 +35,7 @@ const RAIL_SNAP: i32 = 140;
 const LIST: (u32, u32) = (280, 720);
 
 type MailAction = fn(&Rc<Mailbox>);
+type RowAction = fn(&Rc<Mailbox>, &ThreadRow);
 
 pub struct Mailbox {
 	ctx: Ctx,
@@ -43,6 +44,9 @@ pub struct Mailbox {
 	inner: adw::NavigationSplitView,
 	account: adw::WindowTitle,
 	folder_header: adw::HeaderBar,
+	/// The app's icon, centered on the folders' header in place of the window's own when they are a
+	/// rail: the window's sits at the header's start, off the rail's middle.
+	rail_icon: gtk::Image,
 	/// The main menu: on the folders' header, or on the list's while the folders are a rail.
 	menus: (gtk::MenuButton, gtk::MenuButton),
 	folder_list: gtk::ListBox,
@@ -71,6 +75,8 @@ pub struct Mailbox {
 	searching: RefCell<Option<Searching>>,
 	/// Counts searches, so one that finishes after a newer one started is dropped.
 	search_generation: Cell<u64>,
+	/// The conversation whose menu was opened last, which the menu's actions act on.
+	menu_row: RefCell<Option<ThreadRow>>,
 	pub reader: Rc<Reader>,
 }
 
@@ -156,12 +162,15 @@ fn row_widget() -> gtk::Box {
 	let dot = gtk::Image::builder().icon_name("media-record-symbolic").pixel_size(8).css_classes(["accent"]).valign(gtk::Align::Center).build();
 	dot.set_tooltip_text(Some("Unread"));
 	let sender = gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build();
+	let pin = gtk::Image::builder().icon_name("tern-pin-symbolic").css_classes(["dim-label"]).build();
+	pin.set_tooltip_text(Some("Pinned"));
 	let count = gtk::Label::builder().css_classes(["caption", "numeric", "thread-count"]).valign(gtk::Align::Center).build();
 	let clip = gtk::Image::builder().icon_name("mail-attachment-symbolic").css_classes(["dim-label"]).build();
 	let date = gtk::Label::builder().css_classes(["caption", "dim-label", "numeric"]).build();
 	let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
 	top.append(&dot);
 	top.append(&sender);
+	top.append(&pin);
 	top.append(&count);
 	top.append(&clip);
 	top.append(&date);
@@ -178,10 +187,12 @@ fn bind_row(row: &gtk::Box, t: &ThreadRow, now: i64, tz: &glib::TimeZone) {
 	let subject = top.next_sibling().and_downcast::<gtk::Label>().unwrap();
 	let dot = top.first_child().unwrap();
 	let sender = dot.next_sibling().and_downcast::<gtk::Label>().unwrap();
-	let count = sender.next_sibling().and_downcast::<gtk::Label>().unwrap();
+	let pin = sender.next_sibling().unwrap();
+	let count = pin.next_sibling().and_downcast::<gtk::Label>().unwrap();
 	let clip = count.next_sibling().unwrap();
 	let date = clip.next_sibling().and_downcast::<gtk::Label>().unwrap();
 	dot.set_visible(t.unread);
+	pin.set_visible(t.pinned);
 	let who = match (&m.to, m.outgoing) {
 		(Some(to), true) => format!("To: {}", to.display()),
 		(None, true) => "(No Recipients)".to_string(),
@@ -318,6 +329,7 @@ impl Mailbox {
 			inner,
 			account,
 			folder_header,
+			rail_icon: gtk::Image::builder().icon_name(crate::APP_ID).pixel_size(16).build(),
 			menus,
 			folder_list,
 			folders: RefCell::default(),
@@ -338,6 +350,7 @@ impl Mailbox {
 			search_entry,
 			searching: RefCell::default(),
 			search_generation: Cell::new(0),
+			menu_row: RefCell::default(),
 			reader,
 		});
 		this.connect_signals(&list_scroll);
@@ -422,6 +435,14 @@ impl Mailbox {
 				this.apply_panes();
 			}
 		});
+		if let Some(settings) = gtk::Settings::default() {
+			let weak = Rc::downgrade(self);
+			settings.connect_gtk_decoration_layout_notify(move |_| {
+				if let Some(this) = weak.upgrade() {
+					this.apply_panes();
+				}
+			});
+		}
 	}
 
 	/// The folder sidebar's edge is dragged to `w` pixels.
@@ -467,7 +488,15 @@ impl Mailbox {
 		self.outer.set_min_sidebar_width(min as f64);
 		self.outer.set_max_sidebar_width(max as f64);
 		self.outer.set_sidebar_width_fraction(fraction);
-		self.folder_header.set_show_title(!rail);
+		let layout = self.folder_header.decoration_layout().map(|l| l.to_string()).or_else(|| gtk::Settings::default().and_then(|s| s.gtk_decoration_layout()).map(|l| l.to_string()));
+		let centered = rail && layout.as_deref().is_some_and(starts_with_icon_only);
+		self.folder_header.set_show_start_title_buttons(!centered);
+		if centered {
+			self.folder_header.set_title_widget(Some(&self.rail_icon));
+		} else {
+			self.folder_header.set_title_widget(Some(&self.account));
+		}
+		self.folder_header.set_show_title(!rail || centered);
 		self.menus.0.set_visible(!rail);
 		self.menus.0.set_primary(!rail);
 		self.menus.1.set_visible(rail);
@@ -488,6 +517,32 @@ impl Mailbox {
 		self.inner.set_min_sidebar_width(min as f64);
 		self.inner.set_max_sidebar_width(max as f64);
 		self.inner.set_sidebar_width_fraction(fraction);
+	}
+
+	/// For the screenshot scenes: how far the middle of the icon on the folders' header is from
+	/// the folders' left edge.
+	pub fn header_icon_middle(&self) -> Option<f32> {
+		let sidebar = self.outer.sidebar()?;
+		let icon: gtk::Widget = if self.rail_icon.is_mapped() {
+			self.rail_icon.clone().upcast()
+		} else {
+			// The window's own icon, which GTK draws as an image in the window controls.
+			let mut found = None;
+			let mut stack = vec![self.folder_header.clone().upcast::<gtk::Widget>()];
+			while let Some(w) = stack.pop() {
+				if w.is::<gtk::Image>() && w.is_mapped() && w.ancestor(gtk::WindowControls::static_type()).is_some() {
+					found = Some(w.clone());
+				}
+				let mut child = w.first_child();
+				while let Some(c) = child {
+					child = c.next_sibling();
+					stack.push(c);
+				}
+			}
+			found?
+		};
+		let bounds = icon.compute_bounds(&sidebar)?;
+		Some(bounds.x() + bounds.width() / 2.0)
 	}
 
 	/// The folders show as a rail of icons: only beside the list, not over it on a narrow window.
@@ -541,15 +596,41 @@ impl Mailbox {
 		let keys = gtk::EventControllerKey::new();
 		keys.set_propagation_phase(gtk::PropagationPhase::Capture);
 		let weak = Rc::downgrade(self);
-		keys.connect_key_pressed(move |_, key, _, _| {
+		keys.connect_key_pressed(move |_, key, _, state| {
 			if let Some(this) = weak.upgrade() {
 				if matches!(key, gdk::Key::Up | gdk::Key::Down | gdk::Key::Page_Up | gdk::Key::Page_Down | gdk::Key::Home | gdk::Key::End) {
 					this.by_keyboard.set(true);
+				}
+				// The menu key, or Shift+F10, opens the focused conversation's menu.
+				let menu_key = key == gdk::Key::Menu || (key == gdk::Key::F10 && state.contains(gdk::ModifierType::SHIFT_MASK));
+				if menu_key && this.focused_row().is_some_and(|(i, _)| this.open_row_menu(i, None).is_some()) {
+					return glib::Propagation::Stop;
 				}
 			}
 			glib::Propagation::Proceed
 		});
 		self.list_view.add_controller(keys);
+		// A right click, or a long press, opens a conversation's menu where it was pressed.
+		let click = gtk::GestureClick::builder().button(gdk::BUTTON_SECONDARY).build();
+		let weak = Rc::downgrade(self);
+		click.connect_pressed(move |gesture, _, x, y| {
+			if let Some(this) = weak.upgrade() {
+				if this.row_menu_at(x, y) {
+					gesture.set_state(gtk::EventSequenceState::Claimed);
+				}
+			}
+		});
+		self.list_view.add_controller(click);
+		let press = gtk::GestureLongPress::builder().touch_only(true).build();
+		let weak = Rc::downgrade(self);
+		press.connect_pressed(move |gesture, x, y| {
+			if let Some(this) = weak.upgrade() {
+				if this.row_menu_at(x, y) {
+					gesture.set_state(gtk::EventSequenceState::Claimed);
+				}
+			}
+		});
+		self.list_view.add_controller(press);
 		// Enter (or a click on the selected row) opens the conversation and moves focus into it.
 		let weak = Rc::downgrade(self);
 		self.list_view.connect_activate(move |_, _| {
@@ -646,7 +727,103 @@ impl Mailbox {
 			}
 		});
 		self.ctx.window.add_action(&folder);
+		// What a conversation's menu does, to the conversation it was opened on.
+		let row_actions: [(&str, RowAction); 5] = [
+			("pin", |m, row| m.set_pinned(row, !row.pinned)),
+			("read", |m, row| m.set_thread_unread(row, false)),
+			("unread", |m, row| m.set_thread_unread(row, true)),
+			("spam", |m, row| {
+				if let Some(folder) = m.folder_of(row) {
+					m.spam_thread(&row.key, &folder.id);
+				}
+			}),
+			("trash", |m, row| {
+				if let Some(folder) = m.folder_of(row) {
+					m.trash_thread(&row.key, &folder.id);
+				}
+			}),
+		];
+		let group = gio::SimpleActionGroup::new();
+		for (name, f) in row_actions {
+			let action = gio::SimpleAction::new(name, None);
+			let weak = Rc::downgrade(self);
+			action.connect_activate(move |_, _| {
+				let Some(this) = weak.upgrade() else { return };
+				let row = this.menu_row.borrow().clone();
+				if let Some(row) = row {
+					f(&this, &row);
+				}
+			});
+			group.add_action(&action);
+		}
+		self.list_view.insert_action_group("row", Some(&group));
 		self.set_enabled(false);
+	}
+
+	/// Opens the menu of the conversation under `(x, y)` in the list, if there is one there.
+	fn row_menu_at(self: &Rc<Self>, x: f64, y: f64) -> bool {
+		let Some(picked) = self.list_view.pick(x, y, gtk::PickFlags::DEFAULT) else { return false };
+		let found = self.bound.borrow().iter().find(|(_, w)| picked == *w.upcast_ref::<gtk::Widget>() || picked.is_ancestor(*w)).map(|(o, w)| (o.clone(), w.clone()));
+		let Some((obj, widget)) = found else { return false };
+		let at = self.list_view.compute_point(&widget, &gtk::graphene::Point::new(x as f32, y as f32)).map(|p| (p.x() as f64, p.y() as f64));
+		self.show_row_menu(&widget, row_of(&obj), at);
+		true
+	}
+
+	/// Opens the menu of the conversation at `i` in the list, at `at` in its row or under it. For
+	/// the screenshot scenes too, which get the menu back.
+	pub fn open_row_menu(self: &Rc<Self>, i: u32, at: Option<(f64, f64)>) -> Option<gtk::PopoverMenu> {
+		let obj = self.store.item(i)?;
+		let widget = self.bound.borrow().get(&obj).cloned()?;
+		Some(self.show_row_menu(&widget, row_of(&obj), at))
+	}
+
+	/// For the screenshot scenes: right-clicks the middle of row `i`'s sender.
+	pub fn right_click_row(self: &Rc<Self>, i: u32) -> bool {
+		let Some(widget) = self.store.item(i).and_then(|obj| self.bound.borrow().get(&obj).cloned()) else { return false };
+		let Some(sender) = widget.first_child().and_then(|top| top.first_child()).and_then(|dot| dot.next_sibling()) else { return false };
+		let middle = gtk::graphene::Point::new(sender.width() as f32 / 2.0, sender.height() as f32 / 2.0);
+		let Some(p) = sender.compute_point(&self.list_view, &middle) else { return false };
+		self.row_menu_at(p.x() as f64, p.y() as f64)
+	}
+
+	/// For the screenshot scenes: does what the conversation menu's item `name` does.
+	pub fn row_action(&self, name: &str) -> Result<(), String> {
+		self.list_view.activate_action(&format!("row.{name}"), None).map_err(|e| e.to_string())
+	}
+
+	fn show_row_menu(self: &Rc<Self>, widget: &gtk::Box, row: ThreadRow, at: Option<(f64, f64)>) -> gtk::PopoverMenu {
+		let kind = self.folder_of(&row).map(|f| f.kind);
+		let menu = gio::Menu::new();
+		let section = gio::Menu::new();
+		section.append(Some(if row.pinned { "Un_pin" } else { "_Pin" }), Some("row.pin"));
+		if row.unread {
+			section.append(Some("Mark as _Read"), Some("row.read"));
+		} else {
+			section.append(Some("Mark as _Unread"), Some("row.unread"));
+		}
+		menu.append_section(None, &section);
+		let section = gio::Menu::new();
+		if kind != Some(FolderKind::Spam) {
+			section.append(Some("Move to _Spam…"), Some("row.spam"));
+		}
+		if kind != Some(FolderKind::Trash) {
+			section.append(Some("Move to _Trash"), Some("row.trash"));
+		}
+		menu.append_section(None, &section);
+		*self.menu_row.borrow_mut() = Some(row);
+		let popover = gtk::PopoverMenu::builder().menu_model(&menu).has_arrow(false).halign(gtk::Align::Start).build();
+		popover.set_parent(widget);
+		if let Some((x, y)) = at {
+			popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+		}
+		popover.connect_closed(|popover| {
+			// After the chosen action has run.
+			let popover = popover.clone();
+			glib::idle_add_local_once(move || popover.unparent());
+		});
+		popover.popup();
+		popover
 	}
 
 	fn action(&self, name: &str) -> gio::SimpleAction {
@@ -942,13 +1119,15 @@ impl Mailbox {
 		}
 	}
 
-	fn open_thread(self: &Rc<Self>, row: &ThreadRow) {
-		let (Some(cache), Some(mut folder)) = (self.ctx.cache(), self.current.borrow().clone()) else { return };
-		// A conversation found by search opens in the folder of its match.
+	/// The folder a listed conversation is in: the one on show, or for one found by search, the
+	/// folder of its match.
+	fn folder_of(&self, row: &ThreadRow) -> Option<Folder> {
 		let found = self.searching.borrow().as_ref().and_then(|s| s.folders.get(&row.key).cloned());
-		if let Some(f) = found.and_then(|id| self.folders.borrow().iter().find(|r| r.folder.id == id).map(|r| r.folder.clone())) {
-			folder = f;
-		}
+		found.and_then(|id| self.folders.borrow().iter().find(|r| r.folder.id == id).map(|r| r.folder.clone())).or_else(|| self.current.borrow().clone())
+	}
+
+	fn open_thread(self: &Rc<Self>, row: &ThreadRow) {
+		let (Some(cache), Some(folder)) = (self.ctx.cache(), self.folder_of(row)) else { return };
 		let mut mails = cache.thread(&row.key, &folder.id).unwrap_or_default();
 		if mails.is_empty() {
 			mails.push(ThreadMail { summary: row.latest.clone(), folder: folder.kind, folder_id: folder.id.clone() });
@@ -1107,6 +1286,35 @@ impl Mailbox {
 		});
 	}
 
+	/// Pins a conversation to the top of the list, or unpins it. Pins stay on this computer.
+	fn set_pinned(self: &Rc<Self>, row: &ThreadRow, pinned: bool) {
+		let Some(cache) = self.ctx.cache() else { return };
+		match cache.set_pinned(&row.key, pinned) {
+			Ok(()) => self.reload_list(),
+			Err(e) => self.ctx.toast(&e.to_string()),
+		}
+	}
+
+	/// Marks a conversation's mail in its folder read, or its newest mail there unread.
+	fn set_thread_unread(self: &Rc<Self>, row: &ThreadRow, unread: bool) {
+		let (Some(cache), Some(folder)) = (self.ctx.cache(), self.folder_of(row)) else { return };
+		let mut here: Vec<MailSummary> = cache.thread(&row.key, &folder.id).unwrap_or_default().into_iter().filter(|m| m.folder_id == folder.id).map(|m| m.summary).collect();
+		if unread {
+			here = here.pop().into_iter().collect();
+			// Keep it unread: leave the conversation if it is open, or showing it marks it read again.
+			if self.reader.thread() == Some((row.key.clone(), folder.id.clone())) {
+				self.hold.set(true);
+				self.selection.set_selected(gtk::INVALID_LIST_POSITION);
+				self.hold.set(false);
+				self.reader.clear();
+				self.update_actions();
+			}
+		}
+		for summary in here.iter().filter(|m| m.unread != unread) {
+			self.set_unread(summary, unread);
+		}
+	}
+
 	fn mark_unread(self: &Rc<Self>) {
 		let target = self.reader.current.borrow().as_ref().map(|o| o.mail.summary.clone());
 		if let Some(summary) = target {
@@ -1122,22 +1330,35 @@ impl Mailbox {
 
 	/// Moves the open conversation's mails in this folder to Trash.
 	fn trash_conversation(self: &Rc<Self>) {
-		let (Some(cache), Some((key, folder))) = (self.ctx.cache(), self.reader.thread()) else { return };
-		let ids: Vec<MailId> = cache.thread(&key, &folder).unwrap_or_default().into_iter().filter(|m| m.folder_id == folder).map(|m| m.summary.id).collect();
+		if let Some((key, folder)) = self.reader.thread() {
+			self.trash_thread(&key, &folder);
+		}
+	}
+
+	/// Moves conversation `key`'s mails in `folder` to Trash.
+	fn trash_thread(self: &Rc<Self>, key: &str, folder: &FolderId) {
+		let Some(cache) = self.ctx.cache() else { return };
+		let ids: Vec<MailId> = cache.thread(key, folder).unwrap_or_default().into_iter().filter(|m| &m.folder_id == folder).map(|m| m.summary.id).collect();
 		let message = if ids.len() > 1 { "Conversation moved to Trash" } else { "Moved to Trash" };
 		self.trash(ids, message);
 	}
 
-	/// Opens Move to Spam for the conversation's mails in this folder that came from others.
+	/// Opens Move to Spam for the open conversation.
 	pub fn spam_conversation(self: &Rc<Self>) -> Option<Rc<spam::Picker>> {
-		let (cache, (key, folder)) = (self.ctx.cache()?, self.reader.thread()?);
+		let (key, folder) = self.reader.thread()?;
+		self.spam_thread(&key, &folder)
+	}
+
+	/// Opens Move to Spam for conversation `key`'s mails in `folder` that came from others.
+	fn spam_thread(self: &Rc<Self>, key: &str, folder: &FolderId) -> Option<Rc<spam::Picker>> {
+		let cache = self.ctx.cache()?;
 		let spam = self.folders.borrow().iter().find(|r| r.folder.kind == FolderKind::Spam).map(|r| r.folder.id.clone());
 		let Some(spam) = spam else {
 			self.ctx.toast("This account has no Spam folder");
 			return None;
 		};
 		let own: Vec<MailSummary> =
-			cache.thread(&key, &folder).unwrap_or_default().into_iter().filter(|m| m.folder_id == folder && !m.summary.outgoing).map(|m| m.summary).rev().collect();
+			cache.thread(key, folder).unwrap_or_default().into_iter().filter(|m| &m.folder_id == folder && !m.summary.outgoing).map(|m| m.summary).rev().collect();
 		if own.is_empty() {
 			self.ctx.toast("Only mail from others can go to Spam");
 			return None;
@@ -1255,6 +1476,11 @@ impl Mailbox {
 	}
 
 	/// For the screenshot scenes: the list's title and the subjects it shows, top to bottom.
+	/// For the screenshot scenes: the conversations listed.
+	pub fn listed(&self) -> Vec<ThreadRow> {
+		(0..self.store.n_items()).filter_map(|i| self.store.item(i)).map(|o| row_of(&o)).collect()
+	}
+
 	pub fn shown(&self) -> (String, Vec<String>) {
 		(self.list_title.title().to_string(), (0..self.store.n_items()).filter_map(|i| self.store.item(i)).map(|o| row_of(&o).latest.subject).collect())
 	}
@@ -1277,6 +1503,11 @@ fn unchanged_ends<K: PartialEq>(old: &[K], new: &[K]) -> (usize, usize) {
 	(head, tail)
 }
 
+/// The start of a decoration layout such as `icon:minimize,close` holds nothing but the window's icon.
+fn starts_with_icon_only(layout: &str) -> bool {
+	layout.split(':').next().unwrap_or_default().split(',').all(|part| matches!(part.trim(), "" | "icon"))
+}
+
 fn unread_subtitle(unread: u32) -> String {
 	match unread {
 		0 => String::new(),
@@ -1296,6 +1527,15 @@ mod tests {
 		// Narrow enough: a rail, keeping the width for when it is dragged out again.
 		assert_eq!(folders_drag(100, 250), (250, true));
 		assert_eq!(folders_drag(-20, 0), (0, true));
+	}
+
+	#[test]
+	fn only_an_icon_alone_at_the_start_is_moved_to_the_middle() {
+		assert!(starts_with_icon_only("icon:minimize,maximize,close"));
+		assert!(starts_with_icon_only(":close"));
+		assert!(!starts_with_icon_only("close,minimize:"), "the buttons stay");
+		assert!(!starts_with_icon_only("icon,menu:close"));
+		assert!(!starts_with_icon_only("close"), "no colon: all at the start");
 	}
 
 	#[test]

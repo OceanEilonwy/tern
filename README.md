@@ -19,9 +19,11 @@ images are never loaded, and anything too rich has an "Open in Tuta" button.
   never leaves the computer.
 - **Spam and rules**: Move to Spam (Ctrl+J) lists the sender's other mail, or mail from their domain or
   with the subject, to move along with it, and can keep that as a rule. Rules in Preferences sort new
-  Inbox mail as it arrives (to Spam, a folder, or a Tuta label), written like
+  Inbox mail as it arrives (to Spam, a folder, or a Tuta label, which a rule can make), written like
   `(from:@example.com or subject:"offer") and not to:me@tuta.com`; they live in
   `~/.config/tern/rules.toml`.
+- **Conversation menu**: right-click a conversation (or press Shift+F10) to pin it to the top of the
+  list, mark it read or unread, or move it to Spam or Trash. Pins stay on this computer.
 - **Keyboard**: Alt+Up/Down between conversations, Enter to read, Escape back, Delete, Ctrl+1…9 for
   folders, Ctrl+F to search, F9 to fold the folders to icons; Ctrl+? lists them all.
 - **Resizable panes**: drag the edge of the folders or the list; drag the folders narrow (or double-click

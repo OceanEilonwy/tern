@@ -5,6 +5,7 @@
   </gresource>
   <gresource prefix="/xyz/hollingworth/Tern/icons/scalable/actions">
     <file alias="tern-inbox-symbolic.svg" preprocess="xml-stripblanks">icons/symbolic/tern-inbox-symbolic.svg</file>
+    <file alias="tern-pin-symbolic.svg" preprocess="xml-stripblanks">icons/symbolic/tern-pin-symbolic.svg</file>
     <file alias="tern-sent-symbolic.svg" preprocess="xml-stripblanks">icons/symbolic/tern-sent-symbolic.svg</file>
     <file alias="tern-archive-symbolic.svg" preprocess="xml-stripblanks">icons/symbolic/tern-archive-symbolic.svg</file>
     <file alias="tern-reply-symbolic.svg" preprocess="xml-stripblanks">icons/symbolic/tern-reply-symbolic.svg</file>

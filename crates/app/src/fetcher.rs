@@ -484,6 +484,9 @@ mod tests {
 		async fn labels(&self) -> Result<Vec<tern_core::Label>> {
 			self.demo.labels().await
 		}
+		async fn create_label(&self, name: &str) -> Result<tern_core::Label> {
+			self.demo.create_label(name).await
+		}
 		async fn add_label(&self, ids: &[MailId], label: &FolderId) -> Result<()> {
 			self.demo.add_label(ids, label).await
 		}

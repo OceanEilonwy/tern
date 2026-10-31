@@ -41,6 +41,7 @@ use crate::entities::generated::tutanota::{
 	AttachmentKeyData, Contact, ContactList, ConversationEntry, DraftAttachment, DraftCreateData,
 	DraftCreateReturn, DraftData, DraftRecipient, DraftUpdateData, DraftUpdateReturn,
 	EncryptedMailAddress, InternalRecipientKeyData, Mail, MailDetails, MailDetailsBlob,
+	ManageLabelServiceLabelData, ManageLabelServicePostIn, ManageLabelServicePostOut,
 	MailDetailsDraft, MailSet, MailSetEntry, NewDraftAttachment, SendDraftData,
 	SendDraftParameters, SendDraftReturn, TutanotaFile,
 };
@@ -52,7 +53,7 @@ use crate::login::{CredentialType, Credentials, LoginError};
 use crate::rest_error::HttpError;
 use crate::services::generated::storage::BlobAccessTokenService;
 use crate::services::generated::sys::{SaltService, SessionService};
-use crate::services::generated::tutanota::{DraftService, SendDraftService};
+use crate::services::generated::tutanota::{DraftService, ManageLabelService, SendDraftService};
 use crate::services::{ExtraServiceParams, Service};
 use crate::tutanota_constants::{
 	ArchiveDataType, CryptoProtocolVersion, PublicKeyIdentifierType,
@@ -715,6 +716,39 @@ impl TernMail {
 	/// Adds a label to mails, by the label's own id.
 	pub async fn apply_label(&self, mails: Vec<IdTupleGenerated>, label: IdTupleGenerated) -> Result<(), TernError> {
 		Ok(self.sdk.mail_facade().apply_label(mails, label).await?)
+	}
+
+	/// Makes a label in `account`'s mailbox, as `MailModel.createLabel` does: the label's name is
+	/// encrypted with a new session key, which goes along encrypted with the mailbox key. `color` is
+	/// a CSS hex colour such as `#2196f3`. Returns the new label's id.
+	pub async fn create_label(&self, account: &TernAccount, name: &str, color: &str) -> Result<IdTupleGenerated, TernError> {
+		let group_key = self
+			.parts()
+			.key_loader_facade
+			.get_current_sym_group_key(&account.mail_group)
+			.await
+			.map_err(|e| TernError::Other(format!("cannot load the mailbox key: {e}")))?;
+		let label_key = GenericAesKey::Aes256(Aes256Key::generate(&self.randomizer));
+		let request = ManageLabelServicePostIn {
+			_format: 0,
+			ownerEncSessionKey: group_key.object.encrypt_key(&label_key, InitializationVector::generate(&self.randomizer)),
+			ownerKeyVersion: group_key.version as i64,
+			ownerGroup: account.mail_group.clone(),
+			data: ManageLabelServiceLabelData {
+				_id: aggregate_id(&self.randomizer),
+				name: name.to_string(),
+				color: color.to_string(),
+				parentLabel: None,
+				_errors: Default::default(),
+			},
+			_errors: Default::default(),
+		};
+		let created: ManageLabelServicePostOut = self
+			.sdk
+			.get_service_executor()
+			.post::<ManageLabelService>(request, ExtraServiceParams { session_key: Some(label_key), ..Default::default() })
+			.await?;
+		Ok(created.label)
 	}
 
 	pub async fn sign_out(&self) {

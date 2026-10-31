@@ -17,6 +17,8 @@ const HELP: &str = "from:, to: and subject: look at the sender, the first recipi
 
 /// What a rule can do, in the order offered.
 const DOES: [&str; 3] = ["Move to Spam", "Move to Folder", "Add Label"];
+/// The last choice of label, which makes one.
+const NEW_LABEL: &str = "New Label…";
 
 pub struct Rules {
 	ctx: Ctx,
@@ -125,8 +127,11 @@ pub struct Page {
 	pub does: adw::ComboRow,
 	pub folder: adw::ComboRow,
 	pub label: adw::ComboRow,
+	/// The name of the label to make, when the label chosen is New Label.
+	pub new_label: adw::EntryRow,
 	pub save: gtk::Button,
 	folders: Vec<Folder>,
+	/// The account's labels, as the label choices list them before New Label.
 	labels: RefCell<Vec<String>>,
 	/// The count of mail caught, waiting for typing to pause.
 	pending: RefCell<Option<glib::SourceId>>,
@@ -153,11 +158,13 @@ impl Page {
 		let does = adw::ComboRow::builder().title("Then").model(&gtk::StringList::new(&DOES)).build();
 		let names: Vec<&str> = folders.iter().map(|f| f.name.as_str()).collect();
 		let folder = adw::ComboRow::builder().title("Folder").model(&gtk::StringList::new(&names)).build();
-		let label = adw::ComboRow::builder().title("Label").model(&gtk::StringList::new(&[])).build();
+		let label = adw::ComboRow::builder().title("Label").model(&gtk::StringList::new(&[NEW_LABEL])).build();
+		let new_label = adw::EntryRow::builder().title("New Label Name").build();
 		let then = adw::PreferencesGroup::builder().title("What Happens").build();
 		then.add(&does);
 		then.add(&folder);
 		then.add(&label);
+		then.add(&new_label);
 
 		let save = gtk::Button::builder().label("Save").css_classes(["suggested-action"]).build();
 		let header = adw::HeaderBar::new();
@@ -182,7 +189,7 @@ impl Page {
 		view.set_content(Some(&content));
 		let page = adw::NavigationPage::builder().title(if i.is_some() { "Edit Rule" } else { "New Rule" }).child(&view).build();
 
-		let this = Rc::new(Page { ctx, page, line, catches, does, folder, label, save, folders, labels: RefCell::default(), pending: RefCell::default() });
+		let this = Rc::new(Page { ctx, page, line, catches, does, folder, label, new_label, save, folders, labels: RefCell::default(), pending: RefCell::default() });
 		match rule.as_ref().map(|r| &r.action) {
 			None | Some(Action::Spam) => this.does.set_selected(0),
 			Some(Action::Move(name)) => {
@@ -212,17 +219,16 @@ impl Page {
 				this.count_soon();
 			}
 		});
-		let (weak, rules, dialog) = (Rc::downgrade(&this), Rc::downgrade(rules), rules.dialog.clone());
+		let weak = Rc::downgrade(&this);
+		this.new_label.connect_changed(move |_| {
+			if let Some(this) = weak.upgrade() {
+				this.update();
+			}
+		});
+		let (weak, rules) = (Rc::downgrade(&this), Rc::downgrade(rules));
 		this.save.connect_clicked(move |_| {
 			let (Some(this), Some(rules)) = (weak.upgrade(), rules.upgrade()) else { return };
-			let Some(rule) = this.rule() else { return };
-			let mut all = rules.rules.borrow().clone();
-			match i {
-				Some(i) if i < all.len() => all[i] = rule,
-				_ => all.push(rule),
-			}
-			rules.store(all);
-			dialog.pop_subpage();
+			this.save(&rules, i);
 		});
 		this.update();
 		this.count();
@@ -267,6 +273,44 @@ impl Page {
 		self.catches.set_visible(!message.is_empty());
 	}
 
+	/// Keeps the rule as rule `i`, or a new one, after making its label if it is a new one.
+	fn save(self: &Rc<Self>, rules: &Rc<Rules>, i: Option<usize>) {
+		let Some(rule) = self.rule() else { return };
+		let store = {
+			let (rules, rule) = (rules.clone(), rule.clone());
+			move || {
+				let mut all = rules.rules.borrow().clone();
+				match i {
+					Some(i) if i < all.len() => all[i] = rule,
+					_ => all.push(rule),
+				}
+				rules.store(all);
+				rules.dialog.pop_subpage();
+			}
+		};
+		let make = match &rule.action {
+			Action::Label(name) if !self.labels.borrow().iter().any(|l| l.eq_ignore_ascii_case(name)) => name.clone(),
+			_ => return store(),
+		};
+		let Some(backend) = self.ctx.backend() else { return };
+		self.save.set_sensitive(false);
+		let (weak, ctx) = (Rc::downgrade(self), self.ctx.clone());
+		runtime::spawn_local(async move {
+			let made = runtime::run(async move { backend.create_label(&make).await }).await;
+			let Some(this) = weak.upgrade() else { return };
+			match made {
+				Ok(label) => {
+					this.labels.borrow_mut().push(label.name);
+					store();
+				},
+				Err(e) => {
+					ctx.error(&e);
+					this.update();
+				},
+			}
+		});
+	}
+
 	/// The account's labels, fetched as the page opens; `keep` is selected once they are in.
 	fn load_labels(self: &Rc<Self>, keep: Option<String>) {
 		let Some(backend) = self.ctx.backend() else { return };
@@ -279,7 +323,8 @@ impl Page {
 			if let Some(keep) = keep.as_ref().filter(|k| !names.iter().any(|n| n.eq_ignore_ascii_case(k))) {
 				names.push(keep.clone());
 			}
-			this.label.set_model(Some(&gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>())));
+			let choices: Vec<&str> = names.iter().map(String::as_str).chain([NEW_LABEL]).collect();
+			this.label.set_model(Some(&gtk::StringList::new(&choices)));
 			if let Some(at) = keep.and_then(|k| names.iter().position(|n| n.eq_ignore_ascii_case(&k))) {
 				this.label.set_selected(at as u32);
 			}
@@ -295,7 +340,10 @@ impl Page {
 		let action = match self.does.selected() {
 			0 => Action::Spam,
 			1 => Action::Move(self.folders.get(self.folder.selected() as usize)?.name.clone()),
-			_ => Action::Label(self.labels.borrow().get(self.label.selected() as usize)?.clone()),
+			_ => Action::Label(match self.labels.borrow().get(self.label.selected() as usize) {
+				Some(name) => name.clone(),
+				None => Some(self.new_label.text().trim().to_string()).filter(|n| !n.is_empty())?,
+			}),
 		};
 		Some(Rule { when, action })
 	}
@@ -305,7 +353,7 @@ impl Page {
 		let does = self.does.selected();
 		self.folder.set_visible(does == 1);
 		self.label.set_visible(does == 2);
-		self.label.set_subtitle(if does == 2 && self.labels.borrow().is_empty() { "No labels yet; make them in Tuta" } else { "" });
+		self.new_label.set_visible(does == 2 && self.label.selected() as usize >= self.labels.borrow().len());
 		self.save.set_sensitive(self.rule().is_some());
 	}
 }

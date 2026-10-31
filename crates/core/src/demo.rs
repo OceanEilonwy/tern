@@ -19,6 +19,7 @@ struct Stored {
 
 pub struct DemoBackend {
 	mails: Mutex<Vec<Stored>>,
+	labels: Mutex<Vec<String>>,
 }
 
 const FOLDERS: [(FolderKind, &str); 6] = [
@@ -154,7 +155,7 @@ impl DemoBackend {
 			stored.mail.to = vec![sam.clone()];
 			stored.mail.summary.to = Some(sam.clone());
 		}
-		Self { mails: Mutex::new(mails) }
+		Self { mails: Mutex::new(mails), labels: Mutex::new(LABELS.map(String::from).to_vec()) }
 	}
 
 	/// Where a mail is and the labels it carries, for tests.
@@ -299,11 +300,19 @@ impl Backend for DemoBackend {
 	}
 
 	async fn labels(&self) -> Result<Vec<Label>> {
-		Ok(LABELS.iter().map(|&name| Label { id: label_id(name), name: name.into() }).collect())
+		Ok(self.labels.lock().unwrap().iter().map(|name| Label { id: label_id(name), name: name.clone() }).collect())
+	}
+
+	async fn create_label(&self, name: &str) -> Result<Label> {
+		let mut labels = self.labels.lock().unwrap();
+		if !labels.iter().any(|l| l.eq_ignore_ascii_case(name)) {
+			labels.push(name.to_string());
+		}
+		Ok(Label { id: label_id(name), name: name.to_string() })
 	}
 
 	async fn add_label(&self, ids: &[MailId], label: &FolderId) -> Result<()> {
-		if !LABELS.iter().any(|&name| &label_id(name) == label) {
+		if !self.labels.lock().unwrap().iter().any(|name| &label_id(name) == label) {
 			return Err(Error::Other("Label not found".into()));
 		}
 		for id in ids {

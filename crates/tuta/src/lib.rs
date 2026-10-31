@@ -314,6 +314,9 @@ fn folder_kind(set: &MailSet) -> Option<FolderKind> {
 	}
 }
 
+/// The colour new labels get in Tuta's own apps; Tern shows none.
+const LABEL_COLOR: &str = "#2196f3";
+
 const FOLDER_ORDER: [FolderKind; 7] =
 	[FolderKind::Inbox, FolderKind::Drafts, FolderKind::Sent, FolderKind::Archive, FolderKind::Spam, FolderKind::Trash, FolderKind::Custom];
 
@@ -493,6 +496,18 @@ impl Backend for TutaBackend {
 		Ok(labels)
 	}
 
+	async fn create_label(&self, name: &str) -> Result<Label> {
+		let (mail, account, name) = (self.mail.clone(), self.account.clone(), name.to_string());
+		let id = guarded(async move { mail.create_label(&account, &name, LABEL_COLOR).await.map_err(to_error) }).await?;
+		// Its id names the list its mails are in, which only the label itself says.
+		self.mail_sets()
+			.await?
+			.iter()
+			.filter(|s| s._id.as_ref() == Some(&id))
+			.find_map(label)
+			.ok_or_else(|| Error::Other("The new label is missing".into()))
+	}
+
 	async fn add_label(&self, ids: &[MailId], label: &FolderId) -> Result<()> {
 		let (mail, ids, label) = (self.mail.clone(), ids.iter().map(id_tuple).collect(), self.set_id(label).await?);
 		guarded(async move { mail.apply_label(ids, label).await.map_err(to_error) }).await
@@ -653,19 +668,24 @@ mod tests {
 		let (inbox, archive) = (folder(FolderKind::Inbox), folder(FolderKind::Archive));
 		// The newest mail in the Inbox goes to Archive and back.
 		let mail = backend.list(&inbox, None, 1).await.unwrap().mails.remove(0);
-		backend.move_mails(&[mail.id.clone()], &archive).await.unwrap();
+		backend.move_mails(std::slice::from_ref(&mail.id), &archive).await.unwrap();
 		let in_archive = backend.list(&archive, None, 50).await.unwrap().mails;
 		let moved = in_archive.iter().find(|m| m.subject == mail.subject && m.received_ms == mail.received_ms);
 		let moved = moved.expect("the mail is in Archive").id.clone();
 		backend.move_mails(&[moved], &inbox).await.unwrap();
 		assert!(backend.list(&inbox, None, 50).await.unwrap().mails.iter().any(|m| m.subject == mail.subject && m.received_ms == mail.received_ms));
-		// Labelling it works when the account has a label; it is left on.
-		let labels = backend.labels().await.unwrap();
-		eprintln!("labels: {:?}", labels.iter().map(|l| &l.name).collect::<Vec<_>>());
-		if let Some(label) = labels.first() {
-			let mail = backend.list(&inbox, None, 1).await.unwrap().mails.remove(0);
-			backend.add_label(&[mail.id], &label.id).await.unwrap();
-		}
+		// The label "Tern live test" is made the first time, and left on the mail.
+		const NAME: &str = "Tern live test";
+		let label = match backend.labels().await.unwrap().into_iter().find(|l| l.name == NAME) {
+			Some(label) => label,
+			None => {
+				let made = backend.create_label(NAME).await.unwrap();
+				assert!(backend.labels().await.unwrap().contains(&made), "the new label is listed");
+				made
+			},
+		};
+		let mail = backend.list(&inbox, None, 1).await.unwrap().mails.remove(0);
+		backend.add_label(&[mail.id], &label.id).await.unwrap();
 		backend.sign_out().await.unwrap();
 	}
 

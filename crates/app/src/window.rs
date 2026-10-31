@@ -424,6 +424,7 @@ fn shortcuts_dialog() -> adw::ShortcutsDialog {
 				("Mark as Unread", "<Control>u"),
 				("Move Conversation to Trash", "Delete"),
 				("Move to Spam", "<Control>j"),
+				("Conversation Menu", "<Shift>F10"),
 				("Check for New Mail", "F5"),
 				("Search", "<Control>f"),
 			],

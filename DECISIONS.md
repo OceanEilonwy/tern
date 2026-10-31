@@ -335,3 +335,31 @@ Mail is now fetched in batches, and the keys and tokens a batch needs are loaded
   tests that counted the demo Inbox were updated.
 - **Ctrl+J** moves to Spam (Thunderbird's J; a bare letter would fire while typing).
 
+
+## Fifth round (2026-10-31)
+
+- **Rules can make a label**: the rule page's Label list ends with "New Label…", which asks for a
+  name; saving makes the label in Tuta (ManageLabelService, its name encrypted with a new session key
+  as the official client does) before the rule is kept. New labels get Tuta's blue; Tern shows no
+  label colours. Picking an existing label is unchanged. Labels still are not in Tern's sidebar.
+- **Conversations read newest first**: the newest mail is the top card and is the one open, older
+  mails below. The cache still hands them over oldest first; only the reader turns them round.
+- **Pins are Tern's own**: Tuta has no pinning, so a pin lives in the encrypted cache on this
+  computer (a `pins` table by conversation, like `marks` added without a schema bump, and spared
+  when a new schema rebuilds the cache, since the server cannot give pins back). Pinned
+  conversations come first in every folder they are in, newest first among themselves, with a pin
+  beside the sender; search results keep their ranking and show the pin. A pin is by conversation
+  subject, so a new conversation with the same subject comes in pinned.
+- **The conversation menu** (right click, long press, the Menu key or Shift+F10): Pin/Unpin, Mark
+  as Read/Unread, Move to Spam… (the same dialog as Ctrl+J), Move to Trash. It acts on the
+  conversation clicked, not the one open. Read marks every unread mail of it in that folder; Unread
+  marks only its newest there, as Mark as Unread does for the open mail, and closes it if open so
+  showing it does not mark it read again. Spam is left out in Spam, Trash in Trash. Mail cards in
+  the reader have no menu: their buttons do the same.
+- **The rail's icon is centred**: KDE puts the window's icon at the start of the folders' header,
+  3 px left of the 52 px rail's middle. On the rail, when the start of the window's button layout
+  holds only the icon, Tern hides it and shows the app's icon in the header's middle instead; any
+  other layout (close buttons on the left) is left alone. The panes scene checks the middle.
+- **A pin icon of Tern's own**: Breeze has no `view-pin-symbolic`.
+- **The rule page's look is not changed this round**: mockups of a nicer one are for the user to
+  pick from first.

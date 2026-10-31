@@ -198,14 +198,16 @@ impl Reader {
 		self.thread.borrow().clone()
 	}
 
-	/// The mails of the conversation on show.
+	/// The mails of the conversation on show, newest first.
 	pub fn mails(&self) -> Vec<MailSummary> {
 		self.cards.borrow().iter().map(|c| c.summary.clone()).collect()
 	}
 
-	/// Shows a conversation with `focus` open and scrolled to. `mails` are oldest first. Showing the
-	/// conversation already on show again keeps it as it is unless its mails changed.
-	pub fn show_thread(self: &Rc<Self>, key: &str, folder: &FolderId, mails: Vec<ThreadMail>, focus: &MailId) {
+	/// Shows a conversation with `focus` open and scrolled to. `mails` are oldest first, and show
+	/// newest first. Showing the conversation already on show again keeps it as it is unless its
+	/// mails changed.
+	pub fn show_thread(self: &Rc<Self>, key: &str, folder: &FolderId, mut mails: Vec<ThreadMail>, focus: &MailId) {
+		mails.reverse();
 		let same = self.thread.borrow().as_ref().is_some_and(|(k, f)| k == key && f == folder);
 		if same {
 			let shown = self.mails();
@@ -218,7 +220,7 @@ impl Reader {
 		let open_before: Vec<MailId> = if same { self.cards.borrow().iter().filter(|c| c.revealer.reveals_child()).map(|c| c.summary.id.clone()).collect() } else { vec![] };
 		self.clear();
 		*self.thread.borrow_mut() = Some((key.to_string(), folder.clone()));
-		let latest = mails.last().map(|m| m.summary.subject.clone()).unwrap_or_default();
+		let latest = mails.first().map(|m| m.summary.subject.clone()).unwrap_or_default();
 		let subject = if latest.trim().is_empty() { "(No Subject)".to_string() } else { latest };
 		self.page.set_title(&subject);
 		self.subject.set_label(&subject);
@@ -240,7 +242,7 @@ impl Reader {
 			}
 		}
 		self.stack.set_visible_child_name("thread");
-		let target = focus_card.or_else(|| self.cards.borrow().last().cloned());
+		let target = focus_card.or_else(|| self.cards.borrow().first().cloned());
 		if let Some(card) = target {
 			self.set_current(&card);
 			if !same {

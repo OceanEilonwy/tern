@@ -204,6 +204,8 @@ pub trait Backend: Send + Sync {
 	/// Moves mails into `folder`.
 	async fn move_mails(&self, ids: &[MailId], folder: &FolderId) -> Result<()>;
 	async fn labels(&self) -> Result<Vec<Label>>;
+	/// Makes a label called `name`.
+	async fn create_label(&self, name: &str) -> Result<Label>;
 	/// Adds `label` to mails.
 	async fn add_label(&self, ids: &[MailId], label: &FolderId) -> Result<()>;
 	/// Forget the session on the server too.

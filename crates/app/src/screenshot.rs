@@ -170,14 +170,14 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			act("win.next")?;
 			act("win.next")?;
 			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
-			let second = mailbox.reader.mails().last().map(|m| m.subject.clone()).unwrap_or_default();
+			let second = mailbox.reader.mails().first().map(|m| m.subject.clone()).unwrap_or_default();
 			if second != "Your invoice for October" {
 				return Err(format!("Alt+Down twice opened {second:?}"));
 			}
 			act("win.trash")?;
 			wait_for(|| mailbox.store.n_items() == 6).await;
 			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
-			let next = mailbox.reader.mails().last().map(|m| m.subject.clone()).unwrap_or_default();
+			let next = mailbox.reader.mails().first().map(|m| m.subject.clone()).unwrap_or_default();
 			if mailbox.store.n_items() != 6 || !next.contains("Lunch") {
 				return Err(format!("after Delete: {} conversations, showing {next:?}", mailbox.store.n_items()));
 			}
@@ -200,6 +200,10 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			sleep(300).await;
 			if !mailbox.is_rail() || mailbox.pane_widths().0 != RAIL as i32 {
 				return Err(format!("F9 did not make a rail: {:?}", mailbox.pane_widths()));
+			}
+			let middle = mailbox.header_icon_middle().ok_or("no icon on the rail's header")?;
+			if (middle - RAIL as f32 / 2.0).abs() > 0.5 {
+				return Err(format!("the rail's icon is centred at {middle}, the rail is {RAIL} wide"));
 			}
 			act("win.toggle-folders")?;
 			sleep(300).await;
@@ -298,7 +302,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			wait_for(|| shows(&["Re: Lunch on Friday?"])).await;
 			sleep(300).await;
 			if mailbox.reader.current.borrow().is_some() || !shows(&["Re: Lunch on Friday?"]) {
-				return Err(format!("typing on opened {:?}", mailbox.reader.mails().last().map(|m| m.subject.clone())));
+				return Err(format!("typing on opened {:?}", mailbox.reader.mails().first().map(|m| m.subject.clone())));
 			}
 			mailbox.type_search("zzqx")?;
 			wait_for(|| mailbox.status().is_some()).await;
@@ -364,7 +368,81 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			Ok(())
 		}
-		// Rules in Preferences: one added, labelled, then changed to move to a folder and deleted.
+		// A conversation shows newest first. Its menu pins it, marks it read and unread, and opens
+		// Move to Spam.
+		"menu" => {
+			wait_for(|| mailbox.store.n_items() == 7).await;
+			mailbox.select_by_subject("Lunch");
+			wait_for(|| mailbox.reader.mails().len() == 2).await;
+			let mails = mailbox.reader.mails();
+			if mails.windows(2).any(|w| w[0].received_ms < w[1].received_ms) {
+				return Err(format!("the conversation shows {:?}", mails.iter().map(|m| &m.subject).collect::<Vec<_>>()));
+			}
+			let labels = |popover: &gtk::PopoverMenu| {
+				let mut labels = Vec::new();
+				let Some(menu) = popover.menu_model() else { return labels };
+				for i in 0..menu.n_items() {
+					let Some(section) = menu.item_link(i, "section") else { continue };
+					for j in 0..section.n_items() {
+						labels.extend(section.item_attribute_value(j, "label", None).and_then(|v| v.get::<String>()));
+					}
+				}
+				popover.popdown();
+				labels
+			};
+			let find = |key: &str| mailbox.listed().into_iter().position(|r| r.key == key).ok_or(format!("{key} is not listed"));
+
+			// A right click on the last conversation pins it.
+			let last = mailbox.listed().pop().ok_or("nothing listed")?;
+			if !mailbox.right_click_row(mailbox.store.n_items() - 1) {
+				return Err("a right click on a conversation opened no menu".into());
+			}
+			mailbox.row_action("pin")?;
+			wait_for(|| mailbox.listed().first().is_some_and(|r| r.key == last.key)).await;
+			if !mailbox.listed()[0].pinned {
+				return Err("the pinned conversation is not marked pinned".into());
+			}
+
+			let unread = mailbox.listed().into_iter().find(|r| r.unread).ok_or("nothing unread")?;
+			let menu = mailbox.open_row_menu(find(&unread.key)? as u32, None).ok_or("no menu")?;
+			if !labels(&menu).contains(&"Mark as _Read".to_string()) {
+				return Err(format!("the menu of an unread conversation: {:?}", labels(&menu)));
+			}
+			mailbox.row_action("read")?;
+			wait_for(|| find(&unread.key).is_ok_and(|i| !mailbox.listed()[i].unread)).await;
+			mailbox.open_row_menu(find(&unread.key)? as u32, None).ok_or("no menu")?.popdown();
+			mailbox.row_action("unread")?;
+			wait_for(|| find(&unread.key).is_ok_and(|i| mailbox.listed()[i].unread)).await;
+			wait_for(|| win.ctx.activity.word().is_none()).await;
+			let backend = win.ctx.backend().ok_or("signed out")?;
+			let inbox = win.ctx.cache().and_then(|c| c.folders().ok()?.into_iter().find(|f| f.kind == FolderKind::Inbox)).ok_or("no Inbox")?;
+			let on_server = backend.list(&inbox.id, None, 50).await.map_err(|e| e.to_string())?.mails.into_iter().find(|m| m.id == unread.latest.id).map(|m| m.unread);
+			if on_server != Some(true) {
+				return Err(format!("read then unread left the server at {on_server:?}"));
+			}
+
+			let menu = mailbox.open_row_menu(find(&last.key)? as u32, None).ok_or("no menu")?;
+			if labels(&menu) != ["Un_pin", "Mark as _Unread", "Move to _Spam…", "Move to _Trash"] {
+				return Err(format!("the menu of a pinned read conversation: {:?}", labels(&menu)));
+			}
+
+			let deals = mailbox.listed().into_iter().find(|r| r.latest.subject.contains("coupon")).ok_or("no coupon")?;
+			mailbox.open_row_menu(find(&deals.key)? as u32, None).ok_or("no menu")?.popdown();
+			mailbox.row_action("spam")?;
+			wait_for(|| win.ctx.window.visible_dialog().is_some()).await;
+			if let Some(dialog) = win.ctx.window.visible_dialog() {
+				dialog.force_close();
+			}
+
+			mailbox.open_row_menu(0, None).ok_or("no menu")?.popdown();
+			mailbox.row_action("pin")?;
+			wait_for(|| mailbox.listed().last().is_some_and(|r| r.key == last.key && !r.pinned)).await;
+			// The shot shows the newest mail on top.
+			mailbox.select_by_subject("Lunch");
+			Ok(())
+		}
+		// Rules in Preferences: one added, labelled, then changed to move to a folder and deleted; one
+		// labels with a label it makes.
 		"rules" => {
 			rules::save(&[]);
 			wait_for(|| mailbox.store.n_items() > 0).await;
@@ -373,7 +451,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			let edit = section.edit(None);
 			edit.line.set_text("subject:invoice or from:@example.org");
 			edit.does.set_selected(2);
-			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 2)).await;
+			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 3)).await;
 			edit.label.set_selected(0);
 			if !edit.save.is_sensitive() {
 				return Err("a whole rule cannot be saved".into());
@@ -384,7 +462,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("saved {:?}", rules::load()));
 			}
 			let edit = section.edit(Some(0));
-			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 2)).await;
+			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 3)).await;
 			if edit.does.selected() != 2 || edit.label.selected() != 0 || edit.line.text() != labelled.when {
 				return Err("the rule did not open as saved".into());
 			}
@@ -400,12 +478,28 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if rules::load() != [moved.clone()] {
 				return Err(format!("changed to {:?}", rules::load()));
 			}
-			// A second rule, then the first deleted; the shot shows what is left.
+			let edit = section.edit(None);
+			edit.line.set_text("from:news@example.org");
+			edit.does.set_selected(2);
+			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 3)).await;
+			edit.label.set_selected(2);
+			if !edit.new_label.is_visible() || edit.save.is_sensitive() {
+				return Err("New Label asks for no name, or saves without one".into());
+			}
+			edit.new_label.set_text("Newsletters");
+			edit.save.emit_clicked();
+			wait_for(|| rules::load().len() == 2).await;
+			let made = Rule { when: "from:news@example.org".into(), action: Action::Label("Newsletters".into()) };
+			let labels = win.ctx.backend().ok_or("signed out")?.labels().await.map_err(|e| e.to_string())?;
+			if rules::load() != [moved.clone(), made.clone()] || !labels.iter().any(|l| l.name == "Newsletters") {
+				return Err(format!("a new label left {:?} with labels {labels:?}", rules::load()));
+			}
+			// A third rule, then the first deleted; the shot shows what is left.
 			let edit = section.edit(None);
 			edit.line.set_text("from:@deals.example");
 			edit.save.emit_clicked();
 			section.delete(0);
-			if rules::load() != [Rule { when: "from:@deals.example".into(), action: Action::Spam }] {
+			if rules::load() != [made, Rule { when: "from:@deals.example".into(), action: Action::Spam }] {
 				return Err(format!("after deleting, {:?}", rules::load()));
 			}
 			section.expander.set_expanded(true);
@@ -420,7 +514,7 @@ pub fn drive(win: Rc<Window>) {
 	if scene == "sign-in" {
 		return sign_in(Rc::downgrade(&win), path);
 	}
-	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first" | "spam" | "rules") {
+	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first" | "spam" | "rules" | "menu") {
 		glib::spawn_future_local(async move {
 			if let Err(e) = check(&win, &scene).await {
 				// No picture, so the check fails.
@@ -468,6 +562,22 @@ pub fn drive(win: Rc<Window>) {
 			mailbox.select_folder(tern_core::FolderKind::Sent);
 			wait_for(|| mailbox.select_by_subject("Route for Sunday")).await;
 			wait_for(|| mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.attachments.len() == 1)).await;
+			win.ctx.window.clone().upcast()
+		} else if scene == "rail" {
+			// The window's icon on the folders' header, as KDE puts it.
+			if let Some(settings) = gtk::Settings::default() {
+				settings.set_gtk_decoration_layout(Some("icon:minimize,maximize,close"));
+			}
+			let _ = gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.toggle-folders", None);
+			sleep(300).await;
+			win.ctx.window.clone().upcast()
+		} else if scene == "pinned" {
+			let coupon = mailbox.listed().iter().position(|r| r.latest.subject.contains("coupon")).unwrap_or(0) as u32;
+			if let Some(menu) = mailbox.open_row_menu(coupon, None) {
+				menu.popdown();
+			}
+			let _ = mailbox.row_action("pin");
+			sleep(300).await;
 			win.ctx.window.clone().upcast()
 		} else if scene == "spam-dialog" {
 			mailbox.select_by_subject("coupon");
@@ -615,6 +725,9 @@ impl Backend for Staged {
 	}
 	async fn labels(&self) -> tern_core::Result<Vec<tern_core::Label>> {
 		self.demo.labels().await
+	}
+	async fn create_label(&self, name: &str) -> tern_core::Result<tern_core::Label> {
+		self.demo.create_label(name).await
 	}
 	async fn add_label(&self, ids: &[tern_core::MailId], label: &tern_core::FolderId) -> tern_core::Result<()> {
 		self.demo.add_label(ids, label).await
