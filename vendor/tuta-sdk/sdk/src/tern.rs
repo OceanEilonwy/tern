@@ -5,7 +5,7 @@
 //! of this SDK copy also comes from. See vendor/tuta-sdk/PATCHES.md.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -27,7 +27,7 @@ use crate::crypto::crypto_facade::ResolvedSessionKey;
 #[cfg_attr(test, mockall_double::double)]
 use crate::crypto::public_key_provider::PublicKeyProvider;
 use crate::crypto::asymmetric_crypto_facade::PubEncSymKey;
-use crate::crypto::key::PublicKey;
+use crate::crypto::key::{AsymmetricKeyPair, PublicKey};
 use crate::crypto::public_key_provider::{PublicKeyIdentifier, PublicKeyLoadingError};
 use crate::element_value::{ElementValue, ParsedEntity};
 use crate::entities::entity_facade::{EntityFacade, EntityFacadeImpl};
@@ -91,6 +91,9 @@ pub enum TernError {
 	Offline,
 	#[error("recipients not found: {0:?}")]
 	RecipientsNotFound(Vec<String>),
+	/// Tuta asks for fewer requests: wait this many seconds (if it says) and try again.
+	#[error("too many requests")]
+	RateLimited(Option<u64>),
 	#[error("{0}")]
 	Other(String),
 }
@@ -102,6 +105,11 @@ impl From<ApiCallError> for TernError {
 			ApiCallError::ServerResponseError {
 				source: HttpError::NotAuthenticatedError | HttpError::SessionExpiredError,
 			} => TernError::SessionExpired,
+			ApiCallError::ServerResponseError {
+				source:
+					HttpError::TooManyRequestsError { suspension_time_sec }
+					| HttpError::ServiceUnavailableError { suspension_time_sec: suspension_time_sec @ Some(_) },
+			} => TernError::RateLimited(suspension_time_sec),
 			ApiCallError::ServerResponseError {
 				source: HttpError::ConnectionError | HttpError::ServiceUnavailableError { .. },
 			} => TernError::Offline,
@@ -365,10 +373,25 @@ struct DraftParts {
 /// Session keys of the instances a bucket key covers, by instance element id.
 type InstanceKeys = HashMap<GeneratedId, GenericAesKey>;
 
+/// BlobAccessTokenKind.Archive: a read token good for the whole archive, not just some instances.
+const TOKEN_KIND_ARCHIVE: i64 = 0;
+
+/// A mail of a batch once it is decrypted, waiting for its details and attachments.
+struct Decrypted {
+	mail: Mail,
+	mail_key: GenericAesKey,
+	instance_keys: Option<InstanceKeys>,
+}
+
 pub struct TernMail {
 	sdk: Arc<LoggedInSdk>,
 	entity_facade: EntityFacadeImpl,
 	randomizer: RandomizerFacade,
+	/// Key pairs by group and version. Loading one costs a Group request; every mail with a
+	/// bucket key needs one, and they are nearly always the same.
+	key_pairs: Mutex<HashMap<(GeneratedId, u64), AsymmetricKeyPair>>,
+	/// Read tokens by archive, kept until they expire, as the TypeScript client keeps them.
+	read_tokens: Mutex<HashMap<GeneratedId, BlobServerAccessInfo>>,
 }
 
 impl LoggedInSdk {
@@ -381,6 +404,8 @@ impl LoggedInSdk {
 				RandomizerFacade::from_core(rand_core::OsRng),
 			),
 			randomizer: RandomizerFacade::from_core(rand_core::OsRng),
+			key_pairs: Mutex::default(),
+			read_tokens: Mutex::default(),
 		}
 	}
 }
@@ -478,59 +503,149 @@ impl TernMail {
 		Ok((mails, next))
 	}
 
-	/// Loads a mail with its body and attachment list.
+	/// Loads a mail with its body and attachment list, one request at a time. The fallback when a
+	/// batch from [`Self::open_many`] fails.
 	pub async fn open(&self, id: &IdTupleGenerated) -> Result<OpenedMail, TernError> {
 		let raw = self.sdk.entity_client.load(&Mail::type_ref(), id).await?;
-		let instance_keys = self.bucket_instance_keys(&Mail::type_ref(), &raw).await?;
-		let mail_key = self.session_key(&Mail::type_ref(), &raw, instance_keys.as_ref()).await?;
-		let mail: Mail = self.decrypt_with(raw, mail_key.clone())?;
-
+		let decrypted = self.decrypt_mail(raw).await?;
+		let mail = &decrypted.mail;
 		let details = if let Some(details_id) = &mail.mailDetails {
-			let raw = self.load_mail_details_blob(details_id).await?;
-			let key = instance_keys
-				.as_ref()
-				.and_then(|keys| keys.get(&details_id.element_id).cloned())
-				.unwrap_or_else(|| mail_key.clone());
-			self.decrypt_with::<MailDetailsBlob>(raw, key)?.details
-		} else if let Some(draft_id) = &mail.mailDetailsDraft {
 			let raw = self
-				.sdk
-				.entity_client
-				.load(&MailDetailsDraft::type_ref(), draft_id)
-				.await?;
-			self.decrypt_with::<MailDetailsDraft>(raw, mail_key.clone())?
-				.details
+				.load_mail_details_blobs(&details_id.list_id, std::slice::from_ref(&details_id.element_id))
+				.await?
+				.into_iter()
+				.next()
+				.ok_or_else(|| TernError::Other("the mail body is missing".into()))?;
+			self.decrypt_with::<MailDetailsBlob>(raw, details_key(&decrypted, &details_id.element_id))?.details
+		} else if let Some(draft_id) = &mail.mailDetailsDraft {
+			let raw = self.sdk.entity_client.load(&MailDetailsDraft::type_ref(), draft_id).await?;
+			self.decrypt_with::<MailDetailsDraft>(raw, decrypted.mail_key.clone())?.details
 		} else {
 			return Err(TernError::Other("mail has no body".into()));
 		};
-
-		let attachments = self.load_attachments(&mail, instance_keys.as_ref()).await?;
-		Ok(OpenedMail {
-			mail,
-			details,
-			attachments,
-		})
-	}
-
-	async fn load_attachments(
-		&self,
-		mail: &Mail,
-		instance_keys: Option<&InstanceKeys>,
-	) -> Result<Vec<TutanotaFile>, TernError> {
-		let Some(first) = mail.attachments.first() else {
-			return Ok(Vec::new());
-		};
-		let ids: Vec<GeneratedId> = mail.attachments.iter().map(|a| a.element_id.clone()).collect();
-		let mut files = Vec::with_capacity(ids.len());
-		for chunk in ids.chunks(MAX_IDS_PER_REQUEST) {
-			for raw in self
-				.load_multiple_raw(&TutanotaFile::type_ref(), &first.list_id, chunk)
-				.await?
-			{
-				files.push(self.decrypt::<TutanotaFile>(raw, instance_keys).await?);
+		let mut files = Vec::with_capacity(mail.attachments.len());
+		for (list, ids) in by_list(&mail.attachments) {
+			for chunk in ids.chunks(MAX_IDS_PER_REQUEST) {
+				for raw in self.load_multiple_raw(&TutanotaFile::type_ref(), &list, chunk).await? {
+					files.push(self.decrypt::<TutanotaFile>(raw, decrypted.instance_keys.as_ref()).await?);
+				}
 			}
 		}
-		Ok(files)
+		Ok(OpenedMail { mail: decrypted.mail, details, attachments: files })
+	}
+
+	/// Loads several mails with their bodies and attachment lists in as few requests as Tuta takes:
+	/// one per mail list for the mails, one per archive for the bodies (with one read token per
+	/// archive, kept until it expires), one per list for draft bodies and for attachments, as the
+	/// TypeScript client's BulkMailLoader does. A failed request fails the whole batch; a mail
+	/// that is missing or does not decrypt fails alone. Results come in the order of `ids`.
+	pub async fn open_many(
+		&self,
+		ids: &[IdTupleGenerated],
+	) -> Result<Vec<(IdTupleGenerated, Result<OpenedMail, TernError>)>, TernError> {
+		let mail_model = self.sdk.entity_client.resolve_server_type_ref(&Mail::type_ref())?;
+		let mut raws: HashMap<GeneratedId, ParsedEntity> = HashMap::new();
+		for (list, elements) in by_list(ids) {
+			for chunk in elements.chunks(MAX_IDS_PER_REQUEST) {
+				for raw in self.load_multiple_raw(&Mail::type_ref(), &list, chunk).await? {
+					if let Some(element) = element_id(&mail_model, &raw) {
+						raws.insert(element, raw);
+					}
+				}
+			}
+		}
+		let mut mails: Vec<Result<Decrypted, TernError>> = Vec::with_capacity(ids.len());
+		for id in ids {
+			mails.push(match raws.remove(&id.element_id) {
+				Some(raw) => self.decrypt_mail(raw).await,
+				None => Err(TernError::Other("the mail is gone".into())),
+			});
+		}
+		let decrypted = || mails.iter().filter_map(|m| m.as_ref().ok());
+
+		let blob_ids: Vec<IdTupleGenerated> = decrypted().filter_map(|d| d.mail.mailDetails.clone()).collect();
+		let mut blobs: HashMap<GeneratedId, ParsedEntity> = HashMap::new();
+		let blob_model = self.sdk.entity_client.resolve_server_type_ref(&MailDetailsBlob::type_ref())?;
+		for (archive, elements) in by_list(&blob_ids) {
+			for chunk in elements.chunks(MAX_IDS_PER_REQUEST) {
+				for raw in self.load_mail_details_blobs(&archive, chunk).await? {
+					if let Some(element) = element_id(&blob_model, &raw) {
+						blobs.insert(element, raw);
+					}
+				}
+			}
+		}
+		let draft_ids: Vec<IdTupleGenerated> = decrypted().filter_map(|d| d.mail.mailDetailsDraft.clone()).collect();
+		let drafts = self.load_all_raw(&MailDetailsDraft::type_ref(), &draft_ids).await?;
+		let file_ids: Vec<IdTupleGenerated> = decrypted().flat_map(|d| d.mail.attachments.iter().cloned()).collect();
+		let mut files = self.load_all_raw(&TutanotaFile::type_ref(), &file_ids).await?;
+
+		let mut opened = Vec::with_capacity(ids.len());
+		for (id, mail) in ids.iter().zip(mails) {
+			let result = match mail {
+				Ok(decrypted) => self.assemble(decrypted, &mut blobs, &drafts, &mut files).await,
+				Err(e) => Err(e),
+			};
+			opened.push((id.clone(), result));
+		}
+		Ok(opened)
+	}
+
+	/// A mail of a batch with its details and attachments, from what the batch loaded.
+	async fn assemble(
+		&self,
+		decrypted: Decrypted,
+		blobs: &mut HashMap<GeneratedId, ParsedEntity>,
+		drafts: &HashMap<GeneratedId, ParsedEntity>,
+		files: &mut HashMap<GeneratedId, ParsedEntity>,
+	) -> Result<OpenedMail, TernError> {
+		let mail = &decrypted.mail;
+		let details = if let Some(details_id) = &mail.mailDetails {
+			let raw = blobs
+				.remove(&details_id.element_id)
+				.ok_or_else(|| TernError::Other("the mail body is missing".into()))?;
+			self.decrypt_with::<MailDetailsBlob>(raw, details_key(&decrypted, &details_id.element_id))?.details
+		} else if let Some(draft_id) = &mail.mailDetailsDraft {
+			let raw = drafts
+				.get(&draft_id.element_id)
+				.cloned()
+				.ok_or_else(|| TernError::Other("the draft body is missing".into()))?;
+			self.decrypt_with::<MailDetailsDraft>(raw, decrypted.mail_key.clone())?.details
+		} else {
+			return Err(TernError::Other("mail has no body".into()));
+		};
+		let mut attachments = Vec::with_capacity(mail.attachments.len());
+		for file in &mail.attachments {
+			// A file the server did not return is left out, as a single open leaves it out.
+			if let Some(raw) = files.remove(&file.element_id) {
+				attachments.push(self.decrypt::<TutanotaFile>(raw, decrypted.instance_keys.as_ref()).await?);
+			}
+		}
+		Ok(OpenedMail { mail: decrypted.mail, details, attachments })
+	}
+
+	/// Decrypts a mail as loaded, keeping the keys its details and attachments need.
+	async fn decrypt_mail(&self, raw: ParsedEntity) -> Result<Decrypted, TernError> {
+		let instance_keys = self.bucket_instance_keys(&Mail::type_ref(), &raw).await?;
+		let mail_key = self.session_key(&Mail::type_ref(), &raw, instance_keys.as_ref()).await?;
+		let mail: Mail = self.decrypt_with(raw, mail_key.clone())?;
+		Ok(Decrypted { mail, mail_key, instance_keys })
+	}
+
+	/// Loads list elements from any number of lists, still encrypted, by element id.
+	async fn load_all_raw(&self, type_ref: &TypeRef, ids: &[IdTupleGenerated]) -> Result<HashMap<GeneratedId, ParsedEntity>, TernError> {
+		let model = self.sdk.entity_client.resolve_server_type_ref(type_ref)?;
+		let mut loaded = HashMap::new();
+		for (list, elements) in by_list(ids) {
+			for chunk in elements.chunks(MAX_IDS_PER_REQUEST) {
+				for raw in self.load_multiple_raw(type_ref, &list, chunk).await? {
+					if let Some(element) = element_id(&model, &raw) {
+						loaded.insert(element, raw);
+					}
+				}
+			}
+		}
+		Ok(loaded)
 	}
 
 	/// Downloads and decrypts one attachment of a mail.
@@ -950,16 +1065,8 @@ impl TernMail {
 		};
 		let protocol = CryptoProtocolVersion::try_from(bucket_key.protocolVersion)
 			.map_err(|_| TernError::Other(format!("unknown protocol {}", bucket_key.protocolVersion)))?;
-		let decapsulated = self
-			.parts()
-			.asymmetric_crypto_facade
-			.load_key_pair_and_decrypt_sym_key(
-				key_group,
-				bucket_key.recipientKeyVersion as u64,
-				&protocol,
-				pub_enc_bucket_key,
-			)
-			.await
+		let key_pair = self.key_pair(key_group, bucket_key.recipientKeyVersion as u64).await?;
+		let decapsulated = AsymmetricCryptoFacade::decrypt_sym_key_with_key_pair(key_pair, &protocol, pub_enc_bucket_key)
 			.map_err(|e| TernError::Other(format!("cannot decrypt the mail key: {e}")))?;
 		let mut keys = HashMap::new();
 		for instance in bucket_key.bucketEncSessionKeys {
@@ -1038,15 +1145,7 @@ impl TernMail {
 	async fn load_multiple_raw(&self, type_ref: &TypeRef, list: &GeneratedId, ids: &[GeneratedId]) -> Result<Vec<ParsedEntity>, TernError> {
 		let type_model = self.sdk.entity_client.resolve_client_type_ref(type_ref)?;
 		let parts = self.parts();
-		let joined = ids.iter().map(GeneratedId::as_str).collect::<Vec<_>>().join(",");
-		let url = format!(
-			"{}/rest/{}/{}/{}{}",
-			parts.base_url,
-			type_ref.app,
-			type_model.name.to_lowercase(),
-			list,
-			encode_query_params([("ids", joined.as_str())])
-		);
+		let url = elements_url(&parts.base_url, type_ref, &type_model.name, list, Vec::new(), ids);
 		let headers = parts.auth_headers_provider.provide_headers(type_model.version);
 		let response = parts
 			.rest_client
@@ -1082,21 +1181,56 @@ impl TernMail {
 			.collect()
 	}
 
-	/// Loads a mail body, which lives on the blob storage servers.
-	async fn load_mail_details_blob(&self, id: &IdTupleGenerated) -> Result<ParsedEntity, TernError> {
+	/// Loads mail bodies of one archive, which live on the blob storage servers, in one request.
+	/// Like the TypeScript client's `loadMultipleBlobElements`: a read token for the archive, the
+	/// ids comma-joined, and on 403 (an expired token) a fresh token and one more try.
+	async fn load_mail_details_blobs(&self, archive: &GeneratedId, ids: &[GeneratedId]) -> Result<Vec<ParsedEntity>, TernError> {
 		let type_ref = MailDetailsBlob::type_ref();
-		let access = self.read_token(None, &id.list_id, None).await?;
-		let mut params = self.blob_query_params(&access, type_ref.clone())?;
-		params.push(("ids".to_string(), id.element_id.to_string()));
 		let type_model = self.sdk.entity_client.resolve_client_type_ref(&type_ref)?;
-		let path = format!("/rest/{}/{}/{}", type_ref.app, type_model.name.to_lowercase(), id.list_id);
-		let bytes = self
-			.try_servers(&access, |server| format!("{server}{path}{}", encode_query_params(params.clone())))
-			.await?;
-		self.parse_list_response(&type_ref, 200, &HashMap::new(), Some(bytes))?
-			.into_iter()
-			.next()
-			.ok_or_else(|| TernError::Other("the mail body is missing".into()))
+		let mut retried = false;
+		loop {
+			let access = self.archive_read_token(archive).await?;
+			let params = self.blob_query_params(&access, type_ref.clone())?;
+			let url = |server: &str| elements_url(server, &type_ref, &type_model.name, archive, params.clone(), ids);
+			match self.try_servers(&access, url).await {
+				Err(ApiCallError::ServerResponseError { source: HttpError::NotAuthorizedError }) if !retried => {
+					self.read_tokens.lock().unwrap().remove(archive);
+					retried = true;
+				},
+				bytes => return self.parse_list_response(&type_ref, 200, &HashMap::new(), Some(bytes?)),
+			}
+		}
+	}
+
+	/// A read token for a whole archive, from the cache while it is still valid.
+	async fn archive_read_token(&self, archive: &GeneratedId) -> Result<BlobServerAccessInfo, TernError> {
+		let now = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.map_or(0, |d| d.as_millis() as u64);
+		if let Some(token) = self.read_tokens.lock().unwrap().get(archive).filter(|t| t.expires.as_millis() > now) {
+			return Ok(token.clone());
+		}
+		let token = self.read_token(None, archive, None).await?;
+		if token.tokenKind == TOKEN_KIND_ARCHIVE {
+			self.read_tokens.lock().unwrap().insert(archive.clone(), token.clone());
+		}
+		Ok(token)
+	}
+
+	/// The key pair of `group` at `version`, loaded once per session.
+	async fn key_pair(&self, group: &GeneratedId, version: u64) -> Result<AsymmetricKeyPair, TernError> {
+		let key = (group.clone(), version);
+		if let Some(pair) = self.key_pairs.lock().unwrap().get(&key) {
+			return Ok(pair.clone());
+		}
+		let pair = self
+			.parts()
+			.key_loader_facade
+			.load_key_pair(group, version)
+			.await
+			.map_err(|e| TernError::Other(format!("cannot load the key pair: {e}")))?;
+		self.key_pairs.lock().unwrap().insert(key, pair.clone());
+		Ok(pair)
 	}
 
 	async fn read_token(
@@ -1129,8 +1263,8 @@ impl TernMail {
 	}
 
 	/// GETs from each blob server in turn until one answers.
-	async fn try_servers(&self, access: &BlobServerAccessInfo, url: impl Fn(&str) -> String) -> Result<Vec<u8>, TernError> {
-		let mut last_error = TernError::Other("no blob server to load from".into());
+	async fn try_servers(&self, access: &BlobServerAccessInfo, url: impl Fn(&str) -> String) -> Result<Vec<u8>, ApiCallError> {
+		let mut last_error = ApiCallError::InternalSdkError { error_message: "no blob server to load from".into() };
 		for server in &access.servers {
 			let response = self
 				.parts()
@@ -1149,13 +1283,48 @@ impl TernMail {
 				Ok(response) if (200..300).contains(&response.status) => return Ok(response.body.unwrap_or_default()),
 				Ok(response) => {
 					let error = HttpError::from_http_response(response.status, &response.headers)?;
-					last_error = ApiCallError::ServerResponseError { source: error }.into();
+					last_error = ApiCallError::ServerResponseError { source: error };
 				},
-				Err(e) => last_error = ApiCallError::from(e).into(),
+				Err(e) => last_error = ApiCallError::from(e),
 			}
 		}
 		Err(last_error)
 	}
+}
+
+/// Element ids grouped by list, lists and ids in the order first met.
+fn by_list(ids: &[IdTupleGenerated]) -> Vec<(GeneratedId, Vec<GeneratedId>)> {
+	let mut lists: Vec<(GeneratedId, Vec<GeneratedId>)> = Vec::new();
+	for id in ids {
+		match lists.iter_mut().find(|(list, _)| *list == id.list_id) {
+			Some((_, elements)) if !elements.contains(&id.element_id) => elements.push(id.element_id.clone()),
+			Some(_) => {},
+			None => lists.push((id.list_id.clone(), vec![id.element_id.clone()])),
+		}
+	}
+	lists
+}
+
+/// The GET for several elements of one list (or blob elements of one archive), `ids`
+/// comma-joined after any credentials, as the TypeScript client's `loadMultiple` sends it.
+fn elements_url(
+	server: &str,
+	type_ref: &TypeRef,
+	type_name: &str,
+	list: &GeneratedId,
+	mut params: Vec<(String, String)>,
+	ids: &[GeneratedId],
+) -> String {
+	params.push(("ids".to_string(), ids.iter().map(GeneratedId::as_str).collect::<Vec<_>>().join(",")));
+	format!("{server}/rest/{}/{}/{list}{}", type_ref.app, type_name.to_lowercase(), encode_query_params(params))
+}
+
+/// The session key of a mail's details: from the bucket key if it covers them, else the mail's.
+fn details_key(mail: &Decrypted, details: &GeneratedId) -> GenericAesKey {
+	mail.instance_keys
+		.as_ref()
+		.and_then(|keys| keys.get(details).cloned())
+		.unwrap_or_else(|| mail.mail_key.clone())
 }
 
 /// A fresh id for an aggregate. The SDK fills these in only for encrypted requests, so
@@ -1751,6 +1920,37 @@ mod tests {
 		);
 		contact.firstName = String::new();
 		assert_eq!(tern_contact(&contact).name, "Lee");
+	}
+
+	/// The batched open: mails, bodies and files grouped by list (archive for bodies), each group
+	/// in one GET with the ids comma-joined, credentials first on blob servers.
+	#[test]
+	fn batched_requests_group_by_list_and_join_ids() {
+		let id = |list: &str, element: &str| IdTupleGenerated { list_id: GeneratedId(list.into()), element_id: GeneratedId(element.into()) };
+		let ids = [id("bagA", "m1"), id("bagB", "m2"), id("bagA", "m3"), id("bagA", "m1")];
+		let groups = by_list(&ids);
+		let as_str = |group: &(GeneratedId, Vec<GeneratedId>)| (group.0.to_string(), group.1.iter().map(|e| e.to_string()).collect::<Vec<_>>());
+		assert_eq!(groups.iter().map(as_str).collect::<Vec<_>>(), [("bagA".into(), vec!["m1".to_string(), "m3".into()]), ("bagB".into(), vec!["m2".into()])]);
+
+		let (list, elements) = &groups[0];
+		assert_eq!(
+			elements_url("https://app.tuta.com", &Mail::type_ref(), "Mail", list, vec![], elements),
+			"https://app.tuta.com/rest/tutanota/mail/bagA?ids=m1%2Cm3"
+		);
+		let credentials = vec![("accessToken".to_string(), "t".to_string()), ("v".to_string(), "115".to_string()), ("blobAccessToken".to_string(), "b".to_string())];
+		assert_eq!(
+			elements_url("https://w1.api.tuta.com", &MailDetailsBlob::type_ref(), "MailDetailsBlob", &GeneratedId("archive".into()), credentials, elements),
+			"https://w1.api.tuta.com/rest/tutanota/maildetailsblob/archive?accessToken=t&v=115&blobAccessToken=b&ids=m1%2Cm3"
+		);
+	}
+
+	#[test]
+	fn rate_limits_are_not_failures() {
+		let limited = |source| TernError::from(ApiCallError::ServerResponseError { source });
+		assert!(matches!(limited(HttpError::TooManyRequestsError { suspension_time_sec: Some(30) }), TernError::RateLimited(Some(30))));
+		assert!(matches!(limited(HttpError::TooManyRequestsError { suspension_time_sec: None }), TernError::RateLimited(None)));
+		assert!(matches!(limited(HttpError::ServiceUnavailableError { suspension_time_sec: Some(5) }), TernError::RateLimited(Some(5))));
+		assert!(matches!(limited(HttpError::ServiceUnavailableError { suspension_time_sec: None }), TernError::Offline));
 	}
 
 	#[test]

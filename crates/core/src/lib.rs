@@ -166,6 +166,9 @@ pub enum Error {
 	Offline,
 	#[error("These recipients do not exist: {}", .0.join(", "))]
 	RecipientsNotFound(Vec<String>),
+	/// The server wants fewer requests for a while: wait this many seconds, if it says, then try again.
+	#[error("The mail server is busy, trying again shortly")]
+	RateLimited(Option<u64>),
 	#[error("{0}")]
 	Other(String),
 }
@@ -178,6 +181,9 @@ pub trait Backend: Send + Sync {
 	async fn folders(&self) -> Result<Vec<Folder>>;
 	async fn list(&self, folder: &FolderId, next: Option<String>, count: usize) -> Result<MailPage>;
 	async fn open(&self, id: &MailId) -> Result<Mail>;
+	/// Opens several mails with as few requests as the server allows, in the order asked. An error
+	/// here is the batch failing as a whole; a mail that cannot be opened gets its own error.
+	async fn open_many(&self, ids: &[MailId]) -> Result<Vec<(MailId, Result<Mail>)>>;
 	async fn attachment(&self, mail: &MailId, attachment: &Attachment) -> Result<Vec<u8>>;
 	/// Sends `draft`, after saving it over `draft.existing` if set.
 	async fn send(&self, draft: Draft) -> Result<()>;

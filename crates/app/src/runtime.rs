@@ -15,6 +15,11 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 	})
 }
 
+/// The Tokio runtime, for work that spawns its own tasks.
+pub fn handle() -> tokio::runtime::Handle {
+	runtime().handle().clone()
+}
+
 /// Runs `fut` on the Tokio runtime; await the result from the GTK thread.
 pub async fn run<T: Send + 'static>(fut: impl Future<Output = T> + Send + 'static) -> T {
 	match runtime().spawn(fut).await {

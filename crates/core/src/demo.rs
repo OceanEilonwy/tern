@@ -232,6 +232,10 @@ impl Backend for DemoBackend {
 		self.find(id, |m| m.mail.clone())
 	}
 
+	async fn open_many(&self, ids: &[MailId]) -> Result<Vec<(MailId, Result<Mail>)>> {
+		Ok(ids.iter().map(|id| (id.clone(), self.find(id, |m| m.mail.clone()))).collect())
+	}
+
 	async fn attachment(&self, mail: &MailId, attachment: &Attachment) -> Result<Vec<u8>> {
 		self.find(mail, |m| {
 			m.mail.attachments.iter().position(|a| a.id == attachment.id).map(|i| m.files[i].clone()).ok_or_else(|| Error::Other("Attachment not found".into()))
@@ -335,6 +339,19 @@ mod tests {
 		// Sending it moves it out of Drafts.
 		demo.send(Draft { to: vec![Address::new("", "mia@tuta.com")], subject: "Plan v2".into(), existing: Some(second), ..Default::default() }).await.unwrap();
 		assert!(demo.list(&drafts, None, 10).await.unwrap().mails.is_empty());
+	}
+
+	#[tokio::test]
+	async fn a_batch_opens_what_it_can_and_names_what_it_cannot() {
+		let demo = DemoBackend::new();
+		let inbox = demo.list(&folder_id(FolderKind::Inbox), None, 10).await.unwrap();
+		let gone = MailId { list: "demo".into(), element: "gone".into() };
+		let ids = vec![inbox.mails[1].id.clone(), gone.clone(), inbox.mails[0].id.clone()];
+		let opened = demo.open_many(&ids).await.unwrap();
+		assert_eq!(opened.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), ids, "in the order asked");
+		assert_eq!(opened[0].1.as_ref().unwrap().summary.id, ids[0]);
+		assert!(opened[1].1.is_err(), "the missing mail fails alone");
+		assert_eq!(opened[2].1.as_ref().unwrap().summary.subject, inbox.mails[0].subject);
 	}
 
 	#[tokio::test]

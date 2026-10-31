@@ -6,6 +6,7 @@
 
 pub mod embed;
 pub mod search;
+pub mod policy;
 pub mod sync;
 
 use std::path::Path;
@@ -388,6 +389,14 @@ impl Cache {
 		Ok(())
 	}
 
+	/// Whether `id` is stored opened.
+	pub fn has_mail(&self, id: &MailId) -> Result<bool> {
+		let conn = self.conn();
+		let found: Option<bool> =
+			conn.query_row("SELECT mail IS NOT NULL FROM bodies WHERE list = ?1 AND element = ?2", params![id.list, id.element], |r| r.get(0)).optional()?;
+		Ok(found == Some(true))
+	}
+
 	/// Remembers that `id` cannot be opened, so syncing does not try again.
 	pub fn mark_unopenable(&self, id: &MailId) -> Result<()> {
 		self.conn().execute("INSERT OR IGNORE INTO bodies (list, element, mail) VALUES (?1, ?2, NULL)", params![id.list, id.element])?;
@@ -756,8 +765,10 @@ mod tests {
 			web_url: String::new(),
 		};
 		assert_eq!(cache.missing_bodies(10).unwrap(), vec![s.id.clone()]);
+		assert!(!cache.has_mail(&s.id).unwrap());
 		cache.put_mail(&mail).unwrap();
 		assert!(cache.missing_bodies(10).unwrap().is_empty());
+		assert!(cache.has_mail(&s.id).unwrap());
 		cache.set_unread(&s.id, true).unwrap();
 		assert!(cache.mail(&s.id).unwrap().unwrap().summary.unread);
 		assert!(cache.list(&inbox, 0, 1).unwrap()[0].unread);

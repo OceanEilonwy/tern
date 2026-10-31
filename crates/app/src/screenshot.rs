@@ -1,6 +1,6 @@
 //! A hidden debug path that builds a scene, saves a PNG of it and quits.
 //!
-//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|folders-fail|refresh-race|sign-out-race|draft|suggest|keys|arrows|busy|panes|search|inbox|reading|invoice|newsletter|compose|narrow|narrow-reading`
+//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|folders-fail|refresh-race|sign-out-race|draft|suggest|keys|arrows|busy|panes|search|focus-first|inbox|reading|invoice|newsletter|compose|narrow|narrow-reading`
 //! (with `TERN_DEMO=1` for all but login and sign-in; sign-in types "demo" on the sign-in page). For dark mode add `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
 
 use std::path::PathBuf;
@@ -228,6 +228,22 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				other => Err(format!("while sending and opening, the word is {other:?}")),
 			}
 		}
+		// The mail chosen shows at once though a slow batch fetching the list's mail holds it:
+		// batches take seconds here, a single mail none.
+		"focus-first" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			sleep(500).await;
+			let started = std::time::Instant::now();
+			mailbox.select_by_subject("Lunch");
+			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
+			let shown = mailbox.reader.current.borrow().as_ref().map(|o| o.mail.summary.subject.clone());
+			let batched = tern_core::MailId { list: "demo".into(), element: "m001".into() };
+			let batch_done = win.ctx.cache().is_some_and(|c| c.has_mail(&batched).unwrap_or(false));
+			if shown.as_deref() != Some("Re: Lunch on Friday?") || started.elapsed() > Duration::from_secs(2) || batch_done {
+				return Err(format!("showed {shown:?} after {:?}, the slow batch done: {batch_done}", started.elapsed()));
+			}
+			Ok(())
+		}
 		// Arrowing onto an unread conversation marks it read without moving the focus off it.
 		"arrows" => {
 			wait_for(|| mailbox.store.n_items() > 0).await;
@@ -310,7 +326,7 @@ pub fn drive(win: Rc<Window>) {
 	if scene == "sign-in" {
 		return sign_in(Rc::downgrade(&win), path);
 	}
-	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search") {
+	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first") {
 		glib::spawn_future_local(async move {
 			if let Err(e) = check(&win, &scene).await {
 				// No picture, so the check fails.
@@ -405,10 +421,12 @@ pub fn backend() -> Arc<dyn Backend> {
 	let scene = scene().map(|(_, s)| s).unwrap_or_default();
 	let demo = DemoBackend::new();
 	match scene.as_str() {
-		"folders-fail" => Arc::new(Staged { demo, folders_fail: true, delay: Duration::ZERO, delay_folders: false, slow_mail: Duration::ZERO }),
-		"refresh-race" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::from_millis(500), delay_folders: false, slow_mail: Duration::ZERO }),
-		"sign-out-race" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::from_millis(500), delay_folders: true, slow_mail: Duration::ZERO }),
-		"busy" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::ZERO, delay_folders: false, slow_mail: Duration::from_secs(3) }),
+		"folders-fail" => Arc::new(Staged { demo, folders_fail: true, delay: Duration::ZERO, delay_folders: false, slow_mail: Duration::ZERO, slow_batches: false }),
+		"refresh-race" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::from_millis(500), delay_folders: false, slow_mail: Duration::ZERO, slow_batches: false }),
+		"sign-out-race" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::from_millis(500), delay_folders: true, slow_mail: Duration::ZERO, slow_batches: false }),
+		"busy" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::ZERO, delay_folders: false, slow_mail: Duration::from_secs(3), slow_batches: false }),
+		// Batches are slow, single mails quick.
+		"focus-first" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::ZERO, delay_folders: false, slow_mail: Duration::from_secs(5), slow_batches: true }),
 		_ => Arc::new(demo),
 	}
 }
@@ -422,6 +440,16 @@ struct Staged {
 	delay_folders: bool,
 	/// How long opening and sending a mail take.
 	slow_mail: Duration,
+	/// Only opening several mails at once is slow.
+	slow_batches: bool,
+}
+
+impl Staged {
+	async fn opening(&self, ids: &[tern_core::MailId]) {
+		if !self.slow_batches || ids.len() > 1 {
+			tokio::time::sleep(self.slow_mail).await;
+		}
+	}
 }
 
 #[async_trait::async_trait]
@@ -445,8 +473,12 @@ impl Backend for Staged {
 		self.demo.list(folder, next, count).await
 	}
 	async fn open(&self, id: &tern_core::MailId) -> tern_core::Result<tern_core::Mail> {
-		tokio::time::sleep(self.slow_mail).await;
+		self.opening(std::slice::from_ref(id)).await;
 		self.demo.open(id).await
+	}
+	async fn open_many(&self, ids: &[tern_core::MailId]) -> tern_core::Result<Vec<(tern_core::MailId, tern_core::Result<tern_core::Mail>)>> {
+		self.opening(ids).await;
+		self.demo.open_many(ids).await
 	}
 	async fn attachment(&self, mail: &tern_core::MailId, attachment: &tern_core::Attachment) -> tern_core::Result<Vec<u8>> {
 		self.demo.attachment(mail, attachment).await

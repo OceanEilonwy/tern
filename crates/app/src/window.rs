@@ -11,6 +11,7 @@ use tern_cache::{sync::Level, Cache};
 use tern_core::{demo::DemoBackend, Backend, Error, FolderKind};
 
 use crate::activity::Activity;
+use crate::fetcher::{Fetcher, Tuning};
 use crate::settings::Settings;
 use crate::{background, format, keyring, login::Login, mailbox::Mailbox, runtime, screenshot, semantic};
 
@@ -23,6 +24,7 @@ pub struct Ctx {
 	pub toasts: adw::ToastOverlay,
 	backend: Rc<RefCell<Option<Arc<dyn Backend>>>>,
 	cache: Rc<RefCell<Option<Arc<Cache>>>>,
+	fetcher: Rc<RefCell<Option<Fetcher>>>,
 	settings: Rc<Cell<Settings>>,
 	/// Wakes the background sync.
 	wake: Arc<tokio::sync::Notify>,
@@ -38,6 +40,11 @@ impl Ctx {
 
 	pub fn cache(&self) -> Option<Arc<Cache>> {
 		self.cache.borrow().clone()
+	}
+
+	/// Fetches mail bodies for the account signed in now.
+	pub fn fetcher(&self) -> Option<Fetcher> {
+		self.fetcher.borrow().clone()
 	}
 
 	pub fn settings(&self) -> Settings {
@@ -122,6 +129,7 @@ impl Window {
 			toasts: toasts.clone(),
 			backend: Rc::default(),
 			cache: Rc::default(),
+			fetcher: Rc::default(),
 			settings: Rc::new(Cell::new(Settings::load())),
 			wake: Arc::default(),
 			changed: Rc::default(),
@@ -269,6 +277,7 @@ impl Window {
 			if !this.ctx.backend().is_some_and(|now| Arc::ptr_eq(&now, &backend)) {
 				return;
 			}
+			*this.ctx.fetcher.borrow_mut() = Some(Fetcher::new(backend.clone(), cache.clone(), runtime::handle(), Tuning::DEFAULT));
 			*this.ctx.cache.borrow_mut() = Some(cache);
 			this.mailbox.start();
 			background::start(&this.ctx, Rc::downgrade(&this.mailbox));
@@ -280,6 +289,9 @@ impl Window {
 	fn sign_out(self: &Rc<Self>) {
 		let Some(backend) = self.ctx.backend.borrow_mut().take() else { return };
 		let cache = self.ctx.cache.borrow_mut().take();
+		if let Some(fetcher) = self.ctx.fetcher.borrow_mut().take() {
+			fetcher.stop();
+		}
 		let email = backend.account().address;
 		self.mailbox.clear();
 		self.show_login(Some(&email));
