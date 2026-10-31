@@ -17,7 +17,7 @@ use tern_core::{Backend, NewAttachment};
 use crate::activity::Word;
 use crate::compose_model::Fields;
 use crate::composer::Composer;
-use crate::mailbox::RAIL_SNAP;
+use crate::mailbox::RAIL;
 use crate::window::Window;
 
 pub fn scene() -> Option<(PathBuf, String)> {
@@ -182,6 +182,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		}
 		// F9 folds the folders to a rail of icons and back; dragged edges keep their width.
 		"panes" => {
+			// The window's icon on the folders' header, as KDE puts it, must not widen the rail.
+			gtk::Settings::default().ok_or("no settings")?.set_gtk_decoration_layout(Some("icon:minimize,maximize,close"));
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			let window = win.ctx.window.clone();
 			let act = |name: &str| gtk::prelude::WidgetExt::activate_action(&window, name, None).map_err(|e| e.to_string());
@@ -193,7 +195,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			act("win.toggle-folders")?;
 			sleep(300).await;
-			if !mailbox.is_rail() || mailbox.pane_widths().0 >= RAIL_SNAP {
+			if !mailbox.is_rail() || mailbox.pane_widths().0 != RAIL as i32 {
 				return Err(format!("F9 did not make a rail: {:?}", mailbox.pane_widths()));
 			}
 			act("win.toggle-folders")?;

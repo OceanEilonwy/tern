@@ -24,6 +24,22 @@
   background: alpha(currentColor, 0.1);
 }
 
+/* A folder's unread count on the corner of its icon, when the folders are a rail. */
+.rail-badge {
+  font-size: 0.7em;
+  font-weight: bold;
+  min-width: 10px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--accent-bg-color);
+  color: var(--accent-fg-color);
+}
+
+.navigation-sidebar.rail > row {
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
 .pill.small-pill {
   padding: 6px 16px;
 }

@@ -26,11 +26,11 @@ const ROWS: usize = 100;
 /// so the one clicked opens at once: a tall window's worth.
 const VIEWING: usize = 25;
 
-/// The folder sidebar's width bounds, in pixels, and its width as a rail of icons (wider when its
-/// header needs it). Dragged narrower than `RAIL_SNAP` it becomes the rail.
+/// The folder sidebar's width bounds, in pixels, and its width as a rail of icons. Dragged narrower
+/// than `RAIL_SNAP` it becomes the rail.
 const FOLDERS: (u32, u32) = (180, 400);
-const RAIL: u32 = 64;
-pub const RAIL_SNAP: i32 = 140;
+pub const RAIL: u32 = 52;
+const RAIL_SNAP: i32 = 140;
 /// The conversation list's width bounds.
 const LIST: (u32, u32) = (280, 720);
 
@@ -43,8 +43,10 @@ pub struct Mailbox {
 	inner: adw::NavigationSplitView,
 	account: adw::WindowTitle,
 	folder_header: adw::HeaderBar,
+	/// The main menu: on the folders' header, or on the list's while the folders are a rail.
+	menus: (gtk::MenuButton, gtk::MenuButton),
 	folder_list: gtk::ListBox,
-	folders: RefCell<Vec<(Folder, gtk::Label)>>,
+	folders: RefCell<Vec<FolderRow>>,
 	current: RefCell<Option<Folder>>,
 	list_title: adw::WindowTitle,
 	list_stack: gtk::Stack,
@@ -72,11 +74,72 @@ pub struct Mailbox {
 	pub reader: Rc<Reader>,
 }
 
+/// A folder in the sidebar, with its unread count beside its name, or on its icon on the rail.
+struct FolderRow {
+	folder: Folder,
+	/// Its Ctrl+number shortcut, if it has one.
+	shortcut: Option<usize>,
+	row: gtk::Box,
+	icon: gtk::Image,
+	name: gtk::Label,
+	count: gtk::Label,
+	badge: gtk::Label,
+}
+
+impl FolderRow {
+	fn new(folder: Folder, shortcut: Option<usize>, rail: bool) -> FolderRow {
+		let icon = gtk::Image::from_icon_name(folder_icon(folder.kind));
+		let badge = gtk::Label::builder().css_classes(["numeric", "rail-badge"]).halign(gtk::Align::End).valign(gtk::Align::Start).build();
+		let marked = gtk::Overlay::builder().child(&icon).build();
+		marked.add_overlay(&badge);
+		let name = gtk::Label::builder().label(&folder.name).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build();
+		let count = gtk::Label::builder().css_classes(["dim-label", "numeric", "caption-heading"]).build();
+		let row = gtk::Box::builder().spacing(12).build();
+		row.append(&marked);
+		row.append(&name);
+		row.append(&count);
+		let this = FolderRow { folder, shortcut, row, icon, name, count, badge };
+		this.set_rail(rail);
+		this
+	}
+
+	/// As a line (icon, name, count) or, on the rail, the icon alone with the count on its corner.
+	fn set_rail(&self, rail: bool) {
+		self.name.set_visible(!rail);
+		self.row.set_halign(if rail { gtk::Align::Center } else { gtk::Align::Fill });
+		self.row.set_margin_start(if rail { 0 } else { 6 });
+		self.row.set_margin_end(if rail { 0 } else { 6 });
+		// On the rail, room around the icon for the count to sit on its corner.
+		let (v, h) = if rail { (7, 6) } else { (3, 0) };
+		self.icon.set_margin_top(v);
+		self.icon.set_margin_bottom(v);
+		self.icon.set_margin_start(h);
+		self.icon.set_margin_end(h);
+		self.set_unread(self.folder.unread);
+	}
+
+	fn set_unread(&self, unread: u32) {
+		let rail = !self.name.is_visible();
+		self.count.set_label(&unread.to_string());
+		self.count.set_visible(unread > 0 && !rail);
+		self.badge.set_label(&if unread > 99 { "99+".to_string() } else { unread.to_string() });
+		self.badge.set_visible(unread > 0 && rail);
+		let mut tip = self.folder.name.clone();
+		if rail && unread > 0 {
+			tip = format!("{tip}, {}", unread_subtitle(unread));
+		}
+		if let Some(n) = self.shortcut {
+			tip = format!("{tip} (Ctrl+{n})");
+		}
+		self.row.set_tooltip_text(Some(&tip));
+	}
+}
+
 pub fn folder_icon(kind: FolderKind) -> &'static str {
 	match kind {
 		FolderKind::Inbox => "tern-inbox-symbolic",
 		FolderKind::Drafts => "document-edit-symbolic",
-		FolderKind::Sent => "mail-send-symbolic",
+		FolderKind::Sent => "tern-sent-symbolic",
 		FolderKind::Archive => "tern-archive-symbolic",
 		FolderKind::Spam => "mail-mark-junk-symbolic",
 		FolderKind::Trash => "user-trash-symbolic",
@@ -160,9 +223,10 @@ impl Mailbox {
 		let section = gio::Menu::new();
 		section.append(Some("_Sign Out"), Some("app.sign-out"));
 		menu.append_section(None, &section);
-		let menu_button = gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).tooltip_text("Main Menu").primary(true).build();
+		let menu_button = || gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).tooltip_text("Main Menu").build();
+		let menus = (menu_button(), menu_button());
 		let folder_header = adw::HeaderBar::builder().title_widget(&account).build();
-		folder_header.pack_end(&menu_button);
+		folder_header.pack_end(&menus.0);
 		let folder_list = gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build();
 		folder_list.update_property(&[gtk::accessible::Property::Label("Folders")]);
 		let folder_scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&folder_list).vexpand(true).build();
@@ -212,6 +276,7 @@ impl Mailbox {
 		let refresh = gtk::Button::builder().icon_name("view-refresh-symbolic").action_name("win.refresh").tooltip_text("Check for New Mail (F5)").build();
 		list_header.pack_start(&sidebar_toggle);
 		list_header.pack_start(&compose);
+		list_header.pack_end(&menus.1);
 		list_header.pack_end(&refresh);
 		list_header.pack_end(&activity);
 		let list_view_tb = adw::ToolbarView::new();
@@ -253,6 +318,7 @@ impl Mailbox {
 			inner,
 			account,
 			folder_header,
+			menus,
 			folder_list,
 			folders: RefCell::default(),
 			current: RefCell::default(),
@@ -402,12 +468,17 @@ impl Mailbox {
 		self.outer.set_max_sidebar_width(max as f64);
 		self.outer.set_sidebar_width_fraction(fraction);
 		self.folder_header.set_show_title(!rail);
-		let mut row = self.folder_list.first_child();
-		while let Some(r) = row {
-			if let Some(b) = r.downcast_ref::<gtk::ListBoxRow>().and_then(|r| r.child()).and_downcast::<gtk::Box>() {
-				set_rail_row(&b, rail);
-			}
-			row = r.next_sibling();
+		self.menus.0.set_visible(!rail);
+		self.menus.0.set_primary(!rail);
+		self.menus.1.set_visible(rail);
+		self.menus.1.set_primary(rail);
+		if rail {
+			self.folder_list.add_css_class("rail");
+		} else {
+			self.folder_list.remove_css_class("rail");
+		}
+		for row in self.folders.borrow().iter() {
+			row.set_rail(rail);
 		}
 		self.inner.set_sidebar_width_unit(adw::LengthUnit::Px);
 		let (min, max, fraction) = match s.list_width {
@@ -428,7 +499,7 @@ impl Mailbox {
 		let weak = Rc::downgrade(self);
 		self.folder_list.connect_row_selected(move |_, row| {
 			let (Some(this), Some(row)) = (weak.upgrade(), row) else { return };
-			let folder = this.folders.borrow().get(row.index() as usize).map(|(f, _)| f.clone());
+			let folder = this.folders.borrow().get(row.index() as usize).map(|r| r.folder.clone());
 			if let Some(folder) = folder {
 				if this.current.borrow().as_ref().map(|f| &f.id) != Some(&folder.id) {
 					this.open_folder(&folder);
@@ -650,16 +721,16 @@ impl Mailbox {
 		let current = self.current.borrow().as_ref().map(|f| f.id.clone());
 		let unchanged = {
 			let old = self.folders.borrow();
-			old.len() == folders.len() && old.iter().zip(&folders).all(|((a, _), b)| a.id == b.id && a.name == b.name)
+			old.len() == folders.len() && old.iter().zip(&folders).all(|(a, b)| a.folder.id == b.id && a.folder.name == b.name)
 		};
 		if unchanged {
 			// Only counts changed: update labels in place, keep the selection.
 			let mut old = self.folders.borrow_mut();
-			for ((f, label), new) in old.iter_mut().zip(folders) {
-				*f = new;
-				set_count(label, f.unread);
-				if Some(&f.id) == current.as_ref() {
-					self.list_title.set_subtitle(&unread_subtitle(f.unread));
+			for (row, new) in old.iter_mut().zip(folders) {
+				row.folder = new;
+				row.set_unread(row.folder.unread);
+				if Some(&row.folder.id) == current.as_ref() {
+					self.list_title.set_subtitle(&unread_subtitle(row.folder.unread));
 				}
 			}
 			return;
@@ -667,18 +738,9 @@ impl Mailbox {
 		self.folder_list.remove_all();
 		let mut rows = Vec::new();
 		for (i, folder) in folders.into_iter().enumerate() {
-			let icon = gtk::Image::from_icon_name(folder_icon(folder.kind));
-			let name = gtk::Label::builder().label(&folder.name).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build();
-			let count = gtk::Label::builder().css_classes(["dim-label", "numeric", "caption-heading"]).build();
-			set_count(&count, folder.unread);
-			let row_box = gtk::Box::builder().spacing(12).margin_start(6).margin_end(6).margin_top(3).margin_bottom(3).build();
-			row_box.append(&icon);
-			row_box.append(&name);
-			row_box.append(&count);
-			row_box.set_tooltip_text(Some(&if i < 9 { format!("{} (Ctrl+{})", folder.name, i + 1) } else { folder.name.clone() }));
-			set_rail_row(&row_box, self.is_rail());
-			self.folder_list.append(&row_box);
-			rows.push((folder, count));
+			let row = FolderRow::new(folder, (i < 9).then_some(i + 1), self.is_rail());
+			self.folder_list.append(&row.row);
+			rows.push(row);
 		}
 		*self.folders.borrow_mut() = rows;
 		if self.folders.borrow().is_empty() {
@@ -686,8 +748,8 @@ impl Mailbox {
 		}
 		let target = {
 			let folders = self.folders.borrow();
-			let by_current = current.and_then(|c| folders.iter().position(|(f, _)| f.id == c));
-			let inbox = folders.iter().position(|(f, _)| f.kind == FolderKind::Inbox).or(Some(0));
+			let by_current = current.and_then(|c| folders.iter().position(|r| r.folder.id == c));
+			let inbox = folders.iter().position(|r| r.folder.kind == FolderKind::Inbox).or(Some(0));
 			if select_inbox { inbox } else { by_current.or(inbox) }
 		};
 		if let Some(row) = target.and_then(|i| self.folder_list.row_at_index(i as i32)) {
@@ -828,7 +890,7 @@ impl Mailbox {
 
 	/// Brings the folders of these kinds up to date, as after sending or saving a draft.
 	fn sync_kinds(self: &Rc<Self>, kinds: &[FolderKind]) {
-		let ids: Vec<FolderId> = self.folders.borrow().iter().filter(|(f, _)| kinds.contains(&f.kind)).map(|(f, _)| f.id.clone()).collect();
+		let ids: Vec<FolderId> = self.folders.borrow().iter().filter(|r| kinds.contains(&r.folder.kind)).map(|r| r.folder.id.clone()).collect();
 		for id in ids {
 			self.sync_folder(&id);
 		}
@@ -881,7 +943,7 @@ impl Mailbox {
 		let (Some(cache), Some(mut folder)) = (self.ctx.cache(), self.current.borrow().clone()) else { return };
 		// A conversation found by search opens in the folder of its match.
 		let found = self.searching.borrow().as_ref().and_then(|s| s.folders.get(&row.key).cloned());
-		if let Some(f) = found.and_then(|id| self.folders.borrow().iter().find(|(f, _)| f.id == id).map(|(f, _)| f.clone())) {
+		if let Some(f) = found.and_then(|id| self.folders.borrow().iter().find(|r| r.folder.id == id).map(|r| r.folder.clone())) {
 			folder = f;
 		}
 		let mut mails = cache.thread(&row.key, &folder.id).unwrap_or_default();
@@ -1068,7 +1130,7 @@ impl Mailbox {
 		if ids.is_empty() {
 			return;
 		}
-		let trash = self.folders.borrow().iter().find(|(f, _)| f.kind == FolderKind::Trash).map(|(f, _)| f.id.clone());
+		let trash = self.folders.borrow().iter().find(|r| r.folder.kind == FolderKind::Trash).map(|r| r.folder.id.clone());
 		for id in &ids {
 			let _ = match &trash {
 				Some(t) => cache.move_to(id, t),
@@ -1100,7 +1162,7 @@ impl Mailbox {
 
 	/// For the screenshot scenes: opens the first folder of a kind.
 	pub fn select_folder(&self, kind: FolderKind) {
-		let index = self.folders.borrow().iter().position(|(f, _)| f.kind == kind);
+		let index = self.folders.borrow().iter().position(|r| r.folder.kind == kind);
 		if let Some(row) = index.and_then(|i| self.folder_list.row_at_index(i as i32)) {
 			self.folder_list.select_row(Some(&row));
 		}
@@ -1182,26 +1244,11 @@ fn folders_drag(w: i32, last: u32) -> (u32, bool) {
 	}
 }
 
-/// A folder's row as a line (icon, name, count) or, on the rail, the icon over its count.
-fn set_rail_row(row: &gtk::Box, rail: bool) {
-	let (Some(icon), Some(name), Some(count)) = (row.first_child(), row.first_child().and_then(|w| w.next_sibling()), row.last_child()) else { return };
-	row.set_orientation(if rail { gtk::Orientation::Vertical } else { gtk::Orientation::Horizontal });
-	row.set_spacing(if rail { 2 } else { 12 });
-	name.set_visible(!rail);
-	icon.set_halign(if rail { gtk::Align::Center } else { gtk::Align::Fill });
-	count.set_halign(if rail { gtk::Align::Center } else { gtk::Align::Fill });
-}
-
 /// How many conversations at the start and at the end of the list stay where they are, by key.
 fn unchanged_ends<K: PartialEq>(old: &[K], new: &[K]) -> (usize, usize) {
 	let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
 	let tail = old[head..].iter().rev().zip(new[head..].iter().rev()).take_while(|(a, b)| a == b).count();
 	(head, tail)
-}
-
-fn set_count(label: &gtk::Label, unread: u32) {
-	label.set_label(&unread.to_string());
-	label.set_visible(unread > 0);
 }
 
 fn unread_subtitle(unread: u32) -> String {
