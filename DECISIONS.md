@@ -78,3 +78,8 @@ attachments must work, KISS, fast, Rust. These are the calls I made, in the orde
   - Each has a scene in `make test-ui` that fails with the old code (checked by putting each bug back).
   - Checked and fine: the composer keeps itself alive until its window is destroyed; Mailbox and Reader are
     owned by the window; mail, page and reader loads already ignore stale results.
+- **Mail to recipients outside Tuta failed with 500.** Found by comparing requests with app.tuta.com: the
+  vendored SDK sent encrypted fields holding a default value (`bodyText` "", `method` 0, `confidential`
+  false) as empty strings, where the web client encrypts them. The server decrypts drafts itself only for
+  outside recipients, so only those sends broke. The SDK now always encrypts (see PATCHES.md). Sends also
+  allow undo now, as the web app does by default: the server sends a few seconds later.

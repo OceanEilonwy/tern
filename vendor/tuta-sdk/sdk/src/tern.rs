@@ -1107,8 +1107,8 @@ fn send_draft_data(random: &RandomizerFacade, mail: IdTupleGenerated, keys: Send
 		calendarMethod: false,
 		sessionEncEncryptionAuthStatus: keys.session_enc_auth_status.clone(),
 		sendAt: None,
-		// Tuta's own apps send with undo allowed (their default); the server queues the mail and sends
-		// it on its own after a few seconds. Sending with undo off answered 500 for any recipient outside Tuta.
+		// As Tuta's own apps send by default: the server queues the mail and sends it on its own
+		// after a few seconds.
 		allowUndo: true,
 		internalRecipientKeyData: recipients(&keys),
 		secureExternalRecipientKeyData: vec![],
@@ -1250,7 +1250,8 @@ mod tests {
 				bodyText: String::new(),
 				senderMailAddress: "me@tuta.com".into(),
 				senderName: "Me".into(),
-				confidential: true,
+				// As for a recipient outside Tuta.
+				confidential: false,
 				method: 0,
 				compressedBodyText: Some("<div>Hi</div>".into()),
 				toRecipients: vec![DraftRecipient {
@@ -1298,6 +1299,10 @@ mod tests {
 		let data = first(field(&encrypted, DraftCreateData::type_ref(), "draftData"));
 		assert_eq!(decrypt(&mail_key, field(&data, DraftData::type_ref(), "subject")).unwrap(), b"Hello");
 		assert!(decrypt(&mail_key, field(&data, DraftData::type_ref(), "compressedBodyText")).is_ok());
+		// The server decrypts these itself for recipients outside Tuta; empty strings there got a 500.
+		assert_eq!(decrypt(&mail_key, field(&data, DraftData::type_ref(), "bodyText")).unwrap(), b"");
+		assert_eq!(decrypt(&mail_key, field(&data, DraftData::type_ref(), "method")).unwrap(), b"0");
+		assert_eq!(decrypt(&mail_key, field(&data, DraftData::type_ref(), "confidential")).unwrap(), b"0");
 		assert_eq!(field(&data, DraftData::type_ref(), "senderMailAddress").assert_string(), "me@tuta.com");
 		let to = first(field(&data, DraftData::type_ref(), "toRecipients"));
 		assert_eq!(decrypt(&mail_key, field(&to, DraftRecipient::type_ref(), "name")).unwrap(), b"Ann");
@@ -1358,7 +1363,7 @@ mod tests {
 				}],
 			},
 		));
-		let outside = send_draft_data(
+		serializes!(send_draft_data(
 			&random,
 			mail,
 			SendKeys {
@@ -1368,10 +1373,7 @@ mod tests {
 				recipients: vec![],
 				attachments: vec![],
 			},
-		);
-		// Tuta's server answers 500 to mail for outside recipients sent with undo off.
-		assert!(outside.allowUndo);
-		serializes!(outside);
+		));
 	}
 
 	#[test]
