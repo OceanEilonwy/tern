@@ -25,3 +25,7 @@ tag, never to master. GPL-3.0.
   files loaded several per request. Key pairs are kept per group and version instead of loading the
   Group for every bucket key; archive read tokens are kept until they expire and evicted on 403, as
   `BlobAccessTokenFacade` does. 429, and 503 with a suspension time, become `TernError::RateLimited`.
+- `sdk/src/mail_facade.rs`: `move_mails` (MoveMailService, to any mail set by id) and `apply_label`
+  (ApplyLabelService), in batches of `MAX_MAIL_UPDATE_LIMIT` like the simple move beside them;
+  `tern.rs` exposes both.
+- `sdk/src/folder_system.rs`: `MailSetKind::Label` (8), so labels are told apart from unknown sets.
