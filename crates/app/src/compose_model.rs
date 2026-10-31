@@ -1,6 +1,6 @@
 //! What the composer does that needs no GTK: subjects, quoting, recipients and building the draft.
 
-use tern_core::{parse_addresses, text_to_html, Address, Draft, Mail, MailId, NewAttachment, ReplyKind};
+use tern_core::{parse_addresses, text_to_html, Address, Attachment, Draft, Mail, MailId, NewAttachment, ReplyKind};
 
 /// Tuta refuses mails much bigger than this.
 pub const MAX_TOTAL_BYTES: u64 = 25 * 1024 * 1024;
@@ -22,6 +22,10 @@ pub struct Fields {
 	pub body: String,
 	pub attachments: Vec<NewAttachment>,
 	pub previous: Option<(MailId, ReplyKind)>,
+	/// The saved draft these fields continue.
+	pub existing: Option<MailId>,
+	/// Attachments already on `existing`.
+	pub kept: Vec<Attachment>,
 }
 
 /// Which fields hold text that is not an address, and that text.
@@ -51,10 +55,34 @@ impl Fields {
 			&& self.subject.trim().is_empty()
 			&& self.body.trim().is_empty()
 			&& self.attachments.is_empty()
+			&& self.kept.is_empty()
 	}
 
 	pub fn total_size(&self) -> u64 {
-		self.attachments.iter().map(|a| a.data.len() as u64).sum()
+		self.attachments.iter().map(|a| a.data.len() as u64).sum::<u64>() + self.kept.iter().map(|a| a.size).sum::<u64>()
+	}
+
+	/// The draft to save: like [`Fields::build_draft`], but recipients may be missing, and text in
+	/// the address fields that is not an address is left out.
+	pub fn saved_draft(&self) -> Draft {
+		let valid = |text: &str| -> Vec<Address> {
+			text.split([',', ';']).filter_map(|part| parse_addresses(part).ok()).flatten().collect()
+		};
+		Draft { to: valid(&self.to), cc: valid(&self.cc), bcc: valid(&self.bcc), ..self.draft_with(Vec::new(), Vec::new(), Vec::new()) }
+	}
+
+	fn draft_with(&self, to: Vec<Address>, cc: Vec<Address>, bcc: Vec<Address>) -> Draft {
+		Draft {
+			to,
+			cc,
+			bcc,
+			subject: self.subject.trim().to_string(),
+			body_html: text_to_html(&self.body),
+			attachments: self.attachments.clone(),
+			previous: self.previous.clone(),
+			existing: self.existing.clone(),
+			kept: self.kept.clone(),
+		}
 	}
 
 	/// The draft to send, or which recipients are wrong.
@@ -78,15 +106,7 @@ impl Fields {
 		if to.is_empty() && cc.is_empty() && bcc.is_empty() {
 			return Err(Invalid { no_recipients: true, ..Default::default() });
 		}
-		Ok(Draft {
-			to,
-			cc,
-			bcc,
-			subject: self.subject.trim().to_string(),
-			body_html: text_to_html(&self.body),
-			attachments: self.attachments.clone(),
-			previous: self.previous.clone(),
-		})
+		Ok(self.draft_with(to, cc, bcc))
 	}
 }
 
@@ -220,9 +240,11 @@ mod tests {
 				has_attachments: false,
 				to: None,
 				outgoing: false,
+				draft: false,
 			},
 			to: vec![Address::new("You", "you@tuta.com"), Address::new("", "sam@x.org")],
 			cc: vec![Address::new("Ann", "ann@x.org"), Address::new("", "MIA@tuta.com")],
+			bcc: vec![],
 			reply_to: vec![],
 			body_html: String::new(),
 			attachments: vec![],

@@ -6,6 +6,8 @@ use async_trait::async_trait;
 
 use crate::{Account, Address, Attachment, Backend, Draft, Error, Folder, FolderId, FolderKind, Mail, MailId, MailPage, MailSummary, Result};
 
+const ME: (&str, &str) = ("You", "you@tuta.com");
+
 pub const DEMO_LOGIN: &str = "demo";
 
 struct Stored {
@@ -64,6 +66,7 @@ impl DemoBackend {
 				has_attachments: !files.is_empty(),
 				outgoing: from.address == me.address,
 				to: Some(me.clone()),
+				draft: false,
 			};
 			let (attachments, data): (Vec<_>, Vec<_>) = files.into_iter().unzip();
 			mails.push(Stored {
@@ -72,6 +75,7 @@ impl DemoBackend {
 					summary,
 					to: vec![me.clone()],
 					cc: vec![],
+					bcc: vec![],
 					reply_to: vec![],
 					body_html: body.into(),
 					attachments,
@@ -140,6 +144,54 @@ impl DemoBackend {
 		Self { mails: Mutex::new(mails) }
 	}
 
+	/// Files `draft` in `folder` as a new mail, replacing the draft it was saved over.
+	fn store(&self, draft: Draft, folder: FolderKind) -> MailId {
+		let mut mails = self.mails.lock().unwrap();
+		let mut files: Vec<(Attachment, Vec<u8>)> = Vec::new();
+		if let Some(existing) = &draft.existing {
+			if let Some(pos) = mails.iter().position(|m| &m.mail.summary.id == existing) {
+				let old = mails.remove(pos);
+				for (att, data) in old.mail.attachments.into_iter().zip(old.files) {
+					if draft.kept.iter().any(|k| k.id == att.id) {
+						files.push((att, data));
+					}
+				}
+			}
+		}
+		let n = mails.iter().filter_map(|m| m.mail.summary.id.element.strip_prefix('m')?.parse::<usize>().ok()).max().unwrap_or(0) + 1;
+		let id = MailId { list: "demo".into(), element: format!("m{n:03}") };
+		for (i, a) in draft.attachments.iter().enumerate() {
+			files.push((Attachment { id: format!("s{n}-{i}"), name: a.name.clone(), mime: a.mime.clone(), size: a.data.len() as u64, cid: None }, a.data.clone()));
+		}
+		let received_ms = mails.iter().map(|m| m.mail.summary.received_ms).max().unwrap_or(0) + 60_000;
+		let (attachments, data): (Vec<_>, Vec<_>) = files.into_iter().unzip();
+		mails.push(Stored {
+			folder,
+			mail: Mail {
+				summary: MailSummary {
+					id: id.clone(),
+					from: Address::new(ME.0, ME.1),
+					subject: draft.subject,
+					received_ms,
+					unread: false,
+					has_attachments: !attachments.is_empty(),
+					to: draft.to.first().or(draft.cc.first()).or(draft.bcc.first()).cloned(),
+					outgoing: true,
+					draft: folder == FolderKind::Drafts,
+				},
+				to: draft.to,
+				cc: draft.cc,
+				bcc: draft.bcc,
+				reply_to: vec![],
+				body_html: draft.body_html,
+				attachments,
+				web_url: format!("https://app.tuta.com/mail/demo/{}", id.element),
+			},
+			files: data,
+		});
+		id
+	}
+
 	fn find<T>(&self, id: &MailId, f: impl FnOnce(&mut Stored) -> T) -> Result<T> {
 		let mut mails = self.mails.lock().unwrap();
 		mails.iter_mut().find(|m| &m.mail.summary.id == id).map(f).ok_or_else(|| Error::Other("Mail not found".into()))
@@ -149,7 +201,7 @@ impl DemoBackend {
 #[async_trait]
 impl Backend for DemoBackend {
 	fn account(&self) -> Account {
-		Account { address: "you@tuta.com".into(), name: "You".into() }
+		Account { address: ME.1.into(), name: ME.0.into() }
 	}
 
 	async fn folders(&self) -> Result<Vec<Folder>> {
@@ -195,39 +247,16 @@ impl Backend for DemoBackend {
 		if !missing.is_empty() {
 			return Err(Error::RecipientsNotFound(missing));
 		}
-		let mut mails = self.mails.lock().unwrap();
-		let n = mails.len() + 1;
-		let id = MailId { list: "demo".into(), element: format!("m{n:03}") };
-		let attachments = draft
-			.attachments
-			.iter()
-			.enumerate()
-			.map(|(i, a)| Attachment { id: format!("s{n}-{i}"), name: a.name.clone(), mime: a.mime.clone(), size: a.data.len() as u64, cid: None })
-			.collect();
-		let received_ms = mails.iter().map(|m| m.mail.summary.received_ms).max().unwrap_or(0) + 60_000;
-		mails.push(Stored {
-			folder: FolderKind::Sent,
-			mail: Mail {
-				summary: MailSummary {
-					id: id.clone(),
-					from: Address::new("You", "you@tuta.com"),
-					subject: draft.subject,
-					received_ms,
-					unread: false,
-					has_attachments: !draft.attachments.is_empty(),
-					to: draft.to.first().or(draft.cc.first()).or(draft.bcc.first()).cloned(),
-					outgoing: true,
-				},
-				to: draft.to,
-				cc: draft.cc,
-				reply_to: vec![],
-				body_html: draft.body_html,
-				attachments,
-				web_url: format!("https://app.tuta.com/mail/demo/{}", id.element),
-			},
-			files: draft.attachments.into_iter().map(|a| a.data).collect(),
-		});
+		self.store(draft, FolderKind::Sent);
 		Ok(())
+	}
+
+	async fn save_draft(&self, draft: Draft) -> Result<MailId> {
+		Ok(self.store(draft, FolderKind::Drafts))
+	}
+
+	async fn contacts(&self) -> Result<Vec<Address>> {
+		Ok(vec![Address::new("Mia Chen", "mia@tuta.com"), Address::new("Sam Okafor", "sam@example.net"), Address::new("Priya Natarajan", "priya@example.org")])
 	}
 
 	async fn set_unread(&self, id: &MailId, unread: bool) -> Result<()> {
@@ -276,6 +305,36 @@ mod tests {
 		let second = demo.list(&inbox, first.next, 3).await.unwrap();
 		assert_eq!(second.mails.len(), 1);
 		assert!(second.next.is_none());
+	}
+
+	#[tokio::test]
+	async fn a_saved_draft_is_replaced_and_keeps_chosen_attachments() {
+		let demo = DemoBackend::new();
+		let drafts = folder_id(FolderKind::Drafts);
+		let first = demo
+			.save_draft(Draft {
+				subject: "Plan".into(),
+				attachments: vec![
+					NewAttachment { name: "a.txt".into(), mime: "text/plain".into(), data: b"a".to_vec() },
+					NewAttachment { name: "b.txt".into(), mime: "text/plain".into(), data: b"b".to_vec() },
+				],
+				..Default::default()
+			})
+			.await
+			.unwrap();
+		let saved = demo.open(&first).await.unwrap();
+		assert!(saved.summary.draft);
+		let kept = vec![saved.attachments[1].clone()];
+		let second = demo.save_draft(Draft { subject: "Plan v2".into(), existing: Some(first.clone()), kept, ..Default::default() }).await.unwrap();
+		let page = demo.list(&drafts, None, 10).await.unwrap();
+		assert_eq!(page.mails.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), ["Plan v2"]);
+		let reopened = demo.open(&second).await.unwrap();
+		assert_eq!(reopened.attachments.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["b.txt"]);
+		assert_eq!(demo.attachment(&second, &reopened.attachments[0]).await.unwrap(), b"b");
+
+		// Sending it moves it out of Drafts.
+		demo.send(Draft { to: vec![Address::new("", "mia@tuta.com")], subject: "Plan v2".into(), existing: Some(second), ..Default::default() }).await.unwrap();
+		assert!(demo.list(&drafts, None, 10).await.unwrap().mails.is_empty());
 	}
 
 	#[tokio::test]

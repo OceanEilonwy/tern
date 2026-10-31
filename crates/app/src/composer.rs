@@ -232,6 +232,7 @@ impl Composer {
 			body: buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).into(),
 			attachments: self.attachments.borrow().clone(),
 			previous: self.previous.clone(),
+			..Default::default()
 		}
 	}
 

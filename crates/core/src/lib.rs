@@ -6,19 +6,20 @@
 pub mod demo;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 /// A mail, by the list it lives in and its own id.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MailId {
 	pub list: String,
 	pub element: String,
 }
 
 /// A folder, opaque to the UI.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FolderId(pub String);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FolderKind {
 	Inbox,
 	Drafts,
@@ -29,7 +30,7 @@ pub enum FolderKind {
 	Custom,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Folder {
 	pub id: FolderId,
 	pub name: String,
@@ -37,7 +38,7 @@ pub struct Folder {
 	pub unread: u32,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Address {
 	pub name: String,
 	pub address: String,
@@ -59,7 +60,7 @@ impl Address {
 }
 
 /// One row of a mail list.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailSummary {
 	pub id: MailId,
 	pub from: Address,
@@ -72,6 +73,9 @@ pub struct MailSummary {
 	pub to: Option<Address>,
 	/// Sent by this account (Sent, Drafts, or a copy to yourself).
 	pub outgoing: bool,
+	/// Not sent yet: opening it continues writing it.
+	#[serde(default)]
+	pub draft: bool,
 }
 
 /// A page of a folder, newest first. Pass `next` back to [`Backend::list`] for the page after.
@@ -81,7 +85,7 @@ pub struct MailPage {
 	pub next: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
 	/// Opaque to the UI; the backend reads it back in [`Backend::attachment`].
 	pub id: String,
@@ -93,11 +97,14 @@ pub struct Attachment {
 }
 
 /// A mail opened for reading.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mail {
 	pub summary: MailSummary,
 	pub to: Vec<Address>,
 	pub cc: Vec<Address>,
+	/// Only known for mail this account wrote.
+	#[serde(default)]
+	pub bcc: Vec<Address>,
 	pub reply_to: Vec<Address>,
 	/// The body as the sender wrote it: HTML, unsanitized. The UI renders only a safe subset.
 	pub body_html: String,
@@ -113,7 +120,7 @@ pub struct NewAttachment {
 	pub data: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplyKind {
 	#[default]
 	New,
@@ -131,8 +138,13 @@ pub struct Draft {
 	/// HTML body. The composer builds it from plain text with [`text_to_html`].
 	pub body_html: String,
 	pub attachments: Vec<NewAttachment>,
-	/// The mail this answers or forwards, if any.
+	/// The mail this answers or forwards, if any. Ignored when `existing` is set: a saved draft
+	/// keeps what it answers.
 	pub previous: Option<(MailId, ReplyKind)>,
+	/// The saved draft this replaces.
+	pub existing: Option<MailId>,
+	/// Attachments of `existing` that stay on the draft; the others are removed.
+	pub kept: Vec<Attachment>,
 }
 
 /// The signed-in account.
@@ -167,7 +179,12 @@ pub trait Backend: Send + Sync {
 	async fn list(&self, folder: &FolderId, next: Option<String>, count: usize) -> Result<MailPage>;
 	async fn open(&self, id: &MailId) -> Result<Mail>;
 	async fn attachment(&self, mail: &MailId, attachment: &Attachment) -> Result<Vec<u8>>;
+	/// Sends `draft`, after saving it over `draft.existing` if set.
 	async fn send(&self, draft: Draft) -> Result<()>;
+	/// Saves `draft` to Drafts, over `draft.existing` if set, and returns where it is now.
+	async fn save_draft(&self, draft: Draft) -> Result<MailId>;
+	/// The account's contacts that have an email address.
+	async fn contacts(&self) -> Result<Vec<Address>>;
 	async fn set_unread(&self, id: &MailId, unread: bool) -> Result<()>;
 	async fn trash(&self, id: &MailId) -> Result<()>;
 	/// Forget the session on the server too.
@@ -192,6 +209,32 @@ pub fn text_to_html(text: &str) -> String {
 		}
 	}
 	format!("<div>{html}</div>")
+}
+
+/// The key mails of one conversation share: the subject without "Re:", "Fwd:" and the like, in
+/// lower case with spaces collapsed. Mails without a subject have none and stand alone.
+pub fn thread_key(subject: &str) -> Option<String> {
+	const PREFIXES: [&str; 10] = ["re", "fwd", "fw", "aw", "wg", "sv", "vs", "antw", "tr", "rv"];
+	let mut rest = subject.trim();
+	loop {
+		let lower = rest.to_lowercase();
+		// "Re:", "RE[2]:", "Fwd :" …
+		let stripped = PREFIXES.iter().find_map(|p| {
+			let after = lower.strip_prefix(p)?;
+			let after = after.trim_start();
+			let after = match after.strip_prefix('[') {
+				Some(a) => a.split_once(']')?.1.trim_start(),
+				None => after,
+			};
+			after.strip_prefix(':').map(|a| lower.len() - a.len())
+		});
+		match stripped {
+			Some(cut) => rest = rest[cut..].trim_start(),
+			None => break,
+		}
+	}
+	let key = rest.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+	(!key.is_empty()).then_some(key)
 }
 
 /// Splits `"Ann <ann@x.org>, bob@y.org"` into addresses. Returns the parts that are not addresses as the error.
@@ -267,6 +310,15 @@ mod tests {
 		let parsed = parse_addresses("\"Ann Lee\" <Ann@X.org>; bob@y.org,").unwrap();
 		assert_eq!(parsed, vec![Address::new("Ann Lee", "ann@x.org"), Address::new("", "bob@y.org")]);
 		assert_eq!(parse_addresses("bob@y.org, nope, a@b").unwrap_err(), vec!["nope".to_string(), "a@b".to_string()]);
+	}
+
+	#[test]
+	fn thread_key_ignores_reply_prefixes() {
+		assert_eq!(thread_key("Re: RE[2]: Fwd:  Lunch   on Friday?"), Some("lunch on friday?".into()));
+		assert_eq!(thread_key("AW: Termin"), thread_key("termin"));
+		assert_eq!(thread_key("Rebate offer"), Some("rebate offer".into()));
+		assert_eq!(thread_key("Re:"), None);
+		assert_eq!(thread_key("  "), None);
 	}
 
 	#[test]

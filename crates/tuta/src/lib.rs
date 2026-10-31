@@ -252,8 +252,12 @@ fn summary(mail: &TutaMail, me: &str) -> Option<MailSummary> {
 		received_ms: mail.receivedDate.as_millis() as i64,
 		unread: mail.unread,
 		has_attachments: !mail.attachments.is_empty(),
+		draft: mail.state == MAIL_STATE_DRAFT,
 	})
 }
+
+/// `Mail.state` of a mail not sent yet (MailState.DRAFT in the TypeScript client).
+const MAIL_STATE_DRAFT: i64 = 0;
 
 #[async_trait]
 impl Backend for TutaBackend {
@@ -288,6 +292,7 @@ impl Backend for TutaBackend {
 					has_attachments: false,
 					to: None,
 					outgoing: false,
+					draft: false,
 				}),
 			})
 			.collect();
@@ -305,6 +310,7 @@ impl Backend for TutaBackend {
 			summary: summary(&opened.mail, &self.account.mail_address).ok_or_else(|| Error::Other("mail has no id".into()))?,
 			to: opened.details.recipients.toRecipients.iter().map(address).collect(),
 			cc: opened.details.recipients.ccRecipients.iter().map(address).collect(),
+			bcc: opened.details.recipients.bccRecipients.iter().map(address).collect(),
 			reply_to: opened.details.replyTos.iter().map(|a| Address::new(a.name.clone(), a.address.clone())).collect(),
 			body_html,
 			attachments: opened
@@ -350,6 +356,14 @@ impl Backend for TutaBackend {
 		};
 		let (mail, account) = (self.mail.clone(), self.account.clone());
 		guarded(async move { mail.send(&account, outgoing).await.map(|_| ()).map_err(to_error) }).await
+	}
+
+	async fn save_draft(&self, _draft: Draft) -> Result<MailId> {
+		Err(Error::Other("Saving drafts is not supported yet".into()))
+	}
+
+	async fn contacts(&self) -> Result<Vec<Address>> {
+		Ok(Vec::new())
 	}
 
 	async fn set_unread(&self, id: &MailId, unread: bool) -> Result<()> {

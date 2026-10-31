@@ -258,6 +258,12 @@ impl Backend for Staged {
 	async fn send(&self, draft: tern_core::Draft) -> tern_core::Result<()> {
 		self.demo.send(draft).await
 	}
+	async fn save_draft(&self, draft: tern_core::Draft) -> tern_core::Result<tern_core::MailId> {
+		self.demo.save_draft(draft).await
+	}
+	async fn contacts(&self) -> tern_core::Result<Vec<tern_core::Address>> {
+		self.demo.contacts().await
+	}
 	async fn set_unread(&self, id: &tern_core::MailId, unread: bool) -> tern_core::Result<()> {
 		self.demo.set_unread(id, unread).await
 	}
