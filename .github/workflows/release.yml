@@ -29,10 +29,10 @@ jobs:
     steps:
       - name: Install git
         run: xbps-install -Syu xbps && xbps-install -Sy git bash
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Build on Void
         run: packaging/linux/build-on-void.sh "${VERSION#v}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tarball
           path: dist/*.tar.gz
@@ -43,14 +43,15 @@ jobs:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
       options: --privileged
     steps:
-      - uses: actions/checkout@v5
-      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@v6
+      - uses: actions/checkout@v7
+      # The action has no release tags, so it is pinned to a commit.
+      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@933e9e8ca36e85046ebca8e211f0785c6becac40
         with:
           bundle: tern-${{ env.VERSION }}-x86_64.flatpak
           manifest-path: packaging/flatpak/xyz.hollingworth.Tern.yml
           cache-key: flatpak-builder-${{ github.sha }}
           upload-artifact: false
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: flatpak
           path: tern-*.flatpak
@@ -61,7 +62,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
