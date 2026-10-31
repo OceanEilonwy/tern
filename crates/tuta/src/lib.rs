@@ -236,6 +236,7 @@ struct TutaBackend {
 impl TutaBackend {
 	async fn new(mail: TernMail, login: &str) -> Result<Self> {
 		let account = mail.account(login).await.map_err(to_error)?;
+		trace(&format!("account has {} other addresses", account.aliases.len()));
 		trace("account loaded");
 		Ok(Self { mail: Arc::new(mail), account: Arc::new(account), sets: Mutex::default() })
 	}

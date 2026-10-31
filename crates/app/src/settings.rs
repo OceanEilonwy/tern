@@ -16,6 +16,8 @@ pub struct Settings {
 	pub list_width: u32,
 	/// Search finds mail by meaning too, with a model downloaded once.
 	pub semantic: bool,
+	/// Signing out deletes the mail kept on this computer, and its key; off keeps it for the next sign-in.
+	pub forget_on_sign_out: bool,
 }
 
 pub fn dir() -> PathBuf {
@@ -51,6 +53,7 @@ impl Settings {
 			folders_rail: table.get("folders_rail").and_then(|v| v.as_bool()).unwrap_or(false),
 			list_width: width("list_width"),
 			semantic: table.get("semantic").and_then(|v| v.as_bool()).unwrap_or(false),
+			forget_on_sign_out: table.get("forget_on_sign_out").and_then(|v| v.as_bool()).unwrap_or(false),
 		}
 	}
 
@@ -68,12 +71,13 @@ impl Settings {
 
 	fn to_toml(self) -> String {
 		format!(
-			"offline = \"{}\"\nfolders_width = {}\nfolders_rail = {}\nlist_width = {}\nsemantic = {}\n",
+			"offline = \"{}\"\nfolders_width = {}\nfolders_rail = {}\nlist_width = {}\nsemantic = {}\nforget_on_sign_out = {}\n",
 			self.offline.name(),
 			self.folders_width,
 			self.folders_rail,
 			self.list_width,
-			self.semantic
+			self.semantic,
+			self.forget_on_sign_out
 		)
 	}
 
@@ -92,10 +96,11 @@ mod tests {
 
 	#[test]
 	fn settings_round_trip_and_bad_values_fall_back() {
-		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480, semantic: true };
+		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480, semantic: true, forget_on_sign_out: true };
 		assert_eq!(Settings::parse(&s.to_toml()), s);
-		assert_eq!(s.to_toml(), "offline = \"high\"\nfolders_width = 240\nfolders_rail = true\nlist_width = 480\nsemantic = true\n");
+		assert_eq!(s.to_toml(), "offline = \"high\"\nfolders_width = 240\nfolders_rail = true\nlist_width = 480\nsemantic = true\nforget_on_sign_out = true\n");
 		assert_eq!(Settings::parse("not = [toml"), Settings::default());
+		assert!(!Settings::parse("").forget_on_sign_out, "signing out keeps the mail unless asked");
 		assert_eq!(Settings::parse("offline = \"huge\""), Settings::default());
 		// One bad value leaves the others.
 		assert_eq!(Settings::parse("offline = \"low\"\nfolders_width = -5\nlist_width = \"wide\""), Settings { offline: Level::Low, ..Settings::default() });
@@ -103,7 +108,7 @@ mod tests {
 
 	#[test]
 	fn old_json_settings_carry_over() {
-		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480, semantic: false };
+		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480, semantic: false, forget_on_sign_out: false };
 		assert_eq!(Settings::from_json(br#"{"offline":"high","folders_width":240,"folders_rail":true,"list_width":480}"#), s);
 		assert_eq!(Settings::from_json(br#"{"offline":"low"}"#), Settings { offline: Level::Low, ..Settings::default() });
 		assert_eq!(Settings::from_json(b"not json"), Settings::default());

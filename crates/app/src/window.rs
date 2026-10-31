@@ -299,7 +299,7 @@ impl Window {
 		});
 	}
 
-	/// Ends the session and forgets the account's mail on this computer.
+	/// Ends the session; forgets the account's mail on this computer too when the setting says so.
 	fn sign_out(self: &Rc<Self>) {
 		let Some(backend) = self.ctx.backend.borrow_mut().take() else { return };
 		let cache = self.ctx.cache.borrow_mut().take();
@@ -307,6 +307,7 @@ impl Window {
 			fetcher.stop();
 		}
 		let email = backend.account().address;
+		let forget = self.ctx.settings().forget_on_sign_out;
 		self.mailbox.clear();
 		self.show_login(Some(&email));
 		runtime::spawn_local(async move {
@@ -314,6 +315,10 @@ impl Window {
 				let _ = backend.sign_out().await;
 				keyring::forget().await;
 				drop(cache);
+				// Kept unless asked otherwise, so signing in again opens with the mail already here.
+				if !forget {
+					return;
+				}
 				let path = cache_path(&email);
 				for suffix in ["", "-wal", "-shm"] {
 					let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
@@ -343,13 +348,25 @@ pub fn preferences_dialog(ctx: &Ctx) -> (adw::PreferencesDialog, Rc<rule_editor:
 	let model = gtk::StringList::new(&labels.iter().map(String::as_str).collect::<Vec<_>>());
 	let row = adw::ComboRow::builder().title("Keep Ready").model(&model).build();
 	row.set_selected(Level::ALL.iter().position(|l| *l == ctx.settings().offline).unwrap_or(1) as u32);
-	let ctx = ctx.clone();
-	row.connect_selected_notify(move |row| {
-		if let Some(level) = Level::ALL.get(row.selected() as usize) {
-			ctx.set_settings(Settings { offline: *level, ..ctx.settings() });
+	row.connect_selected_notify({
+		let ctx = ctx.clone();
+		move |row| {
+			if let Some(level) = Level::ALL.get(row.selected() as usize) {
+				ctx.set_settings(Settings { offline: *level, ..ctx.settings() });
+			}
 		}
 	});
 	group.add(&row);
+	let forget = adw::SwitchRow::builder()
+		.title("Forget Mail on Sign Out")
+		.subtitle("Deletes the mail kept on this computer when you sign out. Signing in again downloads it afresh.")
+		.active(ctx.settings().forget_on_sign_out)
+		.build();
+	forget.connect_active_notify({
+		let ctx = ctx.clone();
+		move |row| ctx.set_settings(Settings { forget_on_sign_out: row.is_active(), ..ctx.settings() })
+	});
+	group.add(&forget);
 	page.add(&group);
 	page.add(&search);
 	page.add(&rules.group);

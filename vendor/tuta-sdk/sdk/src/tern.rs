@@ -426,12 +426,14 @@ impl TernMail {
 			.iter()
 			.find(|m| m.group_type() == GroupType::Mail)
 			.ok_or_else(|| TernError::Other("this account has no mailbox".into()))?;
-		let group_info: Option<GroupInfo> = self
-			.sdk
-			.crypto_entity_client
-			.load(&membership.groupInfo)
-			.await
-			.ok();
+		// A personal mailbox keeps its addresses on the user's GroupInfo, as the SDK's
+		// `get_group_id_for_mail_address` reads them; the mail group's GroupInfo has no aliases.
+		// A shared mailbox (a group with no user) keeps them on its own.
+		let group: Option<crate::entities::generated::sys::Group> =
+			self.sdk.crypto_entity_client.load(&membership.group).await.ok();
+		let personal = group.is_some_and(|g| g.user.is_some() && g.user == user._id);
+		let info_id = if personal { &user.userGroup.groupInfo } else { &membership.groupInfo };
+		let group_info: Option<GroupInfo> = self.sdk.crypto_entity_client.load(info_id).await.ok();
 		Ok(TernAccount {
 			mail_address: group_info
 				.as_ref()

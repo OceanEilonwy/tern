@@ -423,3 +423,14 @@ Built from the approved mockups (rule editor A; the quoting design with its four
     Mail") as the short one is not in the mail.
   - **Anything else** (a draft written in Tuta's own app, or edited there) opens as text, as
     before; quotes kept here are not shown over it, so nothing shows twice.
+
+## Aliases and sign-out (2026-10-31)
+
+- **Aliases come from the user's GroupInfo** for a personal mailbox, as the SDK's own
+  `get_group_id_for_mail_address` reads them. The mail group's GroupInfo carries no aliases, so the
+  From row never showed. A shared mailbox (a group with no user) keeps them on its own GroupInfo.
+  `TERN_LOG=1` prints how many other addresses the account has.
+- **Signing out keeps the mail on this computer** by default, so signing in again opens with it
+  already there. Preferences → Offline Mail → "Forget Mail on Sign Out" brings back the old
+  behaviour: the database and its keyring key are deleted. The cache stays encrypted either way; the
+  saved session is always deleted.
