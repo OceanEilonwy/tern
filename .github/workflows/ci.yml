@@ -21,7 +21,7 @@ jobs:
             cantarell-fonts noto-fonts adwaita-icon-theme mutter
           rustup default stable
           rustup component add clippy
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
       # Clippy is off for the vendored Tuta SDK (see Cargo.toml); this checks Tern's own crates.
       - name: Clippy
