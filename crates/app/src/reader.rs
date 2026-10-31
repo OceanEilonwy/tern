@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::glib;
+use tern_cache::policy::Want;
 use tern_cache::ThreadMail;
 use tern_core::{Address, FolderId, FolderKind, Mail, MailId, MailSummary};
 
@@ -221,6 +222,10 @@ impl Reader {
 		self.page.set_title(&subject);
 		self.subject.set_label(&subject);
 
+		// The focused mail first and alone, so it shows soon; the rest of the conversation behind it.
+		if let Some(fetcher) = self.ctx.fetcher() {
+			fetcher.want(Want::Reading { thread: mails.iter().map(|m| m.summary.id.clone()).collect(), focus: focus.clone() });
+		}
 		let mut focus_card = None;
 		for m in &mails {
 			let card = self.card(&m.summary, m.folder);
@@ -415,9 +420,9 @@ impl Reader {
 		});
 	}
 
-	/// Opens a card's mail from the cache, or from the server and stores it.
+	/// Opens a card's mail from the cache, or waits for the fetcher to bring it.
 	fn load(self: &Rc<Self>, card: &Rc<Card>) {
-		let (Some(cache), Some(backend)) = (self.ctx.cache(), self.ctx.backend()) else { return };
+		let Some(fetcher) = self.ctx.fetcher() else { return };
 		let generation = card.generation.get() + 1;
 		card.generation.set(generation);
 		card.body.set_visible(false);
@@ -434,14 +439,7 @@ impl Reader {
 		let (weak, c) = (Rc::downgrade(self), Rc::downgrade(card));
 		runtime::spawn_local(async move {
 			let result = runtime::run(async move {
-				let mail = match cache.mail(&id).ok().flatten() {
-					Some(mail) => mail,
-					None => {
-						let mail = backend.open(&id).await?;
-						let _ = cache.put_mail(&mail);
-						mail
-					},
-				};
+				let mail = fetcher.mail(&id).await?;
 				let doc = Doc::parse(&mail.body_html);
 				Ok::<_, tern_core::Error>(Opened { mail, doc })
 			})

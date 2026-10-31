@@ -5,6 +5,7 @@ mod attachments;
 mod background;
 mod compose_model;
 mod composer;
+mod fetcher;
 mod format;
 mod grip;
 mod html_doc;

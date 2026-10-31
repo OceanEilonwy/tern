@@ -1,5 +1,5 @@
 //! Keeps the cache up to date while signed in: the folder list, each folder's newest mail, contacts,
-//! then the newest mails opened ahead. A round runs at sign-in, every few minutes after, and at
+//! then the newest mails opened ahead, by the fetcher. A round runs at sign-in, every few minutes after, and at
 //! once when something asks for it (F5, a changed setting).
 
 use std::rc::Weak;
@@ -17,7 +17,7 @@ const INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Runs the sync for the account signed in now, until it signs out.
 pub fn start(ctx: &Ctx, mailbox: Weak<Mailbox>) {
-	let (Some(backend), Some(cache)) = (ctx.backend(), ctx.cache()) else { return };
+	let (Some(backend), Some(cache), Some(fetcher)) = (ctx.backend(), ctx.cache(), ctx.fetcher()) else { return };
 	let ctx = ctx.clone();
 	runtime::spawn_local(async move {
 		let signed_in = |ctx: &Ctx| ctx.backend().is_some_and(|now| Arc::ptr_eq(&now, &backend));
@@ -64,8 +64,8 @@ pub fn start(ctx: &Ctx, mailbox: Weak<Mailbox>) {
 						let (b, c) = (backend.clone(), cache.clone());
 						contacts_done = runtime::run(async move { sync::contacts(b.as_ref(), &c).await }).await.is_ok();
 					}
-					let (b, c) = (backend.clone(), cache.clone());
-					if let Err(e) = runtime::run(async move { sync::bodies(b.as_ref(), &c, level.bodies()).await }).await {
+					let f = fetcher.clone();
+					if let Err(e) = runtime::run(async move { f.ahead(level.bodies()).await }).await {
 						eprintln!("tern: could not open mail ahead: {e}");
 					}
 				},

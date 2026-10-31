@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use tern_cache::policy::Want;
 use tern_cache::{sync, ThreadMail, ThreadRow};
 use tern_core::{Folder, FolderId, FolderKind, MailId, MailSummary};
 
@@ -20,6 +21,9 @@ use crate::{composer, format, grip, runtime, window::Ctx};
 
 /// Conversations taken from the cache at a time.
 const ROWS: usize = 100;
+/// Conversations at the top of the list whose newest mail is fetched ahead of the background,
+/// so the one clicked opens at once: a tall window's worth.
+const VIEWING: usize = 25;
 
 /// The folder sidebar's width bounds, in pixels, and its width as a rail of icons (wider when its
 /// header needs it). Dragged narrower than `RAIL_SNAP` it becomes the rail.
@@ -744,6 +748,9 @@ impl Mailbox {
 		// The open conversation may have new mail.
 		if let Some(obj) = self.selection.selected_item() {
 			self.open_thread(&row_of(&obj));
+		}
+		if let Some(fetcher) = self.ctx.fetcher() {
+			fetcher.want(Want::Viewing(rows.iter().take(VIEWING).map(|r| r.latest.id.clone()).collect()));
 		}
 		let synced = cache.folder_state(&folder.id).map(|s| s.synced_ms > 0).unwrap_or(false);
 		if !rows.is_empty() {

@@ -17,7 +17,7 @@ use tutasdk::folder_system::MailSetKind;
 use tutasdk::login::{CredentialType, Credentials};
 use tutasdk::net::native_rest_client::NativeRestClient;
 use tutasdk::tern::{
-	ExistingDraft, OutgoingAttachment, OutgoingMail, OutgoingRecipient, PageItem, TernAccount, TernContact, TernError, TernMail,
+	ExistingDraft, OpenedMail, OutgoingAttachment, OutgoingMail, OutgoingRecipient, PageItem, TernAccount, TernContact, TernError, TernMail,
 	CONVERSATION_FORWARD, CONVERSATION_REPLY,
 };
 use tutasdk::{CustomId, GeneratedId, IdTupleGenerated, Sdk};
@@ -184,6 +184,7 @@ fn to_error(error: TernError) -> Error {
 		TernError::SessionExpired => Error::SessionExpired,
 		TernError::Offline => Error::Offline,
 		TernError::RecipientsNotFound(addresses) => Error::RecipientsNotFound(addresses),
+		TernError::RateLimited(seconds) => Error::RateLimited(seconds),
 		TernError::Other(message) => Error::Other(message),
 	}
 }
@@ -198,6 +199,39 @@ impl TutaBackend {
 		let account = mail.account(login).await.map_err(to_error)?;
 		trace("account loaded");
 		Ok(Self { mail: Arc::new(mail), account: Arc::new(account) })
+	}
+
+	/// An opened mail as Tern shows it.
+	fn mail_of(&self, opened: &OpenedMail) -> Result<Mail> {
+		let address = |a: &MailAddress| Address::new(a.name.clone(), a.address.clone());
+		let body = &opened.details.body;
+		let body_html = body.compressedText.clone().filter(|t| !t.is_empty()).or_else(|| body.text.clone()).unwrap_or_default();
+		let folder = opened.mail.sets.first().map(|set| set.element_id.to_string()).unwrap_or_default();
+		let summary = summary(&opened.mail, &self.account.mail_address).ok_or_else(|| Error::Other("mail has no id".into()))?;
+		let web_url = format!("{BASE_URL}/mail/{folder}/{}", summary.id.element);
+		Ok(Mail {
+			summary,
+			to: opened.details.recipients.toRecipients.iter().map(address).collect(),
+			cc: opened.details.recipients.ccRecipients.iter().map(address).collect(),
+			bcc: opened.details.recipients.bccRecipients.iter().map(address).collect(),
+			reply_to: opened.details.replyTos.iter().map(|a| Address::new(a.name.clone(), a.address.clone())).collect(),
+			body_html,
+			attachments: opened
+				.attachments
+				.iter()
+				.filter_map(|file| {
+					let id = file._id.as_ref()?;
+					Some(Attachment {
+						id: format!("{}/{}", id.list_id, id.element_id),
+						name: file.name.clone(),
+						mime: file.mimeType.clone().unwrap_or_else(|| "application/octet-stream".into()),
+						size: file.size.max(0) as u64,
+						cid: file.cid.clone().filter(|c| !c.is_empty()),
+					})
+				})
+				.collect(),
+			web_url,
+		})
 	}
 }
 
@@ -340,33 +374,16 @@ impl Backend for TutaBackend {
 	async fn open(&self, id: &MailId) -> Result<Mail> {
 		let (mail, tuple) = (self.mail.clone(), id_tuple(id));
 		let opened = guarded(async move { mail.open(&tuple).await.map_err(to_error) }).await?;
-		let address = |a: &MailAddress| Address::new(a.name.clone(), a.address.clone());
-		let body = &opened.details.body;
-		let body_html = body.compressedText.clone().filter(|t| !t.is_empty()).or_else(|| body.text.clone()).unwrap_or_default();
-		let folder = opened.mail.sets.first().map(|set| set.element_id.to_string()).unwrap_or_default();
-		Ok(Mail {
-			summary: summary(&opened.mail, &self.account.mail_address).ok_or_else(|| Error::Other("mail has no id".into()))?,
-			to: opened.details.recipients.toRecipients.iter().map(address).collect(),
-			cc: opened.details.recipients.ccRecipients.iter().map(address).collect(),
-			bcc: opened.details.recipients.bccRecipients.iter().map(address).collect(),
-			reply_to: opened.details.replyTos.iter().map(|a| Address::new(a.name.clone(), a.address.clone())).collect(),
-			body_html,
-			attachments: opened
-				.attachments
-				.iter()
-				.filter_map(|file| {
-					let id = file._id.as_ref()?;
-					Some(Attachment {
-						id: format!("{}/{}", id.list_id, id.element_id),
-						name: file.name.clone(),
-						mime: file.mimeType.clone().unwrap_or_else(|| "application/octet-stream".into()),
-						size: file.size.max(0) as u64,
-						cid: file.cid.clone().filter(|c| !c.is_empty()),
-					})
-				})
-				.collect(),
-			web_url: format!("{BASE_URL}/mail/{folder}/{}", id.element),
-		})
+		self.mail_of(&opened)
+	}
+
+	async fn open_many(&self, ids: &[MailId]) -> Result<Vec<(MailId, Result<Mail>)>> {
+		let (mail, tuples) = (self.mail.clone(), ids.iter().map(id_tuple).collect::<Vec<_>>());
+		let opened = guarded(async move { mail.open_many(&tuples).await.map_err(to_error) }).await?;
+		Ok(opened
+			.into_iter()
+			.map(|(id, result)| (id_string(&id), result.map_err(to_error).and_then(|o| self.mail_of(&o))))
+			.collect())
 	}
 
 	async fn attachment(&self, mail: &MailId, attachment: &Attachment) -> Result<Vec<u8>> {
@@ -505,6 +522,40 @@ mod tests {
 			Err(other) => panic!("expected BadLogin, got {other:?}"),
 			Ok(_) => panic!("signed in to an account that should not exist"),
 		}
+	}
+
+	/// Batched opens read the same as single ones. Run with TERN_LOG=1 to see the requests.
+	#[tokio::test]
+	#[ignore = "talks to app.tuta.com; set TERN_TEST_EMAIL and TERN_TEST_PASSWORD"]
+	async fn live_batch_open_matches_single_opens_over_http() {
+		let email = std::env::var("TERN_TEST_EMAIL").unwrap();
+		let password = std::env::var("TERN_TEST_PASSWORD").unwrap();
+		let (backend, _) = login(&email, &password).await.unwrap();
+		let folders = backend.folders().await.unwrap();
+		let mut ids = Vec::new();
+		for kind in [FolderKind::Inbox, FolderKind::Sent, FolderKind::Drafts] {
+			let folder = folders.iter().find(|f| f.kind == kind).unwrap();
+			ids.extend(backend.list(&folder.id, None, 20).await.unwrap().mails.into_iter().map(|m| (m.received_ms, m.id)));
+		}
+		ids.sort_by_key(|(received, _)| std::cmp::Reverse(*received));
+		let ids: Vec<MailId> = ids.into_iter().take(20).map(|(_, id)| id).collect();
+		let batch = backend.open_many(&ids).await.unwrap();
+		assert_eq!(batch.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), ids, "in the order asked");
+		for (id, batched) in batch {
+			let single = backend.open(&id).await;
+			match (batched, single) {
+				(Ok(b), Ok(s)) => {
+					assert_eq!(b.summary, s.summary);
+					assert_eq!((&b.to, &b.cc, &b.bcc, &b.reply_to), (&s.to, &s.cc, &s.bcc, &s.reply_to));
+					assert_eq!(b.body_html, s.body_html);
+					assert_eq!(b.attachments, s.attachments);
+					assert_eq!(b.web_url, s.web_url);
+				},
+				(Err(b), Err(s)) => eprintln!("{id:?} does not open either way: {b} / {s}"),
+				(b, s) => panic!("{id:?} batched {:?}, single {:?}", b.map(|m| m.summary.subject), s.map(|m| m.summary.subject)),
+			}
+		}
+		backend.sign_out().await.unwrap();
 	}
 
 	#[tokio::test]

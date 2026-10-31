@@ -139,3 +139,65 @@ attachments must work, KISS, fast, Rust. These are the calls I made, in the orde
   old `settings.json` is moved over once and removed.
 - **Sent toast** names the mail: `Sent “Lunch on Friday?”`, cut at 40 characters.
 - Window checks now run with their own `XDG_CONFIG_HOME`, so they never read or write your settings.
+
+## Fetching (2026-10-31)
+
+Opening a mail used to cost 3 to 5 requests in a row: the Mail, a Group for its key pair (every mail
+with a bucket key), a BlobAccessTokenService POST, the MailDetailsBlob, and the files when it had any.
+Mail is now fetched in batches, and the keys and tokens a batch needs are loaded once.
+
+- **Batched open** (`TernMail::open_many`, `Backend::open_many`): one GET per mail list for the mails,
+  one per archive for the bodies, one per list for draft bodies and for attachment files, each with up
+  to 100 ids comma-joined (Tuta's limit). Bodies follow the TypeScript client's `loadMultipleBlobElements`
+  (EntityRestClient at the 362.261023.2 tag): one read token per archive, the same query parameters as
+  the single load that already worked, `ids=a,b,c`; a 403 evicts the token and tries once more, as
+  `doBlobRequestWithRetry` does. A failed request fails the batch; a mail missing or not decrypting
+  fails alone.
+- **Keys and tokens once**: key pairs are kept per group and version for the session (the SDK loaded
+  the Group on every bucket key; this also speeds up listing, which decrypts 50 mails a page). Archive
+  read tokens are kept until they expire, as the TypeScript client's BlobAccessTokenCache does.
+- **Requests, counted from the code** (bucket-key mail, one mail list and archive, some attachments):
+  a 10-mail conversation went from 30–50 requests (4–5 per mail) to about 7 (the focused mail: mail,
+  token, body, files, Group; then the other nine: mail, body, files). Opening 200 mails ahead went from
+  600–1000 requests one after another to about 17: five batches (10, 25, 50, 100, 15) of three each,
+  plus one token per archive and one Group. Mail spread over several mail lists or archives adds one
+  request per extra list per batch.
+- **Policy** (`tern_cache::policy`, pure): Reading fetches the focused mail alone first, then the rest
+  of the conversation newest first in one batch. Viewing fetches the newest mail of the first 25
+  conversations of the list on show (a tall window's worth; tracking which rows are actually on screen
+  needed layout timing for little gain, and the background covers the rest). Background opens ahead in
+  batches of 10, 25, 50, then 100: the first is small so the first bodies land soon and anything that
+  ends up waiting on it waits little; the later ones are large because each batch costs about three
+  requests whatever its size. Mails the cache has are left out.
+- **Fetcher** (`crates/app/src/fetcher.rs`, on the Tokio runtime): the one place bodies are fetched.
+  Three requests at most at once: the background may use one, the list two, the reader all three, so a
+  conversation being read always has a lane free and the list one besides the background. Most urgent first
+  (Reading, Viewing, Background), oldest first within; a mail already queued less urgently moves to the
+  more urgent batch; nothing queued or in flight is asked for again. A newly opened conversation goes
+  ahead of the one opened before (that one drops to Viewing). A card waiting on a mail that a list or
+  background batch is fetching fetches it alone at once on the free lane rather than waiting for that
+  whole batch; that costs one duplicate fetch, rarely.
+- **Fallbacks**: a batch that fails for any reason but offline, signed out or rate-limited is opened one
+  mail at a time the old way (logged once with `TERN_LOG`), so a server that refuses the batched shape
+  still works, slower. A mail that fails inside a good batch is tried once alone before it is marked
+  unopenable. A 429, or a 503 with `Retry-After`/`Suspension-Time`, is now `Error::RateLimited` instead
+  of a failure: the batch waits as told (5 s if not told, 60 s at most) and goes again, and no mail is
+  marked unopenable for it; the SDK's suspendable client also holds every other request until then.
+  Offline or signed out, the queue stops and keeps its work; cards waiting show the error as before, and
+  the next sync round or a conversation opened starts the queue again.
+- **Activity word**: the reader still says Opening… after 150 ms while a card waits; the background
+  round says Fetching… while the fetcher opens ahead.
+- `sync::bodies` is gone (the fetcher's `ahead` replaces it). `Backend::open` stays: the fallback and
+  the alone-retry use it.
+- Window check `focus-first`: batches take 5 s, single mails none; the list's batch holds the mail
+  chosen, which must show within 2 s while that batch is still on its way. It fails if the card waits
+  behind the batch.
+- **Not verified against Tuta**: the batched requests (several ids for Mail, MailDetailsBlob,
+  MailDetailsDraft and File) are built like the TypeScript client's and like the single loads that work,
+  but no account was at hand. `cargo test -p tern-tuta -- --ignored live_batch_open` (with
+  `TERN_TEST_EMAIL` and `TERN_TEST_PASSWORD`, `TERN_LOG=1` to see each request) opens the newest 20
+  mails of Inbox, Sent and Drafts in one batch and compares each with a single open. Should the server
+  refuse the shape, the fallback keeps Tern working one mail at a time. The rate-limit path is tested
+  only against scripted answers.
+- Found while checking: the `draft` window check fails about one run in ten on main too (the saved
+  draft does not reach the Drafts list within its five seconds); not changed here.

@@ -20,3 +20,8 @@ tag, never to master. GPL-3.0.
   are encrypted like any other value instead of being sent as an empty string, as the TypeScript
   client at this tag does. Tuta's server decrypts drafts itself for recipients outside Tuta and
   answered 500 to the empty strings.
+- `sdk/src/tern.rs`: batched open (`open_many`): mails, MailDetailsBlobs (one archive read token, ids
+  comma-joined, as `EntityRestClient.loadMultipleBlobElements` at the same tag), MailDetailsDrafts and
+  files loaded several per request. Key pairs are kept per group and version instead of loading the
+  Group for every bucket key; archive read tokens are kept until they expire and evicted on 403, as
+  `BlobAccessTokenFacade` does. 429, and 503 with a suspension time, become `TernError::RateLimited`.

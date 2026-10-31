@@ -109,23 +109,6 @@ pub async fn older(backend: &dyn Backend, cache: &Cache, folder: &FolderId) -> R
 	Ok(!last)
 }
 
-/// Opens up to `count` of the newest mails not opened yet and stores them. Returns how many.
-pub async fn bodies(backend: &dyn Backend, cache: &Cache, count: usize) -> Result<usize> {
-	let mut opened = 0;
-	for id in cache.missing_bodies(count).map_err(cache_error)? {
-		match backend.open(&id).await {
-			Ok(mail) => {
-				cache.put_mail(&mail).map_err(cache_error)?;
-				opened += 1;
-			},
-			Err(e @ (Error::Offline | Error::SessionExpired)) => return Err(e),
-			// Mail Tern cannot read; do not try it again.
-			Err(_) => cache.mark_unopenable(&id).map_err(cache_error)?,
-		}
-	}
-	Ok(opened)
-}
-
 /// Stores the account's contacts for suggestions.
 pub async fn contacts(backend: &dyn Backend, cache: &Cache) -> Result<()> {
 	let contacts = backend.contacts().await?;
@@ -163,10 +146,6 @@ mod tests {
 		assert_eq!(cache.count(&sent).unwrap(), 2);
 		assert_eq!(cache.folders().unwrap().iter().find(|f| f.id == inbox).unwrap().unread, 1);
 
-		// Bodies come next, newest first, and are not fetched twice.
-		assert_eq!(bodies(&demo, &cache, 3).await.unwrap(), 3);
-		assert_eq!(bodies(&demo, &cache, 3).await.unwrap(), 0);
-		assert!(cache.mail(&first.id).unwrap().is_some());
 	}
 
 	#[tokio::test]
