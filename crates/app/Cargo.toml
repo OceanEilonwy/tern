@@ -10,6 +10,7 @@ tern-core = { workspace = true }
 tern-tuta = { workspace = true }
 tern-cache = { workspace = true }
 serde_json = { workspace = true }
+toml = "=1.1.8"
 gtk = { package = "gtk4", version = "0.11", features = ["v4_22"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_8"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync", "macros"] }

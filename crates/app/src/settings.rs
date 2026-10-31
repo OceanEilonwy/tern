@@ -1,4 +1,4 @@
-//! Tern's few settings, in `~/.config/tern/settings.json`.
+//! Tern's few settings, in `~/.config/tern/settings.toml`.
 
 use std::path::PathBuf;
 
@@ -16,21 +16,42 @@ pub struct Settings {
 	pub list_width: u32,
 }
 
-fn path() -> PathBuf {
+fn dir() -> PathBuf {
 	let base = std::env::var_os("XDG_CONFIG_HOME")
 		.map(PathBuf::from)
 		.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
 		.unwrap_or_else(std::env::temp_dir);
-	base.join("tern").join("settings.json")
+	base.join("tern")
 }
 
 impl Settings {
 	/// The saved settings, or the defaults when there are none or they do not read.
 	pub fn load() -> Settings {
-		std::fs::read(path()).ok().map(|raw| Self::parse(&raw)).unwrap_or_default()
+		if let Ok(raw) = std::fs::read_to_string(dir().join("settings.toml")) {
+			return Self::parse(&raw);
+		}
+		// Settings were JSON before; move them over once.
+		let old = dir().join("settings.json");
+		let Ok(raw) = std::fs::read(&old) else { return Settings::default() };
+		let settings = Self::from_json(&raw);
+		settings.save();
+		let _ = std::fs::remove_file(old);
+		settings
 	}
 
-	fn parse(raw: &[u8]) -> Settings {
+	/// Each setting on its own: one that does not read falls back to its default.
+	fn parse(raw: &str) -> Settings {
+		let table: toml::Table = raw.parse().unwrap_or_default();
+		let width = |key: &str| table.get(key).and_then(|v| v.as_integer()).and_then(|w| u32::try_from(w).ok()).unwrap_or(0);
+		Settings {
+			offline: table.get("offline").and_then(|v| v.as_str()).and_then(Level::from_name).unwrap_or_default(),
+			folders_width: width("folders_width"),
+			folders_rail: table.get("folders_rail").and_then(|v| v.as_bool()).unwrap_or(false),
+			list_width: width("list_width"),
+		}
+	}
+
+	fn from_json(raw: &[u8]) -> Settings {
 		let json: serde_json::Value = serde_json::from_slice(raw).unwrap_or_default();
 		let width = |key: &str| json[key].as_u64().and_then(|w| u32::try_from(w).ok()).unwrap_or(0);
 		Settings {
@@ -41,22 +62,20 @@ impl Settings {
 		}
 	}
 
-	fn to_json(self) -> String {
-		serde_json::json!({
-			"offline": self.offline.name(),
-			"folders_width": self.folders_width,
-			"folders_rail": self.folders_rail,
-			"list_width": self.list_width,
-		})
-		.to_string()
+	fn to_toml(self) -> String {
+		format!(
+			"offline = \"{}\"\nfolders_width = {}\nfolders_rail = {}\nlist_width = {}\n",
+			self.offline.name(),
+			self.folders_width,
+			self.folders_rail,
+			self.list_width
+		)
 	}
 
 	pub fn save(self) {
-		let path = path();
-		if let Some(dir) = path.parent() {
-			let _ = std::fs::create_dir_all(dir);
-		}
-		if let Err(e) = std::fs::write(&path, self.to_json()) {
+		let dir = dir();
+		let _ = std::fs::create_dir_all(&dir);
+		if let Err(e) = std::fs::write(dir.join("settings.toml"), self.to_toml()) {
 			eprintln!("tern: could not save settings: {e}");
 		}
 	}
@@ -67,13 +86,21 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn settings_round_trip_and_bad_files_fall_back() {
+	fn settings_round_trip_and_bad_values_fall_back() {
 		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480 };
-		assert_eq!(Settings::parse(s.to_json().as_bytes()), s);
-		assert_eq!(Settings::parse(b"not json"), Settings::default());
-		assert_eq!(Settings::parse(br#"{"offline":"huge"}"#), Settings::default());
-		// Files from before the sidebar could be resized.
-		assert_eq!(Settings::parse(br#"{"offline":"low"}"#), Settings { offline: Level::Low, ..Settings::default() });
-		assert_eq!(Settings::parse(br#"{"folders_width":-5,"list_width":"wide"}"#), Settings::default());
+		assert_eq!(Settings::parse(&s.to_toml()), s);
+		assert_eq!(s.to_toml(), "offline = \"high\"\nfolders_width = 240\nfolders_rail = true\nlist_width = 480\n");
+		assert_eq!(Settings::parse("not = [toml"), Settings::default());
+		assert_eq!(Settings::parse("offline = \"huge\""), Settings::default());
+		// One bad value leaves the others.
+		assert_eq!(Settings::parse("offline = \"low\"\nfolders_width = -5\nlist_width = \"wide\""), Settings { offline: Level::Low, ..Settings::default() });
+	}
+
+	#[test]
+	fn old_json_settings_carry_over() {
+		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480 };
+		assert_eq!(Settings::from_json(br#"{"offline":"high","folders_width":240,"folders_rail":true,"list_width":480}"#), s);
+		assert_eq!(Settings::from_json(br#"{"offline":"low"}"#), Settings { offline: Level::Low, ..Settings::default() });
+		assert_eq!(Settings::from_json(b"not json"), Settings::default());
 	}
 }

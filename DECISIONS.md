@@ -123,7 +123,7 @@ attachments must work, KISS, fast, Rust. These are the calls I made, in the orde
   the old code (focus back on row 0).
 - **Resizable panes**: libadwaita's split views cannot be dragged, so a thin handle on each pane's edge
   sets the split view's width bounds; a pane takes at most a share of the window (folders 30%, list
-  60%) so a narrower window still narrows it. Widths go to `settings.json` when a drag ends.
+  60%) so a narrower window still narrows it. Widths go to `settings.toml` when a drag ends.
 - **Folder rail**: dragging the folders under 140 px, a double click on their edge, or F9 folds them to
   icons with the unread count under each (names in tooltips). F9 on a narrow window shows or hides the
   folders instead. The rail keeps the last width for when it opens again. A double click on the list's
