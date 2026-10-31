@@ -1107,7 +1107,9 @@ fn send_draft_data(random: &RandomizerFacade, mail: IdTupleGenerated, keys: Send
 		calendarMethod: false,
 		sessionEncEncryptionAuthStatus: keys.session_enc_auth_status.clone(),
 		sendAt: None,
-		allowUndo: false,
+		// Tuta's own apps send with undo allowed (their default); the server queues the mail and sends
+		// it on its own after a few seconds. Sending with undo off answered 500 for any recipient outside Tuta.
+		allowUndo: true,
 		internalRecipientKeyData: recipients(&keys),
 		secureExternalRecipientKeyData: vec![],
 		attachmentKeyData: attachments(&keys),
@@ -1356,7 +1358,7 @@ mod tests {
 				}],
 			},
 		));
-		serializes!(send_draft_data(
+		let outside = send_draft_data(
 			&random,
 			mail,
 			SendKeys {
@@ -1366,7 +1368,10 @@ mod tests {
 				recipients: vec![],
 				attachments: vec![],
 			},
-		));
+		);
+		// Tuta's server answers 500 to mail for outside recipients sent with undo off.
+		assert!(outside.allowUndo);
+		serializes!(outside);
 	}
 
 	#[test]
