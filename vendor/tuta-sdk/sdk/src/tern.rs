@@ -1,7 +1,7 @@
-//! Reading, downloading and sending mail for Tern, the GNOME client.
+//! Reading, downloading, drafting and sending mail, and reading contacts, for Tern, the GNOME client.
 //!
 //! Not part of upstream Tuta. Ported from the TypeScript client's MailFacade, BlobFacade,
-//! BlobAccessTokenFacade, CryptoFacade and LoginFacade at tutao/tutanota@73a3e0e9, which the rest
+//! BlobAccessTokenFacade, CryptoFacade, LoginFacade and ContactModel at tutao/tutanota@73a3e0e9, which the rest
 //! of this SDK copy also comes from. See vendor/tuta-sdk/PATCHES.md.
 
 use std::collections::HashMap;
@@ -12,6 +12,7 @@ use base64::Engine;
 use crypto_primitives::aes::{Aes256Key, InitializationVector};
 use crypto_primitives::key::GenericAesKey;
 use crypto_primitives::randomizer_facade::RandomizerFacade;
+use crypto_primitives::versioned::{Versioned, VersionedAesKey};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -26,6 +27,7 @@ use crate::crypto::crypto_facade::ResolvedSessionKey;
 #[cfg_attr(test, mockall_double::double)]
 use crate::crypto::public_key_provider::PublicKeyProvider;
 use crate::crypto::asymmetric_crypto_facade::PubEncSymKey;
+use crate::crypto::key::PublicKey;
 use crate::crypto::public_key_provider::{PublicKeyIdentifier, PublicKeyLoadingError};
 use crate::element_value::{ElementValue, ParsedEntity};
 use crate::entities::entity_facade::{EntityFacade, EntityFacadeImpl};
@@ -33,11 +35,12 @@ use crate::entities::generated::storage::{
 	BlobAccessTokenPostIn, BlobGetIn, BlobId, BlobReadData, BlobServerAccessInfo, InstanceId,
 };
 use crate::entities::generated::sys::{
-	BucketKey, CreateSessionData, GroupInfo, SaltData,
+	BucketKey, CreateSessionData, GroupInfo, RootInstance, SaltData,
 };
 use crate::entities::generated::tutanota::{
-	AttachmentKeyData, ConversationEntry, DraftAttachment, DraftCreateData, DraftCreateReturn,
-	DraftData, DraftRecipient, InternalRecipientKeyData, Mail, MailDetails, MailDetailsBlob,
+	AttachmentKeyData, Contact, ContactList, ConversationEntry, DraftAttachment, DraftCreateData,
+	DraftCreateReturn, DraftData, DraftRecipient, DraftUpdateData, DraftUpdateReturn,
+	EncryptedMailAddress, InternalRecipientKeyData, Mail, MailDetails, MailDetailsBlob,
 	MailDetailsDraft, MailSet, MailSetEntry, NewDraftAttachment, SendDraftData,
 	SendDraftParameters, SendDraftReturn, TutanotaFile,
 };
@@ -148,6 +151,9 @@ const MAX_IDS_PER_REQUEST: usize = 100;
 
 /// The body a draft may carry before Tuta refuses it.
 const UNCOMPRESSED_MAX_SIZE: usize = 1024 * 1024;
+
+/// MailState.DRAFT: a mail not sent yet.
+const MAIL_STATE_DRAFT: i64 = 0;
 
 impl Sdk {
 	/// Signs in with a password and returns the credentials to resume the session later.
@@ -313,8 +319,47 @@ pub struct OutgoingMail {
 	pub subject: String,
 	pub body_html: String,
 	pub attachments: Vec<OutgoingAttachment>,
-	/// The mail this answers or forwards, with CONVERSATION_REPLY or CONVERSATION_FORWARD.
+	/// The mail this answers or forwards, with CONVERSATION_REPLY or CONVERSATION_FORWARD. Ignored
+	/// with `existing`: a saved draft keeps what it answers.
 	pub previous: Option<(IdTupleGenerated, i64)>,
+	/// The saved draft to write over instead of creating a new one.
+	pub existing: Option<ExistingDraft>,
+}
+
+/// A saved draft to update, and which of its attachments stay on it. The others are removed.
+pub struct ExistingDraft {
+	pub mail: IdTupleGenerated,
+	pub kept_attachments: Vec<IdTupleGenerated>,
+}
+
+/// A contact as the composer suggests it: the name, and every address it has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TernContact {
+	pub name: String,
+	pub addresses: Vec<String>,
+}
+
+/// Each distinct recipient with its public key, None for those outside Tuta, and the Tuta
+/// addresses that do not exist.
+struct RecipientLookup<'a> {
+	recipients: Vec<&'a OutgoingRecipient>,
+	keys: Vec<Option<Versioned<PublicKey>>>,
+	not_found: Vec<String>,
+}
+
+/// A draft on the server and the session key its contents are encrypted with.
+struct WrittenDraft {
+	id: IdTupleGenerated,
+	mail_key: GenericAesKey,
+}
+
+/// What a draft request carries beyond the mail as written.
+struct DraftParts {
+	confidential: bool,
+	method: i64,
+	reply_tos: Vec<EncryptedMailAddress>,
+	added: Vec<DraftAttachment>,
+	removed: Vec<IdTupleGenerated>,
 }
 
 /// Session keys of the instances a bucket key covers, by instance element id.
@@ -552,156 +597,35 @@ impl TernMail {
 		delete_session(parts.rest_client.as_ref(), &parts.base_url, &parts.access_token).await;
 	}
 
-	/// Creates a draft with the attachments uploaded, then sends it. End-to-end encrypted when every
-	/// recipient is on Tuta; otherwise sent as ordinary mail, like the official client does when
-	/// "confidential" is off.
+	/// Saves `outgoing` to Drafts: a new draft, or over `outgoing.existing`. Returns the draft's id.
+	///
+	/// Recipients outside Tuta make the draft non-confidential, as [Self::send] would send it.
+	pub async fn save_draft(&self, sender: &TernAccount, outgoing: OutgoingMail) -> Result<IdTupleGenerated, TernError> {
+		check_body_size(&outgoing)?;
+		let lookup = self.recipient_keys(&outgoing).await?;
+		let confidential = lookup.keys.iter().all(Option::is_some);
+		Ok(self.write_draft(sender, &outgoing, confidential).await?.id)
+	}
+
+	/// Writes the draft (creating it, or updating `outgoing.existing`) with the attachments uploaded,
+	/// then sends it. End-to-end encrypted when every recipient is on Tuta; otherwise sent as
+	/// ordinary mail, like the official client does when "confidential" is off.
 	pub async fn send(&self, sender: &TernAccount, outgoing: OutgoingMail) -> Result<SendDraftReturn, TernError> {
-		if outgoing.body_html.len() > UNCOMPRESSED_MAX_SIZE {
-			return Err(TernError::Other("the message is too long".into()));
-		}
-		// One key per address, however often it appears across To, Cc and Bcc.
-		let mut all: Vec<&OutgoingRecipient> = Vec::new();
-		for recipient in outgoing.to.iter().chain(&outgoing.cc).chain(&outgoing.bcc) {
-			if !all.iter().any(|r| r.address.eq_ignore_ascii_case(&recipient.address)) {
-				all.push(recipient);
-			}
-		}
+		check_body_size(&outgoing)?;
+		let RecipientLookup { recipients: all, keys: public_keys, not_found } = self.recipient_keys(&outgoing).await?;
 		if all.is_empty() {
 			return Err(TernError::Other("no recipients".into()));
-		}
-
-		// Who is on Tuta decides whether the mail can be end-to-end encrypted.
-		let mut public_keys = Vec::with_capacity(all.len());
-		let mut not_found = Vec::new();
-		for recipient in &all {
-			let identifier = PublicKeyIdentifier {
-				identifier: recipient.address.clone(),
-				identifier_type: PublicKeyIdentifierType::MailAddress,
-			};
-			match self.parts().public_key_provider.load_current_pub_key(&identifier).await {
-				Ok(key) => public_keys.push(Some(key)),
-				Err(PublicKeyLoadingError::KeyLoadingError(ApiCallError::ServerResponseError {
-					source: HttpError::NotFoundError,
-				})) => {
-					if is_tuta_address(&recipient.address) {
-						not_found.push(recipient.address.clone());
-					}
-					public_keys.push(None);
-				},
-				Err(PublicKeyLoadingError::KeyLoadingError(e)) => return Err(e.into()),
-				Err(e) => return Err(TernError::Other(format!("cannot use the recipient's key: {e:?}"))),
-			}
 		}
 		if !not_found.is_empty() {
 			return Err(TernError::RecipientsNotFound(not_found));
 		}
 		let confidential = public_keys.iter().all(Option::is_some);
-
-		let mail_group = sender.mail_group.clone();
-		let group_key = self
-			.parts()
-			.key_loader_facade
-			.get_current_sym_group_key(&mail_group)
-			.await
-			.map_err(|e| TernError::Other(format!("cannot load the mailbox key: {e}")))?;
+		let WrittenDraft { id: draft_id, mail_key } = self.write_draft(sender, &outgoing, confidential).await?;
 		let iv = || InitializationVector::generate(&self.randomizer);
 
-		let mail_key = GenericAesKey::Aes256(Aes256Key::generate(&self.randomizer));
-		let owner_enc_mail_key = group_key.object.encrypt_key(&mail_key, iv());
-		let encrypt_string = |key: &GenericAesKey, value: &str| {
-			key.encrypt_data(value.as_bytes(), iv())
-				.map_err(|e| TernError::Other(format!("cannot encrypt: {e}")))
-		};
-
-		// Upload the attachments, each under its own key.
-		let file_keys: Vec<GenericAesKey> = outgoing
-			.attachments
-			.iter()
-			.map(|_| GenericAesKey::Aes256(Aes256Key::generate(&self.randomizer)))
-			.collect();
-		let file_data: Vec<FileData> = outgoing
-			.attachments
-			.iter()
-			.zip(&file_keys)
-			.map(|(a, key)| FileData {
-				session_key: key.clone(),
-				data: a.data.as_slice(),
-			})
-			.collect();
-		let tokens = if file_data.is_empty() {
-			Vec::new()
-		} else {
-			self.sdk
-				.blob_facade()
-				.encrypt_and_upload_multiple(ArchiveDataType::Attachments, &mail_group, file_data.iter())
-				.await?
-		};
-		let mut added_attachments = Vec::with_capacity(tokens.len());
-		for ((attachment, key), reference_tokens) in outgoing.attachments.iter().zip(&file_keys).zip(tokens) {
-			added_attachments.push(DraftAttachment {
-				_id: None,
-				ownerEncFileSessionKey: group_key.object.encrypt_key(key, iv()),
-				ownerKeyVersion: group_key.version as i64,
-				existingFile: None,
-				newFile: Some(NewDraftAttachment {
-					_id: None,
-					encFileName: encrypt_string(key, &attachment.name)?,
-					encMimeType: encrypt_string(key, &attachment.mime_type)?,
-					encCid: None,
-					referenceTokens: reference_tokens,
-				}),
-			});
-		}
-
-		let recipient = |r: &OutgoingRecipient| DraftRecipient {
-			_id: None,
-			name: r.name.clone(),
-			mailAddress: r.address.clone(),
-			_errors: Default::default(),
-		};
-		let (previous_message_id, conversation_type) = match &outgoing.previous {
-			Some((previous, kind)) => (self.previous_message_id(previous).await, *kind),
-			None => (None, CONVERSATION_NEW),
-		};
-		let draft = DraftCreateData {
-			_format: 0,
-			previousMessageId: previous_message_id,
-			conversationType: conversation_type,
-			ownerEncSessionKey: owner_enc_mail_key,
-			ownerKeyVersion: group_key.version as i64,
-			draftData: DraftData {
-				_id: None,
-				subject: outgoing.subject.clone(),
-				bodyText: String::new(),
-				senderMailAddress: sender.mail_address.clone(),
-				senderName: sender.name.clone(),
-				confidential,
-				method: 0,
-				compressedBodyText: Some(outgoing.body_html.clone()),
-				toRecipients: outgoing.to.iter().map(recipient).collect(),
-				ccRecipients: outgoing.cc.iter().map(recipient).collect(),
-				bccRecipients: outgoing.bcc.iter().map(recipient).collect(),
-				addedAttachments: added_attachments,
-				removedAttachments: vec![],
-				replyTos: vec![],
-				_errors: Default::default(),
-			},
-			_errors: Default::default(),
-		};
-		let created: DraftCreateReturn = self
-			.sdk
-			.get_service_executor()
-			.post::<DraftService>(
-				draft,
-				ExtraServiceParams {
-					session_key: Some(mail_key.clone()),
-					..Default::default()
-				},
-			)
-			.await?;
-
-		// Every attachment's key goes along, wrapped for the recipients.
-		let raw_draft = self.sdk.entity_client.load(&Mail::type_ref(), &created.draft).await?;
+		// Every attachment's key goes along, wrapped for the recipients, as sendDraft does with
+		// getAttachmentIds(draft).
+		let raw_draft = self.sdk.entity_client.load(&Mail::type_ref(), &draft_id).await?;
 		let draft_mail: Mail = self.decrypt_with(raw_draft, mail_key.clone())?;
 		let bucket_key = GenericAesKey::Aes256(Aes256Key::generate(&self.randomizer));
 		let mut attachment_key_data = Vec::with_capacity(draft_mail.attachments.len());
@@ -743,7 +667,7 @@ impl TernMail {
 
 		let send = send_draft_data(
 			&self.randomizer,
-			created.draft,
+			draft_id,
 			SendKeys {
 				mail_session_key,
 				bucket_enc_mail_session_key,
@@ -762,6 +686,231 @@ impl TernMail {
 				} => TernError::Other(format!("Tuta refused to send the mail ({source})")),
 				e => e.into(),
 			})
+	}
+
+	/// Looks up every recipient's public key, once per address however often it appears across
+	/// To, Cc and Bcc. Who is on Tuta decides whether the mail can be end-to-end encrypted.
+	async fn recipient_keys<'a>(&self, outgoing: &'a OutgoingMail) -> Result<RecipientLookup<'a>, TernError> {
+		let mut recipients: Vec<&OutgoingRecipient> = Vec::new();
+		for recipient in outgoing.to.iter().chain(&outgoing.cc).chain(&outgoing.bcc) {
+			if !recipients.iter().any(|r| r.address.eq_ignore_ascii_case(&recipient.address)) {
+				recipients.push(recipient);
+			}
+		}
+		let mut keys = Vec::with_capacity(recipients.len());
+		let mut not_found = Vec::new();
+		for recipient in &recipients {
+			let identifier = PublicKeyIdentifier {
+				identifier: recipient.address.clone(),
+				identifier_type: PublicKeyIdentifierType::MailAddress,
+			};
+			match self.parts().public_key_provider.load_current_pub_key(&identifier).await {
+				Ok(key) => keys.push(Some(key)),
+				Err(PublicKeyLoadingError::KeyLoadingError(ApiCallError::ServerResponseError {
+					source: HttpError::NotFoundError,
+				})) => {
+					if is_tuta_address(&recipient.address) {
+						not_found.push(recipient.address.clone());
+					}
+					keys.push(None);
+				},
+				Err(PublicKeyLoadingError::KeyLoadingError(e)) => return Err(e.into()),
+				Err(e) => return Err(TernError::Other(format!("cannot use the recipient's key: {e:?}"))),
+			}
+		}
+		Ok(RecipientLookup { recipients, keys, not_found })
+	}
+
+	/// Creates the draft (TypeScript `createDraft`) or, with `outgoing.existing`, updates it
+	/// (`updateDraft`). Returns its id and the session key its contents are encrypted with.
+	async fn write_draft(&self, sender: &TernAccount, outgoing: &OutgoingMail, confidential: bool) -> Result<WrittenDraft, TernError> {
+		match &outgoing.existing {
+			None => self.create_draft(sender, outgoing, confidential).await,
+			Some(existing) => self.update_draft(sender, outgoing, existing, confidential).await,
+		}
+	}
+
+	async fn create_draft(&self, sender: &TernAccount, outgoing: &OutgoingMail, confidential: bool) -> Result<WrittenDraft, TernError> {
+		let group_key = self
+			.parts()
+			.key_loader_facade
+			.get_current_sym_group_key(&sender.mail_group)
+			.await
+			.map_err(|e| TernError::Other(format!("cannot load the mailbox key: {e}")))?;
+		let mail_key = GenericAesKey::Aes256(Aes256Key::generate(&self.randomizer));
+		let owner_enc_mail_key = group_key.object.encrypt_key(&mail_key, InitializationVector::generate(&self.randomizer));
+		let added = self.upload_attachments(&sender.mail_group, &group_key, &outgoing.attachments).await?;
+		let (previous_message_id, conversation_type) = match &outgoing.previous {
+			Some((previous, kind)) => (self.previous_message_id(previous).await, *kind),
+			None => (None, CONVERSATION_NEW),
+		};
+		let request = DraftCreateData {
+			_format: 0,
+			previousMessageId: previous_message_id,
+			conversationType: conversation_type,
+			ownerEncSessionKey: owner_enc_mail_key,
+			ownerKeyVersion: group_key.version as i64,
+			draftData: draft_data(
+				sender,
+				outgoing,
+				DraftParts {
+					confidential,
+					method: 0,
+					reply_tos: vec![],
+					added,
+					removed: vec![],
+				},
+			),
+			_errors: Default::default(),
+		};
+		let created: DraftCreateReturn = self
+			.sdk
+			.get_service_executor()
+			.post::<DraftService>(
+				request,
+				ExtraServiceParams {
+					session_key: Some(mail_key.clone()),
+					..Default::default()
+				},
+			)
+			.await?;
+		Ok(WrittenDraft { id: created.draft, mail_key })
+	}
+
+	/// As `updateDraft`: the draft keeps its session key, method and reply-tos, attachments it
+	/// already has and keeps are not sent again, removed ones go in `removedAttachments`, and new
+	/// ones are uploaded under the key version the draft is owned with.
+	async fn update_draft(
+		&self,
+		sender: &TernAccount,
+		outgoing: &OutgoingMail,
+		existing: &ExistingDraft,
+		confidential: bool,
+	) -> Result<WrittenDraft, TernError> {
+		let raw = self.sdk.entity_client.load(&Mail::type_ref(), &existing.mail).await?;
+		let mail_key = self.session_key(&Mail::type_ref(), &raw, None).await?;
+		let draft: Mail = self.decrypt_with(raw, mail_key.clone())?;
+		if draft.state != MAIL_STATE_DRAFT {
+			return Err(TernError::Other("this mail is no longer a draft".into()));
+		}
+		// "we assume that there is an _ownerEncSessionKey anyway, so we can default to 0"
+		let version = draft._ownerKeyVersion.unwrap_or(0).max(0) as u64;
+		let group_key = Versioned::new(
+			self.parts()
+				.key_loader_facade
+				.load_sym_group_key(&sender.mail_group, version, None)
+				.await
+				.map_err(|e| TernError::Other(format!("cannot load the mailbox key: {e}")))?,
+			version,
+		);
+		let reply_tos = match &draft.mailDetailsDraft {
+			Some(details_id) => {
+				let raw = self.sdk.entity_client.load(&MailDetailsDraft::type_ref(), details_id).await?;
+				self.decrypt_with::<MailDetailsDraft>(raw, mail_key.clone())?.details.replyTos
+			},
+			None => return Err(TernError::Other("draft without mailDetailsDraft".into())),
+		};
+		let removed = removed_attachments(&draft.attachments, &existing.kept_attachments);
+		let added = self.upload_attachments(&sender.mail_group, &group_key, &outgoing.attachments).await?;
+		let id = draft._id.clone().unwrap_or_else(|| existing.mail.clone());
+		let request = draft_update_data(
+			id.clone(),
+			draft_data(
+				sender,
+				outgoing,
+				DraftParts {
+					confidential,
+					method: draft.method,
+					reply_tos,
+					added,
+					removed,
+				},
+			),
+		);
+		let _: DraftUpdateReturn = self
+			.sdk
+			.get_service_executor()
+			.put::<DraftService>(
+				request,
+				ExtraServiceParams {
+					session_key: Some(mail_key.clone()),
+					..Default::default()
+				},
+			)
+			.await?;
+		Ok(WrittenDraft { id, mail_key })
+	}
+
+	/// Uploads new attachments, each under its own key, as the DataFile branch of
+	/// `_createAddedAttachments` does.
+	async fn upload_attachments(
+		&self,
+		mail_group: &GeneratedId,
+		group_key: &VersionedAesKey,
+		attachments: &[OutgoingAttachment],
+	) -> Result<Vec<DraftAttachment>, TernError> {
+		if attachments.is_empty() {
+			return Ok(Vec::new());
+		}
+		let file_keys: Vec<GenericAesKey> = attachments
+			.iter()
+			.map(|_| GenericAesKey::Aes256(Aes256Key::generate(&self.randomizer)))
+			.collect();
+		let file_data: Vec<FileData> = attachments
+			.iter()
+			.zip(&file_keys)
+			.map(|(a, key)| FileData {
+				session_key: key.clone(),
+				data: a.data.as_slice(),
+			})
+			.collect();
+		let tokens = self
+			.sdk
+			.blob_facade()
+			.encrypt_and_upload_multiple(ArchiveDataType::Attachments, mail_group, file_data.iter())
+			.await?;
+		attachments
+			.iter()
+			.zip(&file_keys)
+			.zip(tokens)
+			.map(|((attachment, key), reference_tokens)| new_draft_attachment(&self.randomizer, group_key, key, attachment, reference_tokens))
+			.collect()
+	}
+
+	/// The account's contacts, decrypted, as the TypeScript client loads them: the ContactList root
+	/// of the user group, then every Contact in its list. A contact that does not decrypt is skipped.
+	pub async fn contacts(&self) -> Result<Vec<TernContact>, TernError> {
+		let root_id = IdTupleCustom {
+			list_id: self.sdk.user_facade.get_user_group_id(),
+			element_id: self
+				.sdk
+				.entity_client
+				.resolve_client_type_ref(&ContactList::type_ref())?
+				.root_id
+				.clone(),
+		};
+		let root: RootInstance = match self.sdk.crypto_entity_client.load(&root_id).await {
+			Ok(root) => root,
+			// External mailboxes have no contact list.
+			Err(ApiCallError::ServerResponseError {
+				source: HttpError::NotFoundError,
+			}) => return Ok(Vec::new()),
+			Err(e) => return Err(e.into()),
+		};
+		let list: ContactList = self.sdk.crypto_entity_client.load(&root.reference).await?;
+		let raws = self
+			.sdk
+			.entity_client
+			.load_all(&Contact::type_ref(), &list.contacts, ListLoadDirection::ASC)
+			.await?;
+		let mut contacts = Vec::with_capacity(raws.len());
+		for raw in raws {
+			match self.decrypt::<Contact>(raw, None).await {
+				Ok(contact) => contacts.push(tern_contact(&contact)),
+				Err(e) => log::warn!("a contact does not decrypt: {e}"),
+			}
+		}
+		Ok(contacts)
 	}
 
 	/// The Message-ID of the mail being answered, so the reply joins its conversation.
@@ -1056,6 +1205,99 @@ fn blob_get_in(random: &RandomizerFacade, archive: &GeneratedId, blobs: &[&Gener
 	}
 }
 
+fn check_body_size(outgoing: &OutgoingMail) -> Result<(), TernError> {
+	if outgoing.body_html.len() > UNCOMPRESSED_MAX_SIZE {
+		return Err(TernError::Other("the message is too long".into()));
+	}
+	Ok(())
+}
+
+/// DraftData as `createDraft` and `updateDraft` build it. The SDK encrypts it with the mail's
+/// session key, which also fills in the aggregate ids.
+fn draft_data(sender: &TernAccount, outgoing: &OutgoingMail, parts: DraftParts) -> DraftData {
+	// recipientToDraftRecipient: the address stays plain, the name is encrypted.
+	let recipient = |r: &OutgoingRecipient| DraftRecipient {
+		_id: None,
+		name: r.name.clone(),
+		mailAddress: r.address.clone(),
+		_errors: Default::default(),
+	};
+	DraftData {
+		_id: None,
+		subject: outgoing.subject.clone(),
+		bodyText: String::new(),
+		senderMailAddress: sender.mail_address.clone(),
+		senderName: sender.name.clone(),
+		confidential: parts.confidential,
+		method: parts.method,
+		compressedBodyText: Some(outgoing.body_html.clone()),
+		toRecipients: outgoing.to.iter().map(recipient).collect(),
+		ccRecipients: outgoing.cc.iter().map(recipient).collect(),
+		bccRecipients: outgoing.bcc.iter().map(recipient).collect(),
+		addedAttachments: parts.added,
+		removedAttachments: parts.removed,
+		replyTos: parts.reply_tos,
+		_errors: Default::default(),
+	}
+}
+
+fn draft_update_data(draft: IdTupleGenerated, draft_data: DraftData) -> DraftUpdateData {
+	DraftUpdateData {
+		_format: 0,
+		draftData: draft_data,
+		draft,
+		_errors: Default::default(),
+	}
+}
+
+/// `_getRemovedAttachments`: the draft's files that are not kept.
+fn removed_attachments(current: &[IdTupleGenerated], kept: &[IdTupleGenerated]) -> Vec<IdTupleGenerated> {
+	current.iter().filter(|file| !kept.contains(file)).cloned().collect()
+}
+
+/// `createAndEncryptDraftAttachment`: name and type under the file's own key, the file key under
+/// the mailbox key.
+fn new_draft_attachment(
+	random: &RandomizerFacade,
+	group_key: &VersionedAesKey,
+	file_key: &GenericAesKey,
+	attachment: &OutgoingAttachment,
+	reference_tokens: Vec<crate::entities::generated::sys::BlobReferenceTokenWrapper>,
+) -> Result<DraftAttachment, TernError> {
+	let iv = || InitializationVector::generate(random);
+	let encrypt_string = |value: &str| {
+		file_key
+			.encrypt_data(value.as_bytes(), iv())
+			.map_err(|e| TernError::Other(format!("cannot encrypt: {e}")))
+	};
+	Ok(DraftAttachment {
+		_id: None,
+		ownerEncFileSessionKey: group_key.object.encrypt_key(file_key, iv()),
+		ownerKeyVersion: group_key.version as i64,
+		existingFile: None,
+		newFile: Some(NewDraftAttachment {
+			_id: None,
+			encFileName: encrypt_string(&attachment.name)?,
+			encMimeType: encrypt_string(&attachment.mime_type)?,
+			encCid: None,
+			referenceTokens: reference_tokens,
+		}),
+	})
+}
+
+/// The name as "first last", and the contact's addresses that are not blank.
+fn tern_contact(contact: &Contact) -> TernContact {
+	TernContact {
+		name: format!("{} {}", contact.firstName.trim(), contact.lastName.trim()).trim().to_string(),
+		addresses: contact
+			.mailAddresses
+			.iter()
+			.map(|a| a.address.trim().to_string())
+			.filter(|a| !a.is_empty())
+			.collect(),
+	}
+}
+
 struct AttachmentKeys {
 	file: IdTupleGenerated,
 	bucket_enc_file_session_key: Option<Vec<u8>>,
@@ -1237,48 +1479,27 @@ mod tests {
 		let facade = EntityFacadeImpl::new(provider.clone(), random.clone());
 		let mail_key = GenericAesKey::Aes256(Aes256Key::generate(&random));
 		let file_key = GenericAesKey::Aes256(Aes256Key::generate(&random));
-		let enc_name = file_key.encrypt_data(b"report.pdf", InitializationVector::generate(&random)).unwrap();
+		let group_key = Versioned::new(GenericAesKey::Aes256(Aes256Key::generate(&random)), 0);
+		let attachment = new_draft_attachment(&random, &group_key, &file_key, &test_attachment("report.pdf"), vec![]).unwrap();
+		let enc_name = attachment.newFile.as_ref().unwrap().encFileName.clone();
 		let draft = DraftCreateData {
 			_format: 0,
 			previousMessageId: None,
 			conversationType: CONVERSATION_NEW,
 			ownerEncSessionKey: vec![1; 48],
 			ownerKeyVersion: 0,
-			draftData: DraftData {
-				_id: None,
-				subject: "Hello".into(),
-				bodyText: String::new(),
-				senderMailAddress: "me@tuta.com".into(),
-				senderName: "Me".into(),
-				// As for a recipient outside Tuta.
-				confidential: false,
-				method: 0,
-				compressedBodyText: Some("<div>Hi</div>".into()),
-				toRecipients: vec![DraftRecipient {
-					_id: None,
-					name: "Ann".into(),
-					mailAddress: "ann@tuta.com".into(),
-					_errors: Default::default(),
-				}],
-				ccRecipients: vec![],
-				bccRecipients: vec![],
-				addedAttachments: vec![DraftAttachment {
-					_id: None,
-					ownerEncFileSessionKey: vec![2; 48],
-					ownerKeyVersion: 0,
-					existingFile: None,
-					newFile: Some(NewDraftAttachment {
-						_id: None,
-						encFileName: enc_name.clone(),
-						encMimeType: enc_name.clone(),
-						encCid: None,
-						referenceTokens: vec![],
-					}),
-				}],
-				removedAttachments: vec![],
-				replyTos: vec![],
-				_errors: Default::default(),
-			},
+			draftData: draft_data(
+				&test_sender(),
+				&test_outgoing(None),
+				DraftParts {
+					// As for a recipient outside Tuta.
+					confidential: false,
+					method: 0,
+					reply_tos: vec![],
+					added: vec![attachment],
+					removed: vec![],
+				},
+			),
 			_errors: Default::default(),
 		};
 
@@ -1374,6 +1595,162 @@ mod tests {
 				attachments: vec![],
 			},
 		));
+	}
+
+	fn test_sender() -> TernAccount {
+		TernAccount {
+			mail_address: "me@tuta.com".into(),
+			name: "Me".into(),
+			mail_group: GeneratedId("mailgroup".into()),
+		}
+	}
+
+	fn test_attachment(name: &str) -> OutgoingAttachment {
+		OutgoingAttachment {
+			name: name.into(),
+			mime_type: "application/pdf".into(),
+			data: b"%PDF".to_vec(),
+		}
+	}
+
+	fn test_outgoing(existing: Option<ExistingDraft>) -> OutgoingMail {
+		OutgoingMail {
+			to: vec![OutgoingRecipient {
+				name: "Ann".into(),
+				address: "ann@tuta.com".into(),
+			}],
+			cc: vec![],
+			bcc: vec![],
+			subject: "Hello".into(),
+			body_html: "<div>Hi</div>".into(),
+			attachments: vec![test_attachment("report.pdf")],
+			previous: None,
+			existing,
+		}
+	}
+
+	/// Updating a draft as `updateDraft` does: files the draft keeps are not sent again, the dropped
+	/// one goes in removedAttachments, only the new upload is added, and the request is encrypted
+	/// with the draft's own session key like a new draft.
+	#[test]
+	fn draft_update_request_removes_dropped_files_and_adds_only_new_ones() {
+		use crate::instance_mapper::InstanceMapper;
+		use crate::json_serializer::JsonSerializer;
+		use crate::util::test_utils::mock_type_model_provider;
+
+		let provider = Arc::new(mock_type_model_provider());
+		let mapper = InstanceMapper::new(provider.clone());
+		let random = RandomizerFacade::from_core(rand_core::OsRng);
+		let facade = EntityFacadeImpl::new(provider.clone(), random.clone());
+		let mail_key = GenericAesKey::Aes256(Aes256Key::generate(&random));
+		let file_key = GenericAesKey::Aes256(Aes256Key::generate(&random));
+		let group_key = Versioned::new(GenericAesKey::Aes256(Aes256Key::generate(&random)), 3);
+		let id = |list: &str, element: &str| IdTupleGenerated {
+			list_id: GeneratedId(list.into()),
+			element_id: GeneratedId(element.into()),
+		};
+		let (kept, dropped) = (id("files", "kept"), id("files", "dropped"));
+		let draft_id = id("mails", "draft");
+		let outgoing = test_outgoing(Some(ExistingDraft {
+			mail: draft_id.clone(),
+			kept_attachments: vec![kept.clone()],
+		}));
+
+		let removed = removed_attachments(&[kept.clone(), dropped.clone()], &outgoing.existing.as_ref().unwrap().kept_attachments);
+		assert_eq!(removed, vec![dropped.clone()]);
+		let token = crate::entities::generated::sys::BlobReferenceTokenWrapper {
+			_id: None,
+			blobReferenceToken: "token".into(),
+		};
+		let added = vec![new_draft_attachment(&random, &group_key, &file_key, &outgoing.attachments[0], vec![token]).unwrap()];
+		let request = draft_update_data(
+			draft_id.clone(),
+			draft_data(
+				&test_sender(),
+				&outgoing,
+				DraftParts {
+					confidential: true,
+					method: 0,
+					// As loaded from the draft's MailDetailsDraft.
+					reply_tos: vec![EncryptedMailAddress {
+						_id: Some(CustomId("abcd".into())),
+						name: "Reply Here".into(),
+						address: "reply@tuta.com".into(),
+						_errors: Default::default(),
+					}],
+					added,
+					removed,
+				},
+			),
+		);
+
+		let parsed = mapper.serialize_entity(request).unwrap();
+		let model = provider.resolve_client_type_ref(&DraftUpdateData::type_ref()).unwrap();
+		let encrypted = facade.encrypt_and_map(model, &parsed, &mail_key).unwrap();
+		JsonSerializer::new(provider.clone())
+			.serialize(&DraftUpdateData::type_ref(), encrypted.clone())
+			.expect("the encrypted draft update serializes for the wire");
+
+		let field = |entity: &ParsedEntity, type_ref: TypeRef, name: &str| -> ElementValue {
+			let model = provider.resolve_client_type_ref(&type_ref).unwrap();
+			entity[&model.get_attribute_id_by_attribute_name(name).unwrap()].clone()
+		};
+		let decrypt = |key: &GenericAesKey, value: ElementValue| key.decrypt_data(value.assert_bytes());
+
+		assert_eq!(field(&encrypted, DraftUpdateData::type_ref(), "draft").assert_array()[0].assert_tuple_id_generated(), &draft_id);
+		let data = field(&encrypted, DraftUpdateData::type_ref(), "draftData").assert_array()[0].assert_dict();
+		assert_eq!(decrypt(&mail_key, field(&data, DraftData::type_ref(), "subject")).unwrap(), b"Hello");
+		assert_eq!(decrypt(&mail_key, field(&data, DraftData::type_ref(), "confidential")).unwrap(), b"1");
+
+		let removed: Vec<IdTupleGenerated> = field(&data, DraftData::type_ref(), "removedAttachments")
+			.assert_array()
+			.iter()
+			.map(|v| v.assert_tuple_id_generated().clone())
+			.collect();
+		assert_eq!(removed, vec![dropped], "only the dropped file is removed; the kept one stays untouched");
+
+		let added = field(&data, DraftData::type_ref(), "addedAttachments").assert_array();
+		assert_eq!(added.len(), 1, "the kept file is not added again");
+		let attachment = added[0].assert_dict();
+		assert!(field(&attachment, DraftAttachment::type_ref(), "existingFile").assert_array().is_empty());
+		assert_eq!(field(&attachment, DraftAttachment::type_ref(), "ownerKeyVersion").assert_number(), 3);
+		let owner_enc = field(&attachment, DraftAttachment::type_ref(), "ownerEncFileSessionKey");
+		assert_eq!(group_key.object.decrypt_aes_key(owner_enc.assert_bytes()).unwrap(), file_key);
+		let new_file = field(&attachment, DraftAttachment::type_ref(), "newFile").assert_array()[0].assert_dict();
+		assert_eq!(decrypt(&file_key, field(&new_file, NewDraftAttachment::type_ref(), "encFileName")).unwrap(), b"report.pdf");
+		assert_eq!(decrypt(&file_key, field(&new_file, NewDraftAttachment::type_ref(), "encMimeType")).unwrap(), b"application/pdf");
+
+		let reply_to = field(&data, DraftData::type_ref(), "replyTos").assert_array()[0].assert_dict();
+		assert_eq!(decrypt(&mail_key, field(&reply_to, EncryptedMailAddress::type_ref(), "name")).unwrap(), b"Reply Here");
+		// Unlike a recipient's, a reply-to's address is encrypted too.
+		assert_eq!(decrypt(&mail_key, field(&reply_to, EncryptedMailAddress::type_ref(), "address")).unwrap(), b"reply@tuta.com");
+		let to = field(&data, DraftData::type_ref(), "toRecipients").assert_array()[0].assert_dict();
+		assert_eq!(field(&to, DraftRecipient::type_ref(), "mailAddress").assert_string(), "ann@tuta.com");
+	}
+
+	#[test]
+	fn contacts_read_as_first_and_last_name_with_their_addresses() {
+		use crate::entities::generated::tutanota::ContactMailAddress;
+		let address = |a: &str| ContactMailAddress {
+			_id: None,
+			r#type: 0,
+			address: a.into(),
+			customTypeName: String::new(),
+			_errors: Default::default(),
+		};
+		let mut contact: Contact = crate::util::test_utils::create_test_entity();
+		contact.firstName = " Ann ".into();
+		contact.lastName = "Lee".into();
+		contact.mailAddresses = vec![address("ann@tuta.com"), address("  "), address("ann@work.org")];
+		assert_eq!(
+			tern_contact(&contact),
+			TernContact {
+				name: "Ann Lee".into(),
+				addresses: vec!["ann@tuta.com".into(), "ann@work.org".into()],
+			}
+		);
+		contact.firstName = String::new();
+		assert_eq!(tern_contact(&contact).name, "Lee");
 	}
 
 	#[test]

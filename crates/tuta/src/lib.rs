@@ -17,8 +17,8 @@ use tutasdk::folder_system::MailSetKind;
 use tutasdk::login::{CredentialType, Credentials};
 use tutasdk::net::native_rest_client::NativeRestClient;
 use tutasdk::tern::{
-	OutgoingAttachment, OutgoingMail, OutgoingRecipient, PageItem, TernAccount, TernError, TernMail, CONVERSATION_FORWARD,
-	CONVERSATION_REPLY,
+	ExistingDraft, OutgoingAttachment, OutgoingMail, OutgoingRecipient, PageItem, TernAccount, TernContact, TernError, TernMail,
+	CONVERSATION_FORWARD, CONVERSATION_REPLY,
 };
 use tutasdk::{CustomId, GeneratedId, IdTupleGenerated, Sdk};
 
@@ -256,6 +256,44 @@ fn summary(mail: &TutaMail, me: &str) -> Option<MailSummary> {
 	})
 }
 
+/// The SDK's view of a draft: recipients, body, new attachments, and what it answers or replaces.
+fn outgoing_mail(draft: Draft) -> Result<OutgoingMail> {
+	let recipients = |list: Vec<Address>| list.into_iter().map(|a| OutgoingRecipient { name: a.name, address: a.address }).collect();
+	let previous = draft.previous.and_then(|(id, kind)| match kind {
+		ReplyKind::Reply => Some((id_tuple(&id), CONVERSATION_REPLY)),
+		ReplyKind::Forward => Some((id_tuple(&id), CONVERSATION_FORWARD)),
+		ReplyKind::New => None,
+	});
+	let existing = match draft.existing {
+		Some(id) => Some(ExistingDraft {
+			mail: id_tuple(&id),
+			kept_attachments: draft.kept.iter().map(|a| file_id(&a.id)).collect::<Result<_>>()?,
+		}),
+		None => None,
+	};
+	Ok(OutgoingMail {
+		to: recipients(draft.to),
+		cc: recipients(draft.cc),
+		bcc: recipients(draft.bcc),
+		subject: draft.subject,
+		body_html: draft.body_html,
+		attachments: draft.attachments.into_iter().map(|a| OutgoingAttachment { name: a.name, mime_type: a.mime, data: a.data }).collect(),
+		previous,
+		existing,
+	})
+}
+
+/// The File an [`Attachment`] id names: `"{list}/{element}"`.
+fn file_id(id: &str) -> Result<IdTupleGenerated> {
+	let (list, element) = id.split_once('/').ok_or_else(|| Error::Other("bad attachment id".into()))?;
+	Ok(IdTupleGenerated { list_id: GeneratedId(list.into()), element_id: GeneratedId(element.into()) })
+}
+
+/// One address per contact email, under the contact's name.
+fn contact_addresses(contacts: Vec<TernContact>) -> Vec<Address> {
+	contacts.into_iter().flat_map(|c| c.addresses.into_iter().map(move |a| Address::new(c.name.clone(), a))).collect()
+}
+
 /// `Mail.state` of a mail not sent yet (MailState.DRAFT in the TypeScript client).
 const MAIL_STATE_DRAFT: i64 = 0;
 
@@ -332,38 +370,28 @@ impl Backend for TutaBackend {
 	}
 
 	async fn attachment(&self, mail: &MailId, attachment: &Attachment) -> Result<Vec<u8>> {
-		let (list, element) = attachment.id.split_once('/').ok_or_else(|| Error::Other("bad attachment id".into()))?;
-		let file = IdTupleGenerated { list_id: GeneratedId(list.into()), element_id: GeneratedId(element.into()) };
+		let file = file_id(&attachment.id)?;
 		let (tern, mail) = (self.mail.clone(), id_tuple(mail));
 		guarded(async move { tern.download(&mail, &file).await.map_err(to_error) }).await
 	}
 
 	async fn send(&self, draft: Draft) -> Result<()> {
-		let recipients = |list: Vec<Address>| list.into_iter().map(|a| OutgoingRecipient { name: a.name, address: a.address }).collect();
-		let previous = draft.previous.and_then(|(id, kind)| match kind {
-			ReplyKind::Reply => Some((id_tuple(&id), CONVERSATION_REPLY)),
-			ReplyKind::Forward => Some((id_tuple(&id), CONVERSATION_FORWARD)),
-			ReplyKind::New => None,
-		});
-		let outgoing = OutgoingMail {
-			to: recipients(draft.to),
-			cc: recipients(draft.cc),
-			bcc: recipients(draft.bcc),
-			subject: draft.subject,
-			body_html: draft.body_html,
-			attachments: draft.attachments.into_iter().map(|a| OutgoingAttachment { name: a.name, mime_type: a.mime, data: a.data }).collect(),
-			previous,
-		};
+		let outgoing = outgoing_mail(draft)?;
 		let (mail, account) = (self.mail.clone(), self.account.clone());
 		guarded(async move { mail.send(&account, outgoing).await.map(|_| ()).map_err(to_error) }).await
 	}
 
-	async fn save_draft(&self, _draft: Draft) -> Result<MailId> {
-		Err(Error::Other("Saving drafts is not supported yet".into()))
+	async fn save_draft(&self, draft: Draft) -> Result<MailId> {
+		let outgoing = outgoing_mail(draft)?;
+		let (mail, account) = (self.mail.clone(), self.account.clone());
+		let id = guarded(async move { mail.save_draft(&account, outgoing).await.map_err(to_error) }).await?;
+		Ok(id_string(&id))
 	}
 
 	async fn contacts(&self) -> Result<Vec<Address>> {
-		Ok(Vec::new())
+		let mail = self.mail.clone();
+		let contacts = guarded(async move { mail.contacts().await.map_err(to_error) }).await?;
+		Ok(contact_addresses(contacts))
 	}
 
 	async fn set_unread(&self, id: &MailId, unread: bool) -> Result<()> {
@@ -435,6 +463,31 @@ mod tests {
 	}
 
 	#[test]
+	fn a_saved_draft_is_updated_keeping_the_listed_files() {
+		let kept = Attachment { id: "files/one".into(), name: "one.pdf".into(), mime: "application/pdf".into(), size: 1, cid: None };
+		let outgoing = outgoing_mail(Draft {
+			existing: Some(MailId { list: "mails".into(), element: "draft".into() }),
+			kept: vec![kept],
+			previous: Some((MailId { list: "mails".into(), element: "answered".into() }, ReplyKind::Reply)),
+			..Default::default()
+		})
+		.unwrap();
+		let existing = outgoing.existing.unwrap();
+		assert_eq!(id_string(&existing.mail), MailId { list: "mails".into(), element: "draft".into() });
+		assert_eq!(existing.kept_attachments, vec![file_id("files/one").unwrap()]);
+		assert!(file_id("nolist").is_err());
+	}
+
+	#[test]
+	fn each_contact_address_is_one_suggestion() {
+		let contacts = vec![
+			TernContact { name: "Ann Lee".into(), addresses: vec!["ann@tuta.com".into(), "ann@work.org".into()] },
+			TernContact { name: "No Mail".into(), addresses: vec![] },
+		];
+		assert_eq!(contact_addresses(contacts), vec![Address::new("Ann Lee", "ann@tuta.com"), Address::new("Ann Lee", "ann@work.org")]);
+	}
+
+	#[test]
 	fn cache_names_stay_inside_the_cache() {
 		let client = CacheFileClient { dir: PathBuf::from("/tmp/x") };
 		assert_eq!(client.path("../../etc/passwd"), PathBuf::from("/tmp/x/.._.._etc_passwd"));
@@ -488,6 +541,66 @@ mod tests {
 		assert!(opened.body_html.contains("live test"));
 		assert_eq!(opened.attachments[0].name, "test.pdf");
 		assert_eq!(backend.attachment(&mail.id, &opened.attachments[0]).await.unwrap(), data);
+
+		// A draft with an attachment, saved again keeping it and adding a second, then sent.
+		let drafts = folders.iter().find(|f| f.kind == FolderKind::Drafts).unwrap();
+		let subject = format!("Tern draft self-test {stamp}");
+		let pdf = |name: &str| tern_core::NewAttachment { name: name.into(), mime: "application/pdf".into(), data: data.clone() };
+		let me = vec![Address::new("", backend.account().address)];
+		let first = backend
+			.save_draft(Draft {
+				to: me.clone(),
+				subject: subject.clone(),
+				body_html: tern_core::text_to_html("First version."),
+				attachments: vec![pdf("one.pdf")],
+				..Default::default()
+			})
+			.await
+			.unwrap();
+		let page = backend.list(&drafts.id, None, 20).await.unwrap();
+		assert!(page.mails.iter().any(|m| m.id == first && m.draft), "the draft is in Drafts");
+		let saved = backend.open(&first).await.unwrap();
+		assert_eq!(saved.attachments.len(), 1);
+		let second = backend
+			.save_draft(Draft {
+				to: me.clone(),
+				subject: subject.clone(),
+				body_html: tern_core::text_to_html("Second version."),
+				attachments: vec![pdf("two.pdf")],
+				existing: Some(first.clone()),
+				kept: saved.attachments.clone(),
+				..Default::default()
+			})
+			.await
+			.unwrap();
+		assert_eq!(second, first, "an update keeps the draft where it is");
+		let updated = backend.open(&second).await.unwrap();
+		assert!(updated.body_html.contains("Second version"));
+		let mut names: Vec<_> = updated.attachments.iter().map(|a| a.name.clone()).collect();
+		names.sort();
+		assert_eq!(names, ["one.pdf", "two.pdf"]);
+		// Send it with only the second file: the first is removed on the way.
+		let kept = updated.attachments.iter().filter(|a| a.name == "two.pdf").cloned().collect();
+		backend
+			.send(Draft {
+				to: me.clone(),
+				subject: subject.clone(),
+				body_html: tern_core::text_to_html("Final version."),
+				existing: Some(second),
+				kept,
+				..Default::default()
+			})
+			.await
+			.unwrap();
+		let page = backend.list(&sent.id, None, 20).await.unwrap();
+		let mail = page.mails.iter().find(|m| m.subject == subject).expect("sent draft in Sent");
+		let opened = backend.open(&mail.id).await.unwrap();
+		assert!(opened.body_html.contains("Final version"));
+		assert_eq!(opened.attachments.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["two.pdf"]);
+		assert_eq!(backend.attachment(&mail.id, &opened.attachments[0]).await.unwrap(), data);
+
+		let contacts = backend.contacts().await.unwrap();
+		assert!(contacts.iter().all(|c| c.address.contains('@')), "every contact has an address");
 		backend.sign_out().await.unwrap();
 	}
 }
