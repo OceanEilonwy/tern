@@ -45,6 +45,47 @@ pub fn size(bytes: u64) -> String {
 	glib::format_size(bytes).to_string()
 }
 
+/// A spinner and one word saying what is happening, such as "Opening…".
+pub fn busy(word: &str) -> gtk::Box {
+	use gtk::prelude::*;
+	let row = gtk::Box::builder().spacing(8).halign(gtk::Align::Center).build();
+	row.append(&adw::Spinner::new());
+	row.append(&gtk::Label::new(Some(word)));
+	row
+}
+
+/// The word a `busy` row shows, if `widget` holds one on screen.
+pub fn busy_word(widget: &gtk::Widget) -> Option<String> {
+	use gtk::prelude::*;
+	let mut child = widget.first_child();
+	while let Some(w) = child {
+		if w.is_visible() {
+			if let Some(label) = w.downcast_ref::<gtk::Label>().filter(|_| w.prev_sibling().is_some_and(|s| s.is::<adw::Spinner>())) {
+				return Some(label.label().to_string());
+			}
+			if let Some(found) = busy_word(&w) {
+				return Some(found);
+			}
+		}
+		child = w.next_sibling();
+	}
+	None
+}
+
+/// The toast once a mail is sent: "Sent", with the start of its subject when it has one.
+pub fn sent_toast(subject: &str) -> String {
+	const SHOWN: usize = 40;
+	let subject = subject.split_whitespace().collect::<Vec<_>>().join(" ");
+	if subject.is_empty() {
+		return "Sent".into();
+	}
+	let excerpt = match subject.char_indices().nth(SHOWN) {
+		Some((cut, _)) => format!("{}…", subject[..cut].trim_end()),
+		None => subject,
+	};
+	format!("Sent “{excerpt}”")
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -61,6 +102,14 @@ mod tests {
 		assert_eq!(short_date(NOW - 72 * HOUR, NOW, &utc), "Monday");
 		assert_eq!(short_date(NOW - 30 * 24 * HOUR, NOW, &utc), "30 Sep");
 		assert_eq!(short_date(NOW - 400 * 24 * HOUR, NOW, &utc), "25 Sep 2024");
+	}
+
+	#[test]
+	fn the_sent_toast_names_the_mail() {
+		assert_eq!(sent_toast("Lunch on Friday?"), "Sent “Lunch on Friday?”");
+		assert_eq!(sent_toast("  "), "Sent");
+		assert_eq!(sent_toast("Re: the quarterly numbers and what we do about them next"), "Sent “Re: the quarterly numbers and what we do…”");
+		assert_eq!(sent_toast("Zürich\nplans"), "Sent “Zürich plans”");
 	}
 
 	#[test]

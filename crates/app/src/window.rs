@@ -11,7 +11,7 @@ use tern_cache::{sync::Level, Cache};
 use tern_core::{demo::DemoBackend, Backend, Error, FolderKind};
 
 use crate::settings::Settings;
-use crate::{background, keyring, login::Login, mailbox::Mailbox, runtime, screenshot};
+use crate::{background, format, keyring, login::Login, mailbox::Mailbox, runtime, screenshot};
 
 type ChangedHook = Box<dyn Fn(&[FolderKind])>;
 
@@ -47,6 +47,14 @@ impl Ctx {
 		self.sync_now();
 	}
 
+	/// Changes how the window is laid out; `save` once the change is done, not on every step of a drag.
+	pub fn set_layout(&self, settings: Settings, save: bool) {
+		self.settings.set(settings);
+		if save {
+			settings.save();
+		}
+	}
+
 	/// Starts the background sync's next round now.
 	pub fn sync_now(&self) {
 		self.wake.notify_one();
@@ -67,8 +75,8 @@ impl Ctx {
 	}
 
 	/// Called by a composer once its mail is sent.
-	pub fn sent(&self) {
-		self.toast("Sent");
+	pub fn sent(&self, subject: &str) {
+		self.toast(&format::sent_toast(subject));
 		self.changed(&[FolderKind::Sent, FolderKind::Drafts]);
 	}
 
@@ -344,6 +352,7 @@ fn shortcuts_dialog() -> adw::ShortcutsDialog {
 				("Back to the List", "Escape"),
 				("Open a Message in the Conversation", "space"),
 				("Go to Folder 1…9", "<Control>1"),
+				("Folders as Icons, or Show Folders", "F9"),
 			],
 		),
 		(

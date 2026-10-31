@@ -269,7 +269,7 @@ impl Composer {
 		let busy = self.sending.get() || self.pending.get() > 0;
 		self.send.set_sensitive(!busy);
 		if self.sending.get() {
-			self.send.set_child(Some(&adw::Spinner::new()));
+			self.send.set_child(Some(&format::busy("Sending…")));
 		} else {
 			self.send.set_label("Send");
 		}
@@ -549,11 +549,17 @@ impl Composer {
 		dialog.present(Some(&self.window));
 	}
 
+	/// For the screenshot scenes: the word saying what the composer is doing, if it shows one.
+	pub fn busy_word(&self) -> Option<String> {
+		format::busy_word(self.send.upcast_ref())
+	}
+
 	pub fn send(self: &Rc<Self>) {
 		if self.sending.get() || self.pending.get() > 0 {
 			return;
 		}
 		let fields = self.fields();
+		let subject = fields.subject.clone();
 		let draft = match fields.build_draft() {
 			Ok(d) => d,
 			Err(invalid) => {
@@ -588,7 +594,7 @@ impl Composer {
 					}
 					this.done.set(true);
 					this.window.close();
-					this.ctx.sent();
+					this.ctx.sent(&subject);
 				}
 				Err(e) => this.toast(&e.to_string()),
 			}

@@ -4,6 +4,7 @@
 //! brought up to date in the background while a small spinner in its header turns.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -13,10 +14,19 @@ use tern_core::{Folder, FolderId, FolderKind, MailId, MailSummary};
 
 use crate::compose_model::{Answer, Fields};
 use crate::reader::Reader;
-use crate::{composer, format, runtime, window::Ctx};
+use crate::settings::Settings;
+use crate::{composer, format, grip, runtime, window::Ctx};
 
 /// Conversations taken from the cache at a time.
 const ROWS: usize = 100;
+
+/// The folder sidebar's width bounds, in pixels, and its width as a rail of icons (wider when its
+/// header needs it). Dragged narrower than `RAIL_SNAP` it becomes the rail.
+const FOLDERS: (u32, u32) = (180, 400);
+const RAIL: u32 = 64;
+pub const RAIL_SNAP: i32 = 140;
+/// The conversation list's width bounds.
+const LIST: (u32, u32) = (280, 720);
 
 type MailAction = fn(&Rc<Mailbox>);
 
@@ -26,6 +36,7 @@ pub struct Mailbox {
 	outer: adw::OverlaySplitView,
 	inner: adw::NavigationSplitView,
 	account: adw::WindowTitle,
+	folder_header: adw::HeaderBar,
 	folder_list: gtk::ListBox,
 	folders: RefCell<Vec<(Folder, gtk::Label)>>,
 	current: RefCell<Option<Folder>>,
@@ -34,6 +45,8 @@ pub struct Mailbox {
 	empty: adw::StatusPage,
 	syncing: adw::Spinner,
 	pub store: gio::ListStore,
+	/// The row widget showing each conversation on screen, so a changed one is redrawn in place.
+	bound: Rc<RefCell<HashMap<glib::Object, gtk::Box>>>,
 	selection: gtk::SingleSelection,
 	list_view: gtk::ListView,
 	/// How many conversations the list asks the cache for; grows when scrolled to the end.
@@ -155,10 +168,19 @@ impl Mailbox {
 			item.set_child(Some(&row_widget()));
 		});
 		let tz = glib::TimeZone::local();
+		let bound: Rc<RefCell<HashMap<glib::Object, gtk::Box>>> = Rc::default();
+		let b = bound.clone();
 		factory.connect_bind(move |_, item| {
 			let item = item.downcast_ref::<gtk::ListItem>().unwrap();
 			let (Some(row), Some(obj)) = (item.child().and_downcast::<gtk::Box>(), item.item()) else { return };
 			bind_row(&row, &row_of(&obj), format::now_ms(), &tz);
+			b.borrow_mut().insert(obj, row);
+		});
+		let b = bound.clone();
+		factory.connect_unbind(move |_, item| {
+			if let Some(obj) = item.downcast_ref::<gtk::ListItem>().unwrap().item() {
+				b.borrow_mut().remove(&obj);
+			}
 		});
 		let list_view = gtk::ListView::builder().model(&selection).factory(&factory).css_classes(["navigation-sidebar"]).build();
 		list_view.update_property(&[gtk::accessible::Property::Label("Conversations")]);
@@ -184,7 +206,8 @@ impl Mailbox {
 		let list_view_tb = adw::ToolbarView::new();
 		list_view_tb.add_top_bar(&list_header);
 		list_view_tb.set_content(Some(&list_stack));
-		let list_page = adw::NavigationPage::builder().title("Inbox").tag("list").child(&list_view_tb).build();
+		let (list_pane, list_grip) = grip::wrap(&list_view_tb);
+		let list_page = adw::NavigationPage::builder().title("Inbox").tag("list").child(&list_pane).build();
 
 		let reader = Reader::new(ctx.clone());
 		let inner = adw::NavigationSplitView::builder()
@@ -195,7 +218,8 @@ impl Mailbox {
 			.sidebar_width_fraction(0.38)
 			.build();
 		let inner_page = adw::NavigationPage::builder().title("Mail").child(&inner).build();
-		let folder_page = adw::NavigationPage::builder().title("Folders").child(&folder_view).build();
+		let (folder_pane, folder_grip) = grip::wrap(&folder_view);
+		let folder_page = adw::NavigationPage::builder().title("Folders").child(&folder_pane).build();
 		let outer = adw::OverlaySplitView::builder()
 			.sidebar(&folder_page)
 			.content(&inner_page)
@@ -205,6 +229,8 @@ impl Mailbox {
 			.build();
 		outer.bind_property("collapsed", &sidebar_toggle, "visible").sync_create().build();
 		outer.bind_property("show-sidebar", &sidebar_toggle, "active").sync_create().bidirectional().build();
+		outer.bind_property("collapsed", &folder_grip, "visible").invert_boolean().sync_create().build();
+		inner.bind_property("collapsed", &list_grip, "visible").invert_boolean().sync_create().build();
 
 		let this = Rc::new(Mailbox {
 			ctx,
@@ -212,6 +238,7 @@ impl Mailbox {
 			outer,
 			inner,
 			account,
+			folder_header,
 			folder_list,
 			folders: RefCell::default(),
 			current: RefCell::default(),
@@ -220,6 +247,7 @@ impl Mailbox {
 			empty,
 			syncing,
 			store,
+			bound,
 			selection,
 			list_view,
 			shown: Cell::new(ROWS),
@@ -230,6 +258,8 @@ impl Mailbox {
 			reader,
 		});
 		this.connect_signals(&list_scroll);
+		this.connect_grips((&folder_grip, &folder_pane), (&list_grip, &list_pane));
+		this.apply_panes();
 		let weak = Rc::downgrade(&this);
 		this.reader.connect_read(move |summary| {
 			if let Some(this) = weak.upgrade() {
@@ -266,6 +296,114 @@ impl Mailbox {
 		narrow.add_setter(&self.outer, "collapsed", Some(&true.to_value()));
 		narrow.add_setter(&self.inner, "collapsed", Some(&true.to_value()));
 		vec![medium, narrow]
+	}
+
+	/// Dragging a pane's edge resizes it; the folders become a rail of icons when dragged narrow,
+	/// or on a double click. The widths are kept for next time.
+	fn connect_grips(self: &Rc<Self>, folders: (&gtk::Box, &gtk::Overlay), list: (&gtk::Box, &gtk::Overlay)) {
+		let save = {
+			let ctx = self.ctx.clone();
+			move || ctx.set_layout(ctx.settings(), true)
+		};
+		let weak = Rc::downgrade(self);
+		let resize = move |w| {
+			if let Some(this) = weak.upgrade() {
+				this.drag_folders(w);
+			}
+		};
+		let weak = Rc::downgrade(self);
+		let double = move || {
+			if let Some(this) = weak.upgrade() {
+				this.toggle_rail();
+			}
+		};
+		grip::connect(folders.0, folders.1, resize, save.clone(), double);
+		let weak = Rc::downgrade(self);
+		let resize = move |w| {
+			if let Some(this) = weak.upgrade() {
+				this.drag_list(w);
+			}
+		};
+		let weak = Rc::downgrade(self);
+		let double = move || {
+			if let Some(this) = weak.upgrade() {
+				this.ctx.set_layout(Settings { list_width: 0, ..this.ctx.settings() }, true);
+				this.apply_panes();
+			}
+		};
+		grip::connect(list.0, list.1, resize, save, double);
+		let weak = Rc::downgrade(self);
+		self.outer.connect_collapsed_notify(move |_| {
+			if let Some(this) = weak.upgrade() {
+				this.apply_panes();
+			}
+		});
+	}
+
+	/// The folder sidebar's edge is dragged to `w` pixels.
+	pub fn drag_folders(&self, w: i32) {
+		let (folders_width, folders_rail) = folders_drag(w, self.ctx.settings().folders_width);
+		self.ctx.set_layout(Settings { folders_width, folders_rail, ..self.ctx.settings() }, false);
+		self.apply_panes();
+	}
+
+	/// The conversation list's edge is dragged to `w` pixels.
+	pub fn drag_list(&self, w: i32) {
+		let list_width = (w.max(0) as u32).clamp(LIST.0, LIST.1);
+		self.ctx.set_layout(Settings { list_width, ..self.ctx.settings() }, false);
+		self.apply_panes();
+	}
+
+	/// For the screenshot scenes: the widths of the folder sidebar and the conversation list.
+	pub fn pane_widths(&self) -> (i32, i32) {
+		(self.outer.sidebar().map_or(0, |w| w.width()), self.inner.sidebar().map_or(0, |w| w.width()))
+	}
+
+	/// F9: folders to a rail of icons and back; on a narrow window, shows or hides them.
+	fn toggle_rail(&self) {
+		if self.outer.is_collapsed() {
+			self.outer.set_show_sidebar(!self.outer.shows_sidebar());
+			return;
+		}
+		let s = self.ctx.settings();
+		self.ctx.set_layout(Settings { folders_rail: !s.folders_rail, ..s }, true);
+		self.apply_panes();
+	}
+
+	/// Sizes the panes as last left. Up to a share of the window: a narrower window narrows them.
+	fn apply_panes(&self) {
+		let s = self.ctx.settings();
+		let rail = self.is_rail();
+		self.outer.set_sidebar_width_unit(adw::LengthUnit::Px);
+		let (min, max, fraction) = match (rail, s.folders_width) {
+			(true, _) => (RAIL, RAIL, 0.0),
+			(false, 0) => (200, 260, 0.2),
+			(false, w) => (FOLDERS.0.min(w), w, 0.3),
+		};
+		self.outer.set_min_sidebar_width(min as f64);
+		self.outer.set_max_sidebar_width(max as f64);
+		self.outer.set_sidebar_width_fraction(fraction);
+		self.folder_header.set_show_title(!rail);
+		let mut row = self.folder_list.first_child();
+		while let Some(r) = row {
+			if let Some(b) = r.downcast_ref::<gtk::ListBoxRow>().and_then(|r| r.child()).and_downcast::<gtk::Box>() {
+				set_rail_row(&b, rail);
+			}
+			row = r.next_sibling();
+		}
+		self.inner.set_sidebar_width_unit(adw::LengthUnit::Px);
+		let (min, max, fraction) = match s.list_width {
+			0 => (300, 420, 0.38),
+			w => (LIST.0.min(w), w, 0.6),
+		};
+		self.inner.set_min_sidebar_width(min as f64);
+		self.inner.set_max_sidebar_width(max as f64);
+		self.inner.set_sidebar_width_fraction(fraction);
+	}
+
+	/// The folders show as a rail of icons: only beside the list, not over it on a narrow window.
+	pub fn is_rail(&self) -> bool {
+		self.ctx.settings().folders_rail && !self.outer.is_collapsed()
 	}
 
 	fn connect_signals(self: &Rc<Self>, list_scroll: &gtk::ScrolledWindow) {
@@ -368,7 +506,7 @@ impl Mailbox {
 	}
 
 	fn add_actions(self: &Rc<Self>) {
-		let entries: [(&str, MailAction); 11] = [
+		let entries: [(&str, MailAction); 12] = [
 			("compose", |m| {
 				composer::Composer::open(&m.ctx, Fields::default(), None);
 			}),
@@ -392,6 +530,7 @@ impl Mailbox {
 			("next", |m| m.step(1)),
 			("previous", |m| m.step(-1)),
 			("focus-list", |m| m.focus_list()),
+			("toggle-folders", |m| m.toggle_rail()),
 		];
 		for (name, f) in entries {
 			let action = gio::SimpleAction::new(name, None);
@@ -517,9 +656,8 @@ impl Mailbox {
 			row_box.append(&icon);
 			row_box.append(&name);
 			row_box.append(&count);
-			if i < 9 {
-				row_box.set_tooltip_text(Some(&format!("Ctrl+{}", i + 1)));
-			}
+			row_box.set_tooltip_text(Some(&if i < 9 { format!("{} (Ctrl+{})", folder.name, i + 1) } else { folder.name.clone() }));
+			set_rail_row(&row_box, self.is_rail());
 			self.folder_list.append(&row_box);
 			rows.push((folder, count));
 		}
@@ -571,13 +709,26 @@ impl Mailbox {
 		let rows = cache.threads(&folder.id, self.shown.get()).unwrap_or_default();
 		let selected = self.selection.selected_item().map(|o| row_of(&o).key);
 		let position = self.selection.selected();
-		let items: Vec<glib::BoxedAnyObject> = rows.iter().cloned().map(glib::BoxedAnyObject::new).collect();
-		// Rows that did not change keep their widgets.
-		let same = self.store.n_items() as usize == rows.len()
-			&& (0..self.store.n_items()).all(|i| self.store.item(i).is_some_and(|o| row_of(&o) == rows[i as usize]));
-		if !same {
+		let old: Vec<ThreadRow> = (0..self.store.n_items()).filter_map(|i| self.store.item(i)).map(|o| row_of(&o)).collect();
+		let (head, tail) = unchanged_ends(&old.iter().map(|r| &r.key).collect::<Vec<_>>(), &rows.iter().map(|r| &r.key).collect::<Vec<_>>());
+		// Conversations still in place keep their row object, so the keyboard focus and scroll stay
+		// on them; only a changed one is redrawn.
+		let tz = glib::TimeZone::local();
+		for (i, row) in rows.iter().enumerate().filter(|&(i, _)| i < head || i >= rows.len() - tail) {
+			let at = if i < head { i } else { i + old.len() - rows.len() };
+			if old[at] == *row {
+				continue;
+			}
+			let Some(obj) = self.store.item(at as u32) else { continue };
+			obj.downcast_ref::<glib::BoxedAnyObject>().unwrap().replace(row.clone());
+			if let Some(widget) = self.bound.borrow().get(&obj) {
+				bind_row(widget, row, format::now_ms(), &tz);
+			}
+		}
+		if head + tail < old.len().max(rows.len()) {
+			let items: Vec<glib::BoxedAnyObject> = rows[head..rows.len() - tail].iter().cloned().map(glib::BoxedAnyObject::new).collect();
 			self.hold.set(true);
-			self.store.splice(0, self.store.n_items(), &items);
+			self.store.splice(head as u32, (old.len() - head - tail) as u32, &items);
 			let again = selected.as_ref().and_then(|k| rows.iter().position(|r| &r.key == k));
 			self.selection.set_selected(again.map_or(gtk::INVALID_LIST_POSITION, |i| i as u32));
 			self.hold.set(false);
@@ -661,7 +812,7 @@ impl Mailbox {
 			// The cache has more than shown.
 			self.shown.set(self.shown.get() + ROWS);
 			self.reload_list();
-			if self.store.n_items() as usize >= self.shown.get() - ROWS + 1 {
+			if self.store.n_items() as usize > self.shown.get() - ROWS {
 				return;
 			}
 		}
@@ -816,6 +967,22 @@ impl Mailbox {
 		found.is_some()
 	}
 
+	/// For the screenshot scenes: moves the keyboard focus and selection to row `i`, as an arrow key does.
+	pub fn arrow_to(&self, i: u32) {
+		self.list_view.grab_focus();
+		self.by_keyboard.set(true);
+		self.list_view.scroll_to(i, gtk::ListScrollFlags::FOCUS | gtk::ListScrollFlags::SELECT, None);
+	}
+
+	/// For the screenshot scenes: the row holding the keyboard focus, and whether it is unread.
+	pub fn focused_row(&self) -> Option<(u32, bool)> {
+		let focus = gtk::prelude::GtkWindowExt::focus(&self.ctx.window)?;
+		let bound = self.bound.borrow();
+		let (obj, _) = bound.iter().find(|(_, w)| w.is_ancestor(&focus) || **w == focus)?;
+		let at = (0..self.store.n_items()).find(|&i| self.store.item(i).as_ref() == Some(obj))?;
+		Some((at, row_of(obj).unread))
+	}
+
 	/// For the screenshot scenes: the title of the status page shown instead of the list, if one is.
 	pub fn status(&self) -> Option<String> {
 		(self.list_stack.visible_child_name().as_deref() == Some("empty")).then(|| self.empty.title().to_string())
@@ -827,6 +994,33 @@ impl Mailbox {
 	}
 }
 
+/// What dragging the folder sidebar's edge to `w` pixels makes of it, from `last` (its width when
+/// not a rail; 0 for the default): narrow enough, a rail that keeps `last` for when it widens again.
+fn folders_drag(w: i32, last: u32) -> (u32, bool) {
+	if w < RAIL_SNAP {
+		(last, true)
+	} else {
+		((w as u32).clamp(FOLDERS.0, FOLDERS.1), false)
+	}
+}
+
+/// A folder's row as a line (icon, name, count) or, on the rail, the icon over its count.
+fn set_rail_row(row: &gtk::Box, rail: bool) {
+	let (Some(icon), Some(name), Some(count)) = (row.first_child(), row.first_child().and_then(|w| w.next_sibling()), row.last_child()) else { return };
+	row.set_orientation(if rail { gtk::Orientation::Vertical } else { gtk::Orientation::Horizontal });
+	row.set_spacing(if rail { 2 } else { 12 });
+	name.set_visible(!rail);
+	icon.set_halign(if rail { gtk::Align::Center } else { gtk::Align::Fill });
+	count.set_halign(if rail { gtk::Align::Center } else { gtk::Align::Fill });
+}
+
+/// How many conversations at the start and at the end of the list stay where they are, by key.
+fn unchanged_ends<K: PartialEq>(old: &[K], new: &[K]) -> (usize, usize) {
+	let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+	let tail = old[head..].iter().rev().zip(new[head..].iter().rev()).take_while(|(a, b)| a == b).count();
+	(head, tail)
+}
+
 fn set_count(label: &gtk::Label, unread: u32) {
 	label.set_label(&unread.to_string());
 	label.set_visible(unread > 0);
@@ -836,5 +1030,33 @@ fn unread_subtitle(unread: u32) -> String {
 	match unread {
 		0 => String::new(),
 		n => format!("{n} unread"),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn dragging_the_folders_narrow_makes_a_rail() {
+		assert_eq!(folders_drag(250, 0), (250, false));
+		assert_eq!(folders_drag(150, 250), (FOLDERS.0, false));
+		assert_eq!(folders_drag(900, 250), (FOLDERS.1, false));
+		// Narrow enough: a rail, keeping the width for when it is dragged out again.
+		assert_eq!(folders_drag(100, 250), (250, true));
+		assert_eq!(folders_drag(-20, 0), (0, true));
+	}
+
+	#[test]
+	fn rows_that_stay_put_are_found_at_both_ends() {
+		// A mail read: every row stays.
+		assert_eq!(unchanged_ends(&["a", "b", "c"], &["a", "b", "c"]), (3, 0));
+		// New mail on top.
+		assert_eq!(unchanged_ends(&["a", "b", "c"], &["n", "a", "b", "c"]), (0, 3));
+		// A conversation trashed from the middle.
+		assert_eq!(unchanged_ends(&["a", "b", "c"], &["a", "c"]), (1, 1));
+		// A reply moves a conversation to the top.
+		assert_eq!(unchanged_ends(&["a", "b", "c", "d"], &["c", "a", "b", "d"]), (0, 1));
+		assert_eq!(unchanged_ends::<&str>(&[], &["a"]), (0, 0));
 	}
 }

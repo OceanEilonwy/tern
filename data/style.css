@@ -12,6 +12,11 @@
   padding-top: 4px;
 }
 
+/* The handle on a pane's edge that resizes it; it shows only while pointed at. */
+.pane-grip:hover {
+  background: alpha(var(--accent-bg-color), 0.35);
+}
+
 /* Messages in a conversation, beside the sender in the list. */
 .thread-count {
   padding: 0 7px;

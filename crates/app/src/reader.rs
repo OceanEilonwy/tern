@@ -3,6 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::glib;
@@ -34,13 +35,15 @@ struct Card {
 	recipients: gtk::Label,
 	attachments: gtk::FlowBox,
 	body: gtk::TextView,
-	loading: adw::Spinner,
+	loading: gtk::Box,
 	opened: RefCell<Option<Rc<Opened>>>,
 	links: RefCell<Vec<(gtk::TextTag, String)>>,
 	/// Inline images with their natural size, refitted when the pane changes width.
 	pictures: RefCell<Vec<(gtk::Picture, (f64, f64))>>,
 	/// A load or draw in flight belongs to this generation of the card.
 	generation: Cell<u64>,
+	/// Waiting for the mail, from the cache or the server.
+	opening: Cell<bool>,
 }
 
 pub struct Reader {
@@ -275,7 +278,8 @@ impl Reader {
 			gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).column_spacing(8).row_spacing(8).max_children_per_line(4).homogeneous(false).visible(false).build();
 		let body = gtk::TextView::builder().editable(false).cursor_visible(false).wrap_mode(gtk::WrapMode::WordChar).pixels_below_lines(2).css_classes(["reader-body"]).build();
 		body.set_accessible_role(gtk::AccessibleRole::Document);
-		let loading = adw::Spinner::builder().width_request(24).height_request(24).halign(gtk::Align::Center).visible(false).build();
+		let loading = format::busy("Opening…");
+		loading.set_visible(false);
 
 		// Wraps onto a second line on a narrow window.
 		let actions = adw::WrapBox::builder().child_spacing(8).line_spacing(8).margin_top(6).build();
@@ -305,6 +309,7 @@ impl Reader {
 			links: RefCell::default(),
 			pictures: RefCell::default(),
 			generation: Cell::new(0),
+			opening: Cell::new(false),
 		});
 		self.update_snippet(&card);
 
@@ -407,13 +412,25 @@ impl Reader {
 		});
 	}
 
+	/// For the screenshot scenes: the word saying what the reader is doing, if it shows one.
+	pub fn busy_word(&self) -> Option<String> {
+		format::busy_word(self.cards_box.upcast_ref())
+	}
+
 	/// Opens a card's mail from the cache, or from the server and stores it.
 	fn load(self: &Rc<Self>, card: &Rc<Card>) {
 		let (Some(cache), Some(backend)) = (self.ctx.cache(), self.ctx.backend()) else { return };
 		let generation = card.generation.get() + 1;
 		card.generation.set(generation);
-		card.loading.set_visible(true);
 		card.body.set_visible(false);
+		card.opening.set(true);
+		// Mail from the cache opens at once; only a wait on the server shows what is happening.
+		let c = Rc::downgrade(card);
+		glib::timeout_add_local_once(Duration::from_millis(150), move || {
+			if let Some(card) = c.upgrade().filter(|card| card.generation.get() == generation && card.opening.get()) {
+				card.loading.set_visible(true);
+			}
+		});
 		let id = card.summary.id.clone();
 		let (weak, c) = (Rc::downgrade(self), Rc::downgrade(card));
 		runtime::spawn_local(async move {
@@ -434,6 +451,7 @@ impl Reader {
 			if card.generation.get() != generation {
 				return;
 			}
+			card.opening.set(false);
 			card.loading.set_visible(false);
 			match result {
 				Ok(opened) => {

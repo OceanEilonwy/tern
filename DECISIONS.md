@@ -113,3 +113,23 @@ attachments must work, KISS, fast, Rust. These are the calls I made, in the orde
 - Found while checking: a text view outside a scrolled window keeps the height of its first layout,
   made before it knows its width, until asked again; the reader asks once laid out. Inline pictures are
   fitted to the card's inner width; fitting them to the column made the card grow every frame.
+
+## Third round (2026-10-31)
+
+- **Arrow keys jumped to the top on unread mail**: opening an unread mail marks it read, which reloaded
+  the list by replacing every row, and the list's keyboard focus went with the replaced row. The list
+  now changes rows in place and only inserts or removes the conversations that came or went, so focus
+  and scroll stay. The `arrows` window check moves the focus onto an unread conversation and fails on
+  the old code (focus back on row 0).
+- **Resizable panes**: libadwaita's split views cannot be dragged, so a thin handle on each pane's edge
+  sets the split view's width bounds; a pane takes at most a share of the window (folders 30%, list
+  60%) so a narrower window still narrows it. Widths go to `settings.json` when a drag ends.
+- **Folder rail**: dragging the folders under 140 px, a double click on their edge, or F9 folds them to
+  icons with the unread count under each (names in tooltips). F9 on a narrow window shows or hides the
+  folders instead. The rail keeps the last width for when it opens again. A double click on the list's
+  edge puts it back to its default width.
+- **One word for waiting**: "Opening…" in a mail's card when it takes more than 150 ms (cached mail
+  opens at once, so the word would only flicker), "Sending…" on the Send button. Saving a draft on close
+  already ends with a toast, so it gets no word.
+- **Sent toast** names the mail: `Sent “Lunch on Friday?”`, cut at 40 characters.
+- Window checks now run with their own `XDG_CONFIG_HOME`, so they never read or write your settings.

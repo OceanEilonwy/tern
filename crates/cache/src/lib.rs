@@ -559,7 +559,7 @@ mod tests {
 	fn opened_mails_round_trip_and_follow_unread() {
 		let (cache, inbox, _) = setup();
 		let s = summary(1, "Hello", 100);
-		cache.merge_page(&inbox, &[s.clone()], true, true).unwrap();
+		cache.merge_page(&inbox, std::slice::from_ref(&s), true, true).unwrap();
 		let mail = Mail {
 			summary: s.clone(),
 			to: vec![Address::new("Me", "me@tuta.com")],

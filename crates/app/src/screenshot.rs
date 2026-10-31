@@ -1,6 +1,6 @@
 //! A hidden debug path that builds a scene, saves a PNG of it and quits.
 //!
-//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|folders-fail|refresh-race|sign-out-race|draft|suggest|keys|inbox|reading|invoice|newsletter|compose|narrow|narrow-reading`
+//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|folders-fail|refresh-race|sign-out-race|draft|suggest|keys|arrows|busy|panes|inbox|reading|invoice|newsletter|compose|narrow|narrow-reading`
 //! (with `TERN_DEMO=1` for all but login and sign-in; sign-in types "demo" on the sign-in page). For dark mode add `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
 
 use std::path::PathBuf;
@@ -16,6 +16,7 @@ use tern_core::{Backend, NewAttachment};
 
 use crate::compose_model::Fields;
 use crate::composer::Composer;
+use crate::mailbox::RAIL_SNAP;
 use crate::window::Window;
 
 pub fn scene() -> Option<(PathBuf, String)> {
@@ -178,6 +179,67 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			Ok(())
 		}
+		// F9 folds the folders to a rail of icons and back; dragged edges keep their width.
+		"panes" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			let window = win.ctx.window.clone();
+			let act = |name: &str| gtk::prelude::WidgetExt::activate_action(&window, name, None).map_err(|e| e.to_string());
+			mailbox.drag_folders(300);
+			mailbox.drag_list(500);
+			sleep(300).await;
+			if mailbox.pane_widths() != (300, 500) {
+				return Err(format!("dragged to 300 and 500, the panes are {:?}", mailbox.pane_widths()));
+			}
+			act("win.toggle-folders")?;
+			sleep(300).await;
+			if !mailbox.is_rail() || mailbox.pane_widths().0 >= RAIL_SNAP {
+				return Err(format!("F9 did not make a rail: {:?}", mailbox.pane_widths()));
+			}
+			act("win.toggle-folders")?;
+			sleep(300).await;
+			if mailbox.pane_widths().0 != 300 {
+				return Err(format!("F9 again left the folders {} wide", mailbox.pane_widths().0));
+			}
+			// Dragged narrow, it snaps to the rail; the shot shows it.
+			mailbox.drag_folders(90);
+			sleep(300).await;
+			if !mailbox.is_rail() || win.ctx.settings().folders_width != 300 {
+				return Err(format!("dragged narrow: rail {}, width kept {}", mailbox.is_rail(), win.ctx.settings().folders_width));
+			}
+			Ok(())
+		}
+		// A mail that takes a while to open or send says so in a word.
+		"busy" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			mailbox.select_by_subject("Photos from Saturday");
+			sleep(800).await;
+			if mailbox.reader.busy_word().as_deref() != Some("Opening…") {
+				return Err(format!("while opening, the reader says {:?}", mailbox.reader.busy_word()));
+			}
+			let fields = Fields { to: "mia@tuta.com".into(), subject: "Route".into(), body: "Here.".into(), ..Default::default() };
+			let composer = Composer::open(&win.ctx, fields, None);
+			composer.send();
+			sleep(300).await;
+			match composer.busy_word() {
+				Some(w) if w == "Sending…" => Ok(()),
+				other => Err(format!("while sending, the composer says {other:?}")),
+			}
+		}
+		// Arrowing onto an unread conversation marks it read without moving the focus off it.
+		"arrows" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			let unread = (1..mailbox.store.n_items()).find(|&i| mailbox.store.item(i).is_some_and(|o| o.downcast_ref::<glib::BoxedAnyObject>().unwrap().borrow::<tern_cache::ThreadRow>().unread));
+			let at = unread.ok_or("no unread conversation below the first")?;
+			mailbox.arrow_to(0);
+			sleep(200).await;
+			mailbox.arrow_to(at);
+			wait_for(|| mailbox.focused_row().is_some_and(|(_, unread)| !unread)).await;
+			sleep(300).await;
+			match mailbox.focused_row() {
+				Some((row, false)) if row == at => Ok(()),
+				other => Err(format!("arrowed onto row {at}, the focus is now on {other:?}")),
+			}
+		}
 		_ => Ok(()),
 	}
 }
@@ -187,7 +249,7 @@ pub fn drive(win: Rc<Window>) {
 	if scene == "sign-in" {
 		return sign_in(Rc::downgrade(&win), path);
 	}
-	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys") {
+	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes") {
 		glib::spawn_future_local(async move {
 			if let Err(e) = check(&win, &scene).await {
 				// No picture, so the check fails.
@@ -282,9 +344,10 @@ pub fn backend() -> Arc<dyn Backend> {
 	let scene = scene().map(|(_, s)| s).unwrap_or_default();
 	let demo = DemoBackend::new();
 	match scene.as_str() {
-		"folders-fail" => Arc::new(Staged { demo, folders_fail: true, delay: Duration::ZERO, delay_folders: false }),
-		"refresh-race" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::from_millis(500), delay_folders: false }),
-		"sign-out-race" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::from_millis(500), delay_folders: true }),
+		"folders-fail" => Arc::new(Staged { demo, folders_fail: true, delay: Duration::ZERO, delay_folders: false, slow_mail: Duration::ZERO }),
+		"refresh-race" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::from_millis(500), delay_folders: false, slow_mail: Duration::ZERO }),
+		"sign-out-race" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::from_millis(500), delay_folders: true, slow_mail: Duration::ZERO }),
+		"busy" => Arc::new(Staged { demo, folders_fail: false, delay: Duration::ZERO, delay_folders: false, slow_mail: Duration::from_secs(3) }),
 		_ => Arc::new(demo),
 	}
 }
@@ -296,6 +359,8 @@ struct Staged {
 	/// How long `list` (or `folders`, with `delay_folders`) takes.
 	delay: Duration,
 	delay_folders: bool,
+	/// How long opening and sending a mail take.
+	slow_mail: Duration,
 }
 
 #[async_trait::async_trait]
@@ -319,12 +384,14 @@ impl Backend for Staged {
 		self.demo.list(folder, next, count).await
 	}
 	async fn open(&self, id: &tern_core::MailId) -> tern_core::Result<tern_core::Mail> {
+		tokio::time::sleep(self.slow_mail).await;
 		self.demo.open(id).await
 	}
 	async fn attachment(&self, mail: &tern_core::MailId, attachment: &tern_core::Attachment) -> tern_core::Result<Vec<u8>> {
 		self.demo.attachment(mail, attachment).await
 	}
 	async fn send(&self, draft: tern_core::Draft) -> tern_core::Result<()> {
+		tokio::time::sleep(self.slow_mail).await;
 		self.demo.send(draft).await
 	}
 	async fn save_draft(&self, draft: tern_core::Draft) -> tern_core::Result<tern_core::MailId> {

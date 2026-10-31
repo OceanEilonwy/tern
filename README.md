@@ -14,7 +14,9 @@ images are never loaded, and anything too rich has an "Open in Tuta" button.
 - **Drafts**: closing a message keeps it in Drafts; it reopens from its conversation.
 - **Suggestions** in To, Cc and Bcc from your contacts and the people you write to.
 - **Keyboard**: Alt+Up/Down between conversations, Enter to read, Escape back, Delete, Ctrl+1…9 for
-  folders; Ctrl+? lists them all.
+  folders, F9 to fold the folders to icons; Ctrl+? lists them all.
+- **Resizable panes**: drag the edge of the folders or the list; drag the folders narrow (or double-click
+  their edge) for a rail of icons. Widths are kept.
 
 ![Reading a mail](docs/screenshots/reading.png)
 

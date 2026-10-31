@@ -19,7 +19,7 @@ test: test-ui
 # Drives the real window on a headless display: KDE's kwin_wayland in virtual mode when installed
 # (it draws real frames, so layout settles as on screen), else GTK's broadway. Each scene saves a
 # picture only if its check passed.
-UI_SCENES = sign-in folders-fail refresh-race sign-out-race draft suggest keys
+UI_SCENES = sign-in folders-fail refresh-race sign-out-race draft suggest keys arrows busy panes
 test-ui:
 	cargo build -p tern
 	@dir=$$(mktemp -d); \
@@ -31,7 +31,7 @@ test-ui:
 	fi; sleep 2; failed=; \
 	for scene in $(UI_SCENES); do \
 		demo=TERN_DEMO=1; [ $$scene = sign-in ] && demo=; \
-		env $$display $$demo TERN_SCREENSHOT=$$dir/$$scene.png TERN_SCREENSHOT_SCENE=$$scene \
+		env $$display $$demo XDG_CONFIG_HOME=$$dir/config-$$scene TERN_SCREENSHOT=$$dir/$$scene.png TERN_SCREENSHOT_SCENE=$$scene \
 			timeout 60 target/debug/tern 2>&1 | grep "screenshot failed"; \
 		if test -s $$dir/$$scene.png; then echo "test-ui: $$scene ok"; else echo "test-ui: $$scene FAILED"; failed=1; fi; \
 	done; kill $$srv; test -z "$$failed"

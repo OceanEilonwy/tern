@@ -5,6 +5,7 @@ mod background;
 mod compose_model;
 mod composer;
 mod format;
+mod grip;
 mod html_doc;
 mod keyring;
 mod login;
@@ -44,6 +45,7 @@ fn main() -> glib::ExitCode {
 		app.set_accels_for_action("win.mark-unread", &["<Control>u"]);
 		app.set_accels_for_action("win.next", &["<Alt>Down"]);
 		app.set_accels_for_action("win.previous", &["<Alt>Up"]);
+		app.set_accels_for_action("win.toggle-folders", &["F9"]);
 		app.set_accels_for_action("app.preferences", &["<Control>comma"]);
 		for i in 0..9 {
 			app.set_accels_for_action(&format!("win.folder({i})"), &[&format!("<Control>{}", i + 1)]);
