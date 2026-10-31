@@ -1,6 +1,6 @@
 //! A hidden debug path that builds a scene, saves a PNG of it and quits.
 //!
-//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|folders-fail|refresh-race|sign-out-race|draft|suggest|keys|arrows|busy|panes|inbox|reading|invoice|newsletter|compose|narrow|narrow-reading`
+//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|folders-fail|refresh-race|sign-out-race|draft|suggest|keys|arrows|busy|panes|search|inbox|reading|invoice|newsletter|compose|narrow|narrow-reading`
 //! (with `TERN_DEMO=1` for all but login and sign-in; sign-in types "demo" on the sign-in page). For dark mode add `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
 
 use std::path::PathBuf;
@@ -240,6 +240,64 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				other => Err(format!("arrowed onto row {at}, the focus is now on {other:?}")),
 			}
 		}
+		// Ctrl+F searches the mail on this computer across folders; a result opens its conversation,
+		// and Escape goes back to the folder.
+		"search" => {
+			wait_for(|| mailbox.store.n_items() == 4).await;
+			// Body words are found once the background sync has opened the mails ahead.
+			wait_for(|| win.ctx.cache().is_some_and(|c| c.missing_bodies(10).is_ok_and(|m| m.is_empty()))).await;
+			let window = win.ctx.window.clone();
+			let act = |name: &str| gtk::prelude::WidgetExt::activate_action(&window, name, None).map_err(|e| e.to_string());
+			let shows = |subjects: &[&str]| mailbox.is_searching() && mailbox.shown() == ("Search".to_string(), subjects.iter().map(|s| s.to_string()).collect());
+			act("win.search")?;
+			sleep(100).await;
+			// A filter; then words from a body, the last one a prefix.
+			for (query, expected) in [("from:sam", "Re: Lunch on Friday?"), ("usual pla", "Re: Lunch on Friday?"), ("invoic", "Your invoice for October")] {
+				mailbox.type_search(query)?;
+				wait_for(|| shows(&[expected])).await;
+				if !shows(&[expected]) {
+					return Err(format!("searching {query:?} shows {:?}", mailbox.shown()));
+				}
+			}
+			mailbox.select_by_subject("invoice");
+			let opened = || mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.summary.subject == "Your invoice for October");
+			wait_for(opened).await;
+			if !opened() {
+				return Err("the result did not open".into());
+			}
+			// Typing on after opening one: nothing opens by itself (which would mark it read).
+			mailbox.type_search("in:inbox")?;
+			wait_for(|| shows(&["Photos from Saturday", "Your invoice for October", "Re: Lunch on Friday?", "This week: five small things"])).await;
+			mailbox.select_by_subject("invoice");
+			wait_for(opened).await;
+			mailbox.append_search(" lunch");
+			wait_for(|| shows(&["Re: Lunch on Friday?"])).await;
+			sleep(300).await;
+			if mailbox.reader.current.borrow().is_some() || !shows(&["Re: Lunch on Friday?"]) {
+				return Err(format!("typing on opened {:?}", mailbox.reader.mails().last().map(|m| m.subject.clone())));
+			}
+			mailbox.type_search("zzqx")?;
+			wait_for(|| mailbox.status().is_some()).await;
+			if mailbox.status().as_deref() != Some("No Matches") {
+				return Err(format!("searching nonsense shows {:?}", mailbox.status()));
+			}
+			mailbox.escape_search();
+			wait_for(|| !mailbox.is_searching() && mailbox.store.n_items() == 4).await;
+			if mailbox.is_searching() || mailbox.shown().0 != "Inbox" || mailbox.store.n_items() != 4 {
+				return Err(format!("Escape left {:?}", mailbox.shown()));
+			}
+			// A conversation spanning Inbox and Sent opens whole; the shot shows it.
+			act("win.search")?;
+			sleep(100).await;
+			mailbox.type_search("lunch")?;
+			wait_for(|| shows(&["Re: Lunch on Friday?"])).await;
+			mailbox.select_by_subject("Lunch");
+			wait_for(|| mailbox.reader.mails().len() == 2).await;
+			match mailbox.reader.mails().len() {
+				2 => Ok(()),
+				n => Err(format!("the Lunch conversation opened with {n} mails")),
+			}
+		}
 		_ => Ok(()),
 	}
 }
@@ -249,7 +307,7 @@ pub fn drive(win: Rc<Window>) {
 	if scene == "sign-in" {
 		return sign_in(Rc::downgrade(&win), path);
 	}
-	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes") {
+	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search") {
 		glib::spawn_future_local(async move {
 			if let Err(e) = check(&win, &scene).await {
 				// No picture, so the check fails.

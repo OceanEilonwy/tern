@@ -14,6 +14,7 @@ use tern_core::{Folder, FolderId, FolderKind, MailId, MailSummary};
 
 use crate::compose_model::{Answer, Fields};
 use crate::reader::Reader;
+use crate::search::{self, Searching};
 use crate::settings::Settings;
 use crate::{composer, format, grip, runtime, window::Ctx};
 
@@ -58,6 +59,12 @@ pub struct Mailbox {
 	hold: Cell<bool>,
 	/// The last selection came from the keyboard: on a narrow window it does not leave the list.
 	by_keyboard: Cell<bool>,
+	search_bar: gtk::SearchBar,
+	search_entry: gtk::SearchEntry,
+	/// The search shown instead of the folder, if any.
+	searching: RefCell<Option<Searching>>,
+	/// Counts searches, so one that finishes after a newer one started is dropped.
+	search_generation: Cell<u64>,
 	pub reader: Rc<Reader>,
 }
 
@@ -205,6 +212,9 @@ impl Mailbox {
 		list_header.pack_end(&syncing);
 		let list_view_tb = adw::ToolbarView::new();
 		list_view_tb.add_top_bar(&list_header);
+		let (search_button, search_bar, search_entry) = search::widgets();
+		list_header.pack_end(&search_button);
+		list_view_tb.add_top_bar(&search_bar);
 		list_view_tb.set_content(Some(&list_stack));
 		let (list_pane, list_grip) = grip::wrap(&list_view_tb);
 		let list_page = adw::NavigationPage::builder().title("Inbox").tag("list").child(&list_pane).build();
@@ -255,10 +265,15 @@ impl Mailbox {
 			in_flight: RefCell::default(),
 			hold: Cell::new(false),
 			by_keyboard: Cell::new(false),
+			search_bar,
+			search_entry,
+			searching: RefCell::default(),
+			search_generation: Cell::new(0),
 			reader,
 		});
 		this.connect_signals(&list_scroll);
 		this.connect_grips((&folder_grip, &folder_pane), (&list_grip, &list_pane));
+		this.connect_search();
 		this.apply_panes();
 		let weak = Rc::downgrade(&this);
 		this.reader.connect_read(move |summary| {
@@ -506,7 +521,7 @@ impl Mailbox {
 	}
 
 	fn add_actions(self: &Rc<Self>) {
-		let entries: [(&str, MailAction); 12] = [
+		let entries: [(&str, MailAction); 13] = [
 			("compose", |m| {
 				composer::Composer::open(&m.ctx, Fields::default(), None);
 			}),
@@ -531,6 +546,7 @@ impl Mailbox {
 			("previous", |m| m.step(-1)),
 			("focus-list", |m| m.focus_list()),
 			("toggle-folders", |m| m.toggle_rail()),
+			("search", |m| m.start_search()),
 		];
 		for (name, f) in entries {
 			let action = gio::SimpleAction::new(name, None);
@@ -561,7 +577,7 @@ impl Mailbox {
 	}
 
 	fn set_enabled(&self, signed_in: bool) {
-		for name in ["compose", "refresh", "next", "previous", "focus-list", "folder"] {
+		for name in ["compose", "refresh", "next", "previous", "focus-list", "folder", "search"] {
 			self.action(name).set_enabled(signed_in);
 		}
 		self.update_actions();
@@ -598,6 +614,7 @@ impl Mailbox {
 		self.folder_list.remove_all();
 		self.folders.borrow_mut().clear();
 		*self.current.borrow_mut() = None;
+		self.leave_search();
 		self.in_flight.borrow_mut().clear();
 		self.syncing.set_visible(false);
 		self.store.remove_all();
@@ -689,6 +706,7 @@ impl Mailbox {
 	}
 
 	fn open_folder(self: &Rc<Self>, folder: &Folder) {
+		self.leave_search();
 		*self.current.borrow_mut() = Some(folder.clone());
 		self.change_title(folder);
 		self.hold.set(true);
@@ -703,10 +721,19 @@ impl Mailbox {
 		self.sync_folder(&folder.id);
 	}
 
-	/// Shows the current folder's conversations as the cache has them, keeping the selection.
+	/// Shows the current folder's conversations (or the search's) as the cache has them, keeping the selection.
 	fn reload_list(self: &Rc<Self>) {
+		if self.searching.borrow().is_some() {
+			return self.run_search();
+		}
 		let (Some(cache), Some(folder)) = (self.ctx.cache(), self.current.borrow().clone()) else { return };
 		let rows = cache.threads(&folder.id, self.shown.get()).unwrap_or_default();
+		self.show_rows(rows);
+	}
+
+	/// Puts `rows` in the list, changing only the rows that changed.
+	fn show_rows(self: &Rc<Self>, rows: Vec<ThreadRow>) {
+		let (Some(cache), Some(folder)) = (self.ctx.cache(), self.current.borrow().clone()) else { return };
 		let selected = self.selection.selected_item().map(|o| row_of(&o).key);
 		let position = self.selection.selected();
 		let old: Vec<ThreadRow> = (0..self.store.n_items()).filter_map(|i| self.store.item(i)).map(|o| row_of(&o)).collect();
@@ -750,6 +777,8 @@ impl Mailbox {
 		let synced = cache.folder_state(&folder.id).map(|s| s.synced_ms > 0).unwrap_or(false);
 		if !rows.is_empty() {
 			self.list_stack.set_visible_child_name("list");
+		} else if self.searching.borrow().is_some() {
+			self.show_status("No Matches", Some("No matches in mail on this computer"));
 		} else if synced || !self.in_flight.borrow().contains(&folder.id) {
 			self.show_status("No Messages", None);
 		} else {
@@ -807,6 +836,9 @@ impl Mailbox {
 	}
 
 	fn load_more(self: &Rc<Self>) {
+		if self.searching.borrow().is_some() {
+			return;
+		}
 		let (Some(cache), Some(backend), Some(folder)) = (self.ctx.cache(), self.ctx.backend(), self.current.borrow().clone()) else { return };
 		if self.store.n_items() as usize >= self.shown.get() {
 			// The cache has more than shown.
@@ -847,13 +879,128 @@ impl Mailbox {
 	}
 
 	fn open_thread(self: &Rc<Self>, row: &ThreadRow) {
-		let (Some(cache), Some(folder)) = (self.ctx.cache(), self.current.borrow().clone()) else { return };
+		let (Some(cache), Some(mut folder)) = (self.ctx.cache(), self.current.borrow().clone()) else { return };
+		// A conversation found by search opens in the folder of its match.
+		let found = self.searching.borrow().as_ref().and_then(|s| s.folders.get(&row.key).cloned());
+		if let Some(f) = found.and_then(|id| self.folders.borrow().iter().find(|(f, _)| f.id == id).map(|(f, _)| f.clone())) {
+			folder = f;
+		}
 		let mut mails = cache.thread(&row.key, &folder.id).unwrap_or_default();
 		if mails.is_empty() {
 			mails.push(ThreadMail { summary: row.latest.clone(), folder: folder.kind, folder_id: folder.id.clone() });
 		}
 		self.reader.show_thread(&row.key, &folder.id, mails, &row.latest.id);
 		self.update_actions();
+	}
+
+	fn connect_search(self: &Rc<Self>) {
+		let weak = Rc::downgrade(self);
+		self.search_entry.connect_search_changed(move |_| {
+			if let Some(this) = weak.upgrade() {
+				this.search_changed();
+			}
+		});
+		// Enter opens the best match.
+		let weak = Rc::downgrade(self);
+		self.search_entry.connect_activate(move |_| {
+			if let Some(this) = weak.upgrade() {
+				if this.searching.borrow().is_some() && this.store.n_items() > 0 {
+					this.selection.set_selected(0);
+					this.inner.set_show_content(true);
+				}
+			}
+		});
+		// Escape, the button or Ctrl+F again close the bar and go back to the folder.
+		let weak = Rc::downgrade(self);
+		self.search_bar.connect_search_mode_enabled_notify(move |bar| {
+			let Some(this) = weak.upgrade() else { return };
+			if !bar.is_search_mode() && this.searching.borrow().is_some() {
+				this.leave_search();
+				let current = this.current.borrow().clone();
+				if let Some(folder) = current {
+					this.open_folder(&folder);
+				}
+				this.focus_list();
+			}
+		});
+	}
+
+	/// Ctrl+F: opens the search bar, or closes it when it has the focus.
+	fn start_search(&self) {
+		if self.search_bar.is_search_mode() && self.search_focused() {
+			self.search_bar.set_search_mode(false);
+			return;
+		}
+		self.inner.set_show_content(false);
+		self.search_bar.set_search_mode(true);
+		self.search_entry.grab_focus();
+	}
+
+	/// The keyboard focus is in the search entry (on the text inside it).
+	fn search_focused(&self) -> bool {
+		gtk::prelude::GtkWindowExt::focus(&self.ctx.window).is_some_and(|f| f == *self.search_entry.upcast_ref::<gtk::Widget>() || f.is_ancestor(&self.search_entry))
+	}
+
+	fn search_changed(self: &Rc<Self>) {
+		let query = tern_cache::search::Query::parse(&self.search_entry.text());
+		if query.is_empty() {
+			// Cleared (also on the way to new text): back to the folder, the bar stays open.
+			if self.searching.borrow_mut().take().is_some() {
+				let current = self.current.borrow().clone();
+				if let Some(folder) = current {
+					self.open_folder(&folder);
+				}
+			}
+			return;
+		}
+		let entering = self.searching.borrow().is_none();
+		if self.searching.borrow().as_ref().is_some_and(|s| s.query == query) {
+			return;
+		}
+		// Other words: nothing stays open, so no result opens (and is marked read) in its place.
+		self.hold.set(true);
+		self.selection.set_selected(gtk::INVALID_LIST_POSITION);
+		if entering {
+			self.store.remove_all();
+		}
+		self.hold.set(false);
+		self.reader.clear();
+		self.update_actions();
+		if entering {
+			self.list_title.set_title("Search");
+			self.list_title.set_subtitle("");
+		}
+		*self.searching.borrow_mut() = Some(Searching { query, folders: HashMap::new() });
+		self.run_search();
+	}
+
+	/// Runs the search on show again, as after typing or when the cache changed.
+	fn run_search(self: &Rc<Self>) {
+		let (Some(cache), Some(query)) = (self.ctx.cache(), self.searching.borrow().as_ref().map(|s| s.query.clone())) else { return };
+		let generation = self.search_generation.get() + 1;
+		self.search_generation.set(generation);
+		let this = self.clone();
+		let semantic = self.ctx.settings().semantic;
+		runtime::spawn_local(async move {
+			let (rows, folders) = search::find(cache, query, semantic).await;
+			if this.search_generation.get() != generation {
+				return;
+			}
+			match this.searching.borrow_mut().as_mut() {
+				Some(s) => s.folders = folders,
+				None => return,
+			}
+			this.show_rows(rows);
+		});
+	}
+
+	/// Forgets the search, without touching the list; whoever calls this shows a folder next.
+	fn leave_search(&self) {
+		self.search_generation.set(self.search_generation.get() + 1);
+		if self.searching.borrow_mut().take().is_some() {
+			self.search_entry.set_text("");
+			self.search_bar.set_search_mode(false);
+		}
 	}
 
 	/// Moves the selection by `delta` conversations, from anywhere in the window.
@@ -991,6 +1138,36 @@ impl Mailbox {
 	/// For the screenshot scenes: a folder is being brought up to date.
 	pub fn is_loading(&self) -> bool {
 		!self.in_flight.borrow().is_empty() || self.fetching_older.get()
+	}
+
+	/// For the screenshot scenes: types `text` into the search bar, which is open and has the focus.
+	pub fn type_search(&self, text: &str) -> Result<(), String> {
+		if !self.search_bar.is_search_mode() || !self.search_focused() {
+			return Err("the search bar is not open with the focus in it".into());
+		}
+		self.search_entry.set_text(text);
+		Ok(())
+	}
+
+	/// For the screenshot scenes: types `more` after the text in the search bar, as typing does.
+	pub fn append_search(&self, more: &str) {
+		let mut end = self.search_entry.text().chars().count() as i32;
+		self.search_entry.insert_text(more, &mut end);
+	}
+
+	/// For the screenshot scenes: the list shows search results, and the bar is open.
+	pub fn is_searching(&self) -> bool {
+		self.searching.borrow().is_some() && self.search_bar.is_search_mode()
+	}
+
+	/// For the screenshot scenes: presses Escape in the search bar.
+	pub fn escape_search(&self) {
+		self.search_entry.emit_by_name::<()>("stop-search", &[]);
+	}
+
+	/// For the screenshot scenes: the list's title and the subjects it shows, top to bottom.
+	pub fn shown(&self) -> (String, Vec<String>) {
+		(self.list_title.title().to_string(), (0..self.store.n_items()).filter_map(|i| self.store.item(i)).map(|o| row_of(&o).latest.subject).collect())
 	}
 }
 

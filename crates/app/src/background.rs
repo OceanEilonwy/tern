@@ -1,5 +1,5 @@
 //! Keeps the cache up to date while signed in: the folder list, each folder's newest mail, contacts,
-//! then the newest mails opened ahead. A round runs at sign-in, every few minutes after, and at
+//! then the newest mails opened ahead, and their meaning for search when that is turned on. A round runs at sign-in, every few minutes after, and at
 //! once when something asks for it (F5, a changed setting).
 
 use std::rc::Weak;
@@ -10,7 +10,7 @@ use tern_cache::sync;
 use tern_core::{Error, FolderKind};
 
 use crate::mailbox::Mailbox;
-use crate::{runtime, window::Ctx};
+use crate::{runtime, semantic, window::Ctx};
 
 const INTERVAL: Duration = Duration::from_secs(5 * 60);
 
@@ -65,6 +65,15 @@ pub fn start(ctx: &Ctx, mailbox: Weak<Mailbox>) {
 					let (b, c) = (backend.clone(), cache.clone());
 					if let Err(e) = runtime::run(async move { sync::bodies(b.as_ref(), &c, level.bodies()).await }).await {
 						eprintln!("tern: could not open mail ahead: {e}");
+					}
+					if ctx.settings().semantic {
+						if let Err(e) = runtime::run(semantic::index(cache.clone())).await {
+							eprintln!("tern: could not index mail by meaning: {e}");
+						}
+						// Turned off meanwhile: what was worked out goes too.
+						if !ctx.settings().semantic {
+							semantic::forget(Some(&cache));
+						}
 					}
 				},
 				Err(e) => mb.sync_failed(&e),

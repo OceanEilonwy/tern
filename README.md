@@ -13,8 +13,12 @@ images are never loaded, and anything too rich has an "Open in Tuta" button.
   kept is set in Preferences (Low, Medium, High). Signing out deletes it.
 - **Drafts**: closing a message keeps it in Drafts; it reopens from its conversation.
 - **Suggestions** in To, Cc and Bcc from your contacts and the people you write to.
+- **Search** (Ctrl+F) through the mail on this computer, across folders: words as you type them (prefixes
+  match), `from:`, `to:`, `subject:`, `in:folder` and `has:attachment`. Turn on "Search by Meaning" in
+  Preferences to also find mail about what you type; it downloads a 30 MB language model once, and your mail
+  never leaves the computer.
 - **Keyboard**: Alt+Up/Down between conversations, Enter to read, Escape back, Delete, Ctrl+1…9 for
-  folders, F9 to fold the folders to icons; Ctrl+? lists them all.
+  folders, Ctrl+F to search, F9 to fold the folders to icons; Ctrl+? lists them all.
 - **Resizable panes**: drag the edge of the folders or the list; drag the folders narrow (or double-click
   their edge) for a rail of icons. Widths are kept.
 
@@ -31,7 +35,7 @@ make install      # binary, desktop file and icon into ~/.local
 Type `demo` as the address on the sign-in screen to try it without an account. Your session (not your
 password) is kept in the GNOME keyring; sign out from the main menu.
 
-Not supported yet: two-factor sign-in, password-protected mail to people outside Tuta, search, labels.
+Not supported yet: two-factor sign-in, password-protected mail to people outside Tuta, labels.
 
 ## Layout
 
@@ -47,6 +51,7 @@ Not supported yet: two-factor sign-in, password-protected mail to people outside
 make test         # unit tests, plus the window checks on a headless display (kwin_wayland or broadway)
 cargo test -p tuta-sdk --features net --lib
 TERN_TEST_EMAIL=you@tuta.com TERN_TEST_PASSWORD=… cargo test -p tern-tuta -- --ignored   # live round trip
+cargo test -p tern semantic -- --ignored    # downloads the search model and finds mail by meaning
 ```
 
 The live test sends you a mail with a PDF attached, finds it in Sent, and compares the attachment bytes.

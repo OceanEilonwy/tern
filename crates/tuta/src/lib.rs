@@ -87,6 +87,43 @@ fn sdk() -> Result<Sdk> {
 	Ok(Sdk::new(BASE_URL.to_string(), Arc::new(TimedRestClient::new(rest)), Arc::new(CacheFileClient::new())))
 }
 
+/// How long a download may take: the search model is 30 MB.
+const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Fetches a public file over HTTPS (following redirects) and checks it against its SHA-256, for
+/// files that are not Tuta's, like the search model. Nothing goes out but the request for `url`.
+pub async fn download(url: &str, sha256: &str) -> Result<Vec<u8>> {
+	let client = NativeRestClient::try_new().map_err(|e| Error::Other(format!("cannot set up TLS: {e}")))?;
+	let mut url = url.to_string();
+	for _ in 0..5 {
+		let options = RestClientOptions { headers: Default::default(), body: None, suspension_behavior: None };
+		let response = tokio::time::timeout(DOWNLOAD_TIMEOUT, client.request_binary(url.clone(), HttpMethod::GET, options))
+			.await
+			.map_err(|_| Error::Offline)?
+			.map_err(|_| Error::Offline)?;
+		match (response.status, response.headers.get("location")) {
+			(200, _) => {
+				let body = response.body.unwrap_or_default();
+				let hash: String = crypto_primitives::sha::sha256(&body).iter().map(|b| format!("{b:02x}")).collect();
+				return if hash == sha256 { Ok(body) } else { Err(Error::Other("The download was damaged; try again".into())) };
+			},
+			(300..=399, Some(next)) => url = redirect(&url, next).ok_or_else(|| Error::Other("Download failed (redirected off HTTPS)".into()))?,
+			(status, _) => return Err(Error::Other(format!("Download failed ({status})"))),
+		}
+	}
+	Err(Error::Other("Download failed (too many redirects)".into()))
+}
+
+/// Where a redirect from `from` to `location` (absolute, or a path on the same host) goes; `None`
+/// when it leaves HTTPS.
+fn redirect(from: &str, location: &str) -> Option<String> {
+	if location.contains("://") {
+		return location.starts_with("https://").then(|| location.to_string());
+	}
+	let host_end = from.find("://").map(|i| i + 3).and_then(|start| from[start..].find('/').map(|i| start + i)).unwrap_or(from.len());
+	Some(format!("{}/{}", &from[..host_end], location.trim_start_matches('/')))
+}
+
 /// How long one request may take before Tern gives up on it. Generous, since attachments
 /// ride on single requests, but a stalled connection no longer leaves the window waiting forever.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -449,6 +486,13 @@ impl FileClient for CacheFileClient {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn redirects_stay_on_https() {
+		assert_eq!(redirect("https://a.org/x/y", "/z?q=1").as_deref(), Some("https://a.org/z?q=1"));
+		assert_eq!(redirect("https://a.org/x", "https://cdn.b.org/f").as_deref(), Some("https://cdn.b.org/f"));
+		assert_eq!(redirect("https://a.org/x", "http://b.org/f"), None);
+	}
 
 	#[test]
 	fn request_shape_hides_long_values() {

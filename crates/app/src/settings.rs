@@ -14,6 +14,8 @@ pub struct Settings {
 	pub folders_rail: bool,
 	/// The conversation list's width in pixels, as last dragged; 0 is the default.
 	pub list_width: u32,
+	/// Search finds mail by meaning too, with a model downloaded once.
+	pub semantic: bool,
 }
 
 fn path() -> PathBuf {
@@ -38,6 +40,7 @@ impl Settings {
 			folders_width: width("folders_width"),
 			folders_rail: json["folders_rail"].as_bool().unwrap_or(false),
 			list_width: width("list_width"),
+			semantic: json["semantic"].as_bool().unwrap_or(false),
 		}
 	}
 
@@ -47,6 +50,7 @@ impl Settings {
 			"folders_width": self.folders_width,
 			"folders_rail": self.folders_rail,
 			"list_width": self.list_width,
+			"semantic": self.semantic,
 		})
 		.to_string()
 	}
@@ -68,7 +72,7 @@ mod tests {
 
 	#[test]
 	fn settings_round_trip_and_bad_files_fall_back() {
-		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480 };
+		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480, semantic: true };
 		assert_eq!(Settings::parse(s.to_json().as_bytes()), s);
 		assert_eq!(Settings::parse(b"not json"), Settings::default());
 		assert_eq!(Settings::parse(br#"{"offline":"huge"}"#), Settings::default());

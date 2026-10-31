@@ -3347,6 +3347,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "crypto-primitives",
  "log 0.4.27",
  "serde",
  "serde_json",
