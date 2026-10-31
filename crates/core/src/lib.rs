@@ -3,6 +3,9 @@
 //! The app talks only to [`Backend`]. `tern-tuta` implements it against the Tuta servers and
 //! [`demo::DemoBackend`] implements it in memory, so the UI runs and is tested without an account.
 
+// async_trait marks the boxed futures it returns #[must_use], which clippy on stable Rust 1.99 calls doubled.
+#![allow(clippy::double_must_use)]
+
 pub mod demo;
 pub mod rules;
 

@@ -1,5 +1,8 @@
 //! Tern's [`Backend`] for a Tuta account, on the vendored Tuta SDK.
 
+// async_trait marks the boxed futures it returns #[must_use], which clippy on stable Rust 1.99 calls doubled.
+#![allow(clippy::double_must_use)]
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 

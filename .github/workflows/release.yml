@@ -1,0 +1,80 @@
+# Builds Tern for Linux on every push to main (the "latest-main" pre-release) and on version tags
+# (v1.2.3, a release of its own):
+#   tern-<version>-x86_64-linux.tar.gz   built on Void, for CachyOS, Arch, Void and other current
+#                                         distributions; ./install.sh adds the menu entry and icon
+#   tern-<version>-x86_64.flatpak         GNOME 50 runtime, for any distribution with Flatpak,
+#                                         Linux Mint included
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'main' }}
+
+jobs:
+  tarball:
+    runs-on: ubuntu-latest
+    container: ghcr.io/void-linux/void-glibc-full:latest
+    steps:
+      - name: Install git
+        run: xbps-install -Syu xbps && xbps-install -Sy git bash
+      - uses: actions/checkout@v5
+      - name: Build on Void
+        run: packaging/linux/build-on-void.sh "${VERSION#v}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball
+          path: dist/*.tar.gz
+
+  flatpak:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v5
+      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: tern-${{ env.VERSION }}-x86_64.flatpak
+          manifest-path: packaging/flatpak/xyz.hollingworth.Tern.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+          upload-artifact: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: tern-*.flatpak
+
+  publish:
+    needs: [tarball, flatpak]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ "$VERSION" = main ]; then
+            tag=latest-main
+            gh release delete "$tag" --cleanup-tag --yes || true
+            gh release create "$tag" dist/* --target "$GITHUB_SHA" --prerelease \
+              --title "Latest main" --notes "Built from $GITHUB_SHA on main. See the README for how to install."
+          else
+            gh release create "$VERSION" dist/* --title "Tern $VERSION" --generate-notes
+          fi

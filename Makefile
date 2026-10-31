@@ -36,14 +36,9 @@ test-ui:
 		if test -s $$dir/$$scene.png; then echo "test-ui: $$scene ok"; else echo "test-ui: $$scene FAILED"; failed=1; fi; \
 	done; kill $$srv; test -z "$$failed"
 
+# Both go through install.sh, which also writes the menu entry and icon.
 install: build
-	install -Dm755 target/release/tern $(PREFIX)/bin/tern
-	install -Dm644 data/$(APP_ID).desktop $(PREFIX)/share/applications/$(APP_ID).desktop
-	install -Dm644 data/icons/$(APP_ID).svg $(PREFIX)/share/icons/hicolor/scalable/apps/$(APP_ID).svg
-	install -Dm644 data/$(APP_ID).metainfo.xml $(PREFIX)/share/metainfo/$(APP_ID).metainfo.xml
-	-gtk-update-icon-cache -qtf $(PREFIX)/share/icons/hicolor
-	-update-desktop-database -q $(PREFIX)/share/applications
+	PREFIX=$(PREFIX) ./install.sh
 
 uninstall:
-	rm -f $(PREFIX)/bin/tern $(PREFIX)/share/applications/$(APP_ID).desktop \
-		$(PREFIX)/share/icons/hicolor/scalable/apps/$(APP_ID).svg $(PREFIX)/share/metainfo/$(APP_ID).metainfo.xml
+	PREFIX=$(PREFIX) ./install.sh --uninstall
