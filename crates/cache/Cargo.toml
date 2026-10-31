@@ -1,0 +1,15 @@
+[package]
+name = "tern-cache"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
+tern-core = { workspace = true }
+serde_json = { workspace = true }
+# SQLCipher, linked against the system's libcrypto: the cache holds decrypted mail.
+rusqlite = { version = "=0.40.2", features = ["bundled-sqlcipher"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

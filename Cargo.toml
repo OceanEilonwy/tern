@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/tuta",
+    "crates/cache",
     "crates/app",
     "vendor/tuta-sdk/sdk",
     "vendor/tuta-sdk/crypto-primitives",
@@ -25,6 +26,7 @@ crypto-primitives = { path = "vendor/tuta-sdk/crypto-primitives", default-featur
 util = { path = "vendor/tuta-sdk/util", default-features = false }
 tern-core = { path = "crates/core" }
 tern-tuta = { path = "crates/tuta" }
+tern-cache = { path = "crates/cache" }
 base64 = { version = "0.22.1" }
 log = { version = "0.4.22" }
 serde = { version = "1.0.210", features = ["derive", "rc"] }
