@@ -1,6 +1,6 @@
 //! A hidden debug path that builds a scene, saves a PNG of it and quits.
 //!
-//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|folders-fail|refresh-race|sign-out-race|inbox|reading|invoice|newsletter|compose|narrow|narrow-reading`
+//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|folders-fail|refresh-race|sign-out-race|draft|suggest|keys|inbox|reading|invoice|newsletter|compose|narrow|narrow-reading`
 //! (with `TERN_DEMO=1` for all but login and sign-in; sign-in types "demo" on the sign-in page). For dark mode add `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
 
 use std::path::PathBuf;
@@ -60,7 +60,12 @@ fn sign_in(win: std::rc::Weak<Window>, path: PathBuf) {
 }
 
 async fn save_and_quit(target: &gtk::Widget, path: &std::path::Path, app: Option<gtk::Application>) {
-	sleep(1200).await;
+	// Text views size themselves from their last layout, so give them a few passes to settle.
+	for _ in 0..6 {
+		target.queue_resize();
+		target.queue_draw();
+		sleep(250).await;
+	}
 	// Broadway draws only while a client watches; try until a frame has been drawn.
 	let mut result: std::result::Result<(), String> = Err(String::new());
 	for _ in 0..25 {
@@ -109,6 +114,70 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			if mailbox.store.n_items() > 0 { Ok(()) } else { Err("signing in again showed no mail".into()) }
 		}
+		// Closing a composer keeps the message in Drafts; it reopens with its fields and sends.
+		"draft" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			let fields = Fields { to: "mia@tuta.com".into(), subject: "Trip plan".into(), body: "Day one: the coast.".into(), ..Default::default() };
+			let composer = Composer::open(&win.ctx, fields, None);
+			let attachment = NewAttachment { name: "map.pdf".into(), mime: "application/pdf".into(), data: b"%PDF map".to_vec() };
+			composer.attach(vec![attachment]);
+			composer.window.close();
+			drop(composer);
+			mailbox.select_folder(tern_core::FolderKind::Drafts);
+			wait_for(|| mailbox.select_by_subject("Trip plan")).await;
+			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
+			if !mailbox.reader.mails().iter().any(|m| m.draft) {
+				return Err(format!("the saved draft did not show as a draft: {:?}", mailbox.reader.mails().iter().map(|m| (&m.subject, m.draft)).collect::<Vec<_>>()));
+			}
+			let again = mailbox.reader.edit_current_draft().ok_or("the draft did not open for editing")?;
+			if again.subject_and_to() != ("Trip plan".to_string(), "mia@tuta.com".to_string()) {
+				return Err(format!("the draft reopened as {:?}", again.subject_and_to()));
+			}
+			again.send();
+			wait_for(|| !again.window.is_visible()).await;
+			drop(again);
+			wait_for(|| mailbox.store.n_items() == 0).await;
+			if mailbox.store.n_items() != 0 {
+				return Err("the sent draft stayed in Drafts".into());
+			}
+			mailbox.select_folder(tern_core::FolderKind::Sent);
+			wait_for(|| mailbox.select_by_subject("Trip plan")).await;
+			wait_for(|| mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.attachments.len() == 1)).await;
+			if mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.attachments.len() == 1) { Ok(()) } else { Err("the sent mail lost its attachment".into()) }
+		}
+		// Typing in To suggests contacts and people written to.
+		"suggest" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			sleep(500).await;
+			let composer = Composer::open(&win.ctx, Fields::default(), None);
+			sleep(200).await;
+			let shown = composer.type_to("Pri");
+			if shown == 0 {
+				return Err("no suggestions for \"Pri\"".into());
+			}
+			Ok(())
+		}
+		// Alt+Down moves to the next conversation; Delete trashes it and opens its neighbour.
+		"keys" => {
+			wait_for(|| mailbox.store.n_items() == 4).await;
+			let window = win.ctx.window.clone();
+			let act = |name: &str| gtk::prelude::WidgetExt::activate_action(&window, name, None).map_err(|e| e.to_string());
+			act("win.next")?;
+			act("win.next")?;
+			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
+			let second = mailbox.reader.mails().last().map(|m| m.subject.clone()).unwrap_or_default();
+			if second != "Your invoice for October" {
+				return Err(format!("Alt+Down twice opened {second:?}"));
+			}
+			act("win.trash")?;
+			wait_for(|| mailbox.store.n_items() == 3).await;
+			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
+			let next = mailbox.reader.mails().last().map(|m| m.subject.clone()).unwrap_or_default();
+			if mailbox.store.n_items() != 3 || !next.contains("Lunch") {
+				return Err(format!("after Delete: {} conversations, showing {next:?}", mailbox.store.n_items()));
+			}
+			Ok(())
+		}
 		_ => Ok(()),
 	}
 }
@@ -118,7 +187,7 @@ pub fn drive(win: Rc<Window>) {
 	if scene == "sign-in" {
 		return sign_in(Rc::downgrade(&win), path);
 	}
-	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race") {
+	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys") {
 		glib::spawn_future_local(async move {
 			if let Err(e) = check(&win, &scene).await {
 				// No picture, so the check fails.

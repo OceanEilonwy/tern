@@ -21,6 +21,9 @@ pub struct Opened {
 
 type MailHook = Box<dyn Fn(&MailSummary)>;
 
+/// How much narrower a card's body is than the conversation column: its margins and border.
+const CARD_INSET: i32 = 2 * 12 + 2;
+
 /// One mail of the conversation.
 struct Card {
 	summary: MailSummary,
@@ -56,6 +59,7 @@ pub struct Reader {
 	thread: RefCell<Option<(String, FolderId)>>,
 	on_read: RefCell<Option<MailHook>>,
 	on_discard: RefCell<Option<MailHook>>,
+	on_current: RefCell<Option<Box<dyn Fn()>>>,
 }
 
 /// A pill button with an icon and a word, for the actions under a mail.
@@ -119,6 +123,7 @@ impl Reader {
 			thread: RefCell::default(),
 			on_read: RefCell::default(),
 			on_discard: RefCell::default(),
+			on_current: RefCell::default(),
 		});
 		let weak = Rc::downgrade(&reader);
 		probe.connect_resize(move |_, w, _| {
@@ -126,8 +131,9 @@ impl Reader {
 			if w > 0 && w != this.width.get() {
 				this.width.set(w);
 				for card in this.cards.borrow().iter() {
+					settle(&card.body);
 					for (picture, natural) in card.pictures.borrow().iter() {
-						render::fit(picture, *natural, w);
+						render::fit(picture, *natural, w - CARD_INSET);
 					}
 				}
 			}
@@ -152,6 +158,11 @@ impl Reader {
 	/// Called with each unread mail the reader opens, so it can be marked read.
 	pub fn connect_read(&self, f: impl Fn(&MailSummary) + 'static) {
 		*self.on_read.borrow_mut() = Some(Box::new(f));
+	}
+
+	/// Called when the mail actions apply to changes, or finishes loading.
+	pub fn connect_current(&self, f: impl Fn() + 'static) {
+		*self.on_current.borrow_mut() = Some(Box::new(f));
 	}
 
 	/// Called when a draft is discarded from its card.
@@ -233,7 +244,13 @@ impl Reader {
 		from.set_label(if s.from.display().is_empty() { "(Unknown Sender)" } else { s.from.display() });
 		let address = gtk::Label::builder().xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["dim-label"]).label(&s.from.address).build();
 		address.set_visible(!s.from.name.trim().is_empty());
-		let date = gtk::Label::builder().xalign(1.0).valign(gtk::Align::Start).css_classes(["caption", "dim-label", "numeric"]).label(format::long_date(s.received_ms, &glib::TimeZone::local())).build();
+		let date = gtk::Label::builder()
+			.xalign(1.0)
+			.valign(gtk::Align::Start)
+			.ellipsize(gtk::pango::EllipsizeMode::End)
+			.css_classes(["caption", "dim-label", "numeric"])
+			.label(format::long_date(s.received_ms, &glib::TimeZone::local()))
+			.build();
 		let names = gtk::Box::new(gtk::Orientation::Horizontal, 6);
 		names.append(&from);
 		names.append(&address);
@@ -260,7 +277,8 @@ impl Reader {
 		body.set_accessible_role(gtk::AccessibleRole::Document);
 		let loading = adw::Spinner::builder().width_request(24).height_request(24).halign(gtk::Align::Center).visible(false).build();
 
-		let actions = gtk::Box::builder().spacing(8).margin_top(6).build();
+		// Wraps onto a second line on a narrow window.
+		let actions = adw::WrapBox::builder().child_spacing(8).line_spacing(8).margin_top(6).build();
 		let details = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_start(12).margin_end(12).margin_bottom(12).build();
 		details.append(&recipients);
 		details.append(&attachments_box);
@@ -369,6 +387,9 @@ impl Reader {
 				c.root.remove_css_class("current");
 			}
 		}
+		if let Some(f) = self.on_current.borrow().as_ref() {
+			f();
+		}
 	}
 
 	fn current_card(&self) -> Option<Rc<Card>> {
@@ -457,6 +478,7 @@ impl Reader {
 	fn draw_body(self: &Rc<Self>, card: &Rc<Card>) {
 		let Some(opened) = card.opened.borrow().clone() else { return };
 		let rendered = render::render(&card.body, &opened.doc);
+		settle(&card.body);
 		*card.links.borrow_mut() = rendered.links;
 		let scale = card.body.scale_factor();
 		card.pictures.borrow_mut().clear();
@@ -486,7 +508,7 @@ impl Reader {
 				let (Some(this), Some(card)) = (weak.upgrade(), c.upgrade()) else { return };
 				match pixels.and_then(|px| render::show_pixels(&picture, px, scale)) {
 					Some(natural) if card.generation.get() == generation => {
-						render::fit(&picture, natural, this.width.get());
+						render::fit(&picture, natural, this.width.get() - CARD_INSET);
 						card.pictures.borrow_mut().push((picture, natural));
 					},
 					// A missing or broken inline image shows nothing.
@@ -511,25 +533,19 @@ impl Reader {
 		Some(composer::Composer::open(&self.ctx, fields, forwarded))
 	}
 
-	/// Opens the current mail in a composer when it is a draft. Returns whether it was one.
-	pub fn edit_current_draft(self: &Rc<Self>) -> bool {
-		match self.current_card() {
-			Some(card) if card.summary.draft => {
-				self.edit_draft(&card);
-				true
-			},
-			_ => false,
-		}
+	/// Opens the current mail in a composer when it is a loaded draft.
+	pub fn edit_current_draft(self: &Rc<Self>) -> Option<Rc<composer::Composer>> {
+		self.current_card().filter(|c| c.summary.draft).and_then(|card| self.edit_draft(&card))
 	}
 
-	fn edit_draft(self: &Rc<Self>, card: &Rc<Card>) {
+	fn edit_draft(self: &Rc<Self>, card: &Rc<Card>) -> Option<Rc<composer::Composer>> {
 		let Some(opened) = card.opened.borrow().clone() else {
 			// Not loaded yet: open the card first; editing waits for it.
 			self.expand(card, true);
-			return;
+			return None;
 		};
 		let fields = compose_model::draft_fields(&opened.mail, &opened.doc.to_plain_text());
-		composer::Composer::open(&self.ctx, fields, None);
+		Some(composer::Composer::open(&self.ctx, fields, None))
 	}
 
 	pub fn web_url(&self) -> Option<String> {
@@ -540,6 +556,13 @@ impl Reader {
 	pub fn focus(&self) -> bool {
 		self.current_card().is_some_and(|c| c.header.grab_focus())
 	}
+}
+
+/// A text view outside a scrolled window keeps the height of its first layout, done before it
+/// knows its width, until asked again: ask once it has laid out the text at its real width.
+fn settle(body: &gtk::TextView) {
+	let body = body.clone();
+	glib::idle_add_local_once(move || body.queue_resize());
 }
 
 /// Clicking a link opens it; hovering shows where it goes.

@@ -134,7 +134,7 @@ impl DemoBackend {
 			 <ol><li>One</li><li>Two</li></ol><p><a href=\"https://example.com/unsubscribe\">Unsubscribe</a></p>",
 			vec![],
 		);
-		add(5, FolderKind::Sent, Address::new("You", "you@tuta.com"), "Are you free for lunch on Friday?", 30, false, "<div>Are you free for lunch on Friday?</div>", vec![]);
+		add(5, FolderKind::Sent, Address::new("You", "you@tuta.com"), "Lunch on Friday?", 30, false, "<div>Are you free for lunch on Friday?</div>", vec![]);
 		// The one sent mail went to Sam.
 		let sam = Address::new("Sam Okafor", "sam@example.net");
 		for stored in mails.iter_mut().filter(|m| m.folder == FolderKind::Sent) {

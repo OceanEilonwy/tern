@@ -150,7 +150,10 @@ impl Window {
 		}
 		if let Some((w, h)) = screenshot::size() {
 			window.set_default_size(w, h);
-			window.maximize();
+			// On a headless display maximizing fills the screen; narrow scenes keep their size.
+			if w > 600 {
+				window.maximize();
+			}
 			// Page changes are crossfades, which never advance when broadway draws no frames.
 			if let Some(settings) = gtk::Settings::default() {
 				settings.set_gtk_enable_animations(false);

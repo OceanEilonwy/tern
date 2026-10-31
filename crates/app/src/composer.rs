@@ -381,6 +381,19 @@ impl Composer {
 		});
 	}
 
+	/// For the screenshot scenes: types into To, and counts the suggestions shown for it.
+	pub fn type_to(&self, text: &str) -> usize {
+		self.to.grab_focus();
+		self.to.set_text(text);
+		self.to.set_position(-1);
+		suggest::open_count(&self.to)
+	}
+
+	/// For the screenshot scenes: the subject and To as written.
+	pub fn subject_and_to(&self) -> (String, String) {
+		(self.subject.text().into(), self.to.text().into())
+	}
+
 	/// Adds attachments directly, as the screenshot scene does.
 	pub fn attach(self: &Rc<Self>, atts: Vec<NewAttachment>) {
 		for a in atts {

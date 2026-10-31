@@ -83,3 +83,33 @@ attachments must work, KISS, fast, Rust. These are the calls I made, in the orde
   false) as empty strings, where the web client encrypts them. The server decrypts drafts itself only for
   outside recipients, so only those sends broke. The SDK now always encrypts (see PATCHES.md). Sends also
   allow undo now, as the web app does by default: the server sends a few seconds later.
+
+## Second round (2026-10-31)
+
+- **The cache is encrypted** (SQLCipher via rusqlite 0.40.2, linked to the system libcrypto). It holds
+  decrypted mail, so a plain file would undo Tuta's end-to-end encryption at rest. The key is random,
+  kept in the GNOME keyring per account; without a keyring nothing is written to disk. Signing out
+  deletes the database and its key. A database that does not open (other key, older layout) is rebuilt.
+- **Offline levels**: Low keeps 100 mails per folder and opens the newest 25 ahead; Medium 500 and 200
+  (the default); High 2000 and 1000. Sync runs at sign-in, every five minutes, on F5 and when the level
+  changes. Without Tuta's event bus, a folder is paged from the newest until a page brings nothing new.
+  The cache is not trimmed: scrolling past the level keeps what it fetched.
+- **Conversations are by subject** ("Re:", "Fwd:", "AW:" and the like removed, case and spaces folded),
+  across folders. Trash and Spam join a conversation only when listing them. Delete trashes the
+  conversation's mails in the folder on show.
+- **Closing a composer saves a draft** without asking (an untouched reply is not saved). The trash button
+  in the composer discards, after asking, and deletes its draft. Drafts open from their conversation
+  ("Continue Editing") or with Enter in Drafts.
+- **Drafts on Tuta** (done by a helper agent, reviewed): updates mirror the TypeScript `updateDraft`.
+  Attachments already on the draft are not sent again (the TS client does not either); removed ones go in
+  `removedAttachments`. A draft is saved confidential only if every recipient is on Tuta.
+- **Icons**: Adwaita's reply icons read as back/forward arrows, so Tern draws its own curved ones.
+  Actions under each mail are labelled pill buttons; "New" in the list header is labelled and blue.
+- **Keyboard**: Alt+Up/Down move between conversations from anywhere; arrow keys move in the list
+  without leaving it on a narrow window; Enter reads (or edits a draft); Escape goes back; Ctrl+1…9 pick
+  folders; Ctrl+U marks unread and leaves the conversation so it stays unread.
+- **Window checks run on headless kwin** (`kwin_wayland --virtual`) when it is installed: broadway draws
+  no frames without a browser watching, so text views never settled and pictures lied.
+- Found while checking: a text view outside a scrolled window keeps the height of its first layout,
+  made before it knows its width, until asked again; the reader asks once laid out. Inline pictures are
+  fitted to the card's inner width; fitting them to the column made the card grow every frame.

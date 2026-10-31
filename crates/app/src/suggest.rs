@@ -82,19 +82,38 @@ pub fn attach(entry: &gtk::Entry, ctx: &Ctx) {
 	});
 }
 
-/// Closes the suggestions under `entry`, if open. Returns whether they were.
-pub fn dismiss(entry: &gtk::Entry) -> bool {
+fn popover_of(entry: &gtk::Entry) -> Option<gtk::Popover> {
 	let mut child = entry.first_child();
 	while let Some(w) = child {
-		if let Some(p) = w.downcast_ref::<gtk::Popover>() {
-			if p.is_visible() {
-				p.popdown();
-				return true;
-			}
+		if let Ok(p) = w.clone().downcast::<gtk::Popover>() {
+			return Some(p);
 		}
 		child = w.next_sibling();
 	}
-	false
+	None
+}
+
+/// How many suggestions are open under `entry`.
+pub fn open_count(entry: &gtk::Entry) -> usize {
+	let Some(p) = popover_of(entry).filter(|p| p.is_visible()) else { return 0 };
+	let mut n = 0;
+	let mut row = p.child().and_downcast::<gtk::ListBox>().and_then(|l| l.first_child());
+	while let Some(r) = row {
+		n += 1;
+		row = r.next_sibling();
+	}
+	n
+}
+
+/// Closes the suggestions under `entry`, if open. Returns whether they were.
+pub fn dismiss(entry: &gtk::Entry) -> bool {
+	match popover_of(entry).filter(|p| p.is_visible()) {
+		Some(p) => {
+			p.popdown();
+			true
+		},
+		None => false,
+	}
 }
 
 /// The word being typed: what follows the last comma or semicolon.

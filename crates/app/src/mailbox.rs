@@ -237,6 +237,12 @@ impl Mailbox {
 			}
 		});
 		let weak = Rc::downgrade(&this);
+		this.reader.connect_current(move || {
+			if let Some(this) = weak.upgrade() {
+				this.update_actions();
+			}
+		});
+		let weak = Rc::downgrade(&this);
 		this.reader.connect_discard(move |summary| {
 			if let Some(this) = weak.upgrade() {
 				this.trash(vec![summary.id.clone()], "Draft discarded");
@@ -321,7 +327,7 @@ impl Mailbox {
 		let weak = Rc::downgrade(self);
 		self.list_view.connect_activate(move |_, _| {
 			let Some(this) = weak.upgrade() else { return };
-			if this.current.borrow().as_ref().is_some_and(|f| f.kind == FolderKind::Drafts) && this.reader.edit_current_draft() {
+			if this.current.borrow().as_ref().is_some_and(|f| f.kind == FolderKind::Drafts) && this.reader.edit_current_draft().is_some() {
 				return;
 			}
 			this.inner.set_show_content(true);
@@ -460,17 +466,16 @@ impl Mailbox {
 		self.set_enabled(false);
 	}
 
-	/// The cache changed: refresh folder counts, and the list when `folder` is the one on show
-	/// (or always, for None).
-	pub fn cache_changed(self: &Rc<Self>, folder: Option<&FolderId>) {
+	/// The cache changed: refresh folder counts and the list. A change in any folder can touch the
+	/// list on show, as conversations span folders; unchanged rows stay as they are.
+	pub fn cache_changed(self: &Rc<Self>, _folder: Option<&FolderId>) {
 		let Some(cache) = self.ctx.cache() else { return };
 		if let Ok(folders) = cache.folders() {
 			if !folders.is_empty() {
 				self.set_folders(folders, false);
 			}
 		}
-		let current = self.current.borrow().as_ref().map(|f| f.id.clone());
-		if current.is_some() && (folder.is_none() || folder == current.as_ref()) {
+		if self.current.borrow().is_some() {
 			self.reload_list();
 		}
 	}
