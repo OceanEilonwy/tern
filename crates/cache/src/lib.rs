@@ -4,23 +4,28 @@
 //! It is a cache: anything here can be fetched again, so a database that does not open with the key
 //! or has an older layout is thrown away and started afresh.
 
+pub mod embed;
+pub mod search;
 pub mod sync;
 
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::types::Value;
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use tern_core::{thread_key, Address, Folder, FolderId, FolderKind, Mail, MailId, MailSummary};
 
+use search::{Found, Query};
+
 /// Bump when the tables change; older databases are dropped.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 	CREATE TABLE folders (id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, pos INTEGER NOT NULL);
 	CREATE TABLE mails (
-		list TEXT NOT NULL, element TEXT NOT NULL, folder TEXT NOT NULL, thread TEXT NOT NULL,
+		id INTEGER PRIMARY KEY, list TEXT NOT NULL, element TEXT NOT NULL, folder TEXT NOT NULL, thread TEXT NOT NULL,
 		received INTEGER NOT NULL, unread INTEGER NOT NULL, summary TEXT NOT NULL,
-		PRIMARY KEY (list, element));
+		UNIQUE (list, element));
 	CREATE INDEX mails_by_folder ON mails (folder, received DESC);
 	CREATE INDEX mails_by_thread ON mails (thread, received);
 	-- mail is NULL when the mail could not be opened, so it is not tried again on every sync.
@@ -31,7 +36,20 @@ const SCHEMA: &str = "
 	CREATE TABLE addresses (
 		address TEXT PRIMARY KEY, name TEXT NOT NULL, contact INTEGER NOT NULL DEFAULT 0,
 		used INTEGER NOT NULL DEFAULT 0, seen INTEGER NOT NULL DEFAULT 0, last INTEGER NOT NULL DEFAULT 0);
+	-- The words of each mail (rowid = mails.id) for search: names and addresses with the sender and
+	-- recipients, the body as plain text once the mail is opened.
+	CREATE VIRTUAL TABLE words USING fts5(subject, sender, recipients, body, tokenize = 'unicode61 remove_diacritics 2', prefix = '2 3');
+	-- What each mail is about, as a unit vector worked out by `model` (see embed::to_blob).
+	CREATE TABLE vectors (mail INTEGER PRIMARY KEY, model TEXT NOT NULL, vector BLOB NOT NULL);
 ";
+
+/// How close a mail's meaning must be to the query's (as a cosine) to be found by meaning; below
+/// it every mail would be found, ranked.
+pub const MEANING_MIN: f32 = 0.25;
+/// Mails taken from each ranking before fusing them.
+const DEPTH: usize = 200;
+/// The start of a mail is what its meaning is worked out from: the model reads 512 word pieces at most.
+const MEANING_CHARS: usize = 3000;
 
 #[derive(Debug)]
 pub enum CacheError {
@@ -73,6 +91,13 @@ pub struct ThreadRow {
 	pub count: u32,
 	/// Any of the conversation's mails in this folder is unread.
 	pub unread: bool,
+}
+
+/// A conversation search found, with the folder of its best match, which opening it uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchHit {
+	pub row: ThreadRow,
+	pub folder: FolderId,
 }
 
 /// One mail of a conversation, with the kind of folder it is in.
@@ -174,12 +199,15 @@ impl Cache {
 	fn prepare(conn: Connection) -> Result<Cache> {
 		let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
 		if version != SCHEMA_VERSION {
-			let tables: Vec<String> = conn
-				.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?
-				.query_map([], |r| r.get(0))?
-				.collect::<std::result::Result<_, _>>()?;
-			for table in tables {
-				conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{}\"", table.replace('"', "")))?;
+			// Virtual tables first: dropping one drops the tables behind it.
+			for virtual_only in [true, false] {
+				let tables: Vec<String> = conn
+					.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND (?1 = 0 OR sql LIKE 'CREATE VIRTUAL TABLE%')")?
+					.query_map([virtual_only], |r| r.get(0))?
+					.collect::<std::result::Result<_, _>>()?;
+				for table in tables {
+					conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{}\"", table.replace('"', "")))?;
+				}
 			}
 			conn.execute_batch(SCHEMA)?;
 			conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
@@ -212,6 +240,9 @@ impl Cache {
 		for (pos, f) in folders.iter().enumerate() {
 			tx.execute("INSERT INTO folders (id, name, kind, pos) VALUES (?1, ?2, ?3, ?4)", params![f.id.0, f.name, kind_text(f.kind), pos as i64])?;
 		}
+		for table in ["DELETE FROM words WHERE rowid", "DELETE FROM vectors WHERE mail"] {
+			tx.execute(&format!("{table} IN (SELECT id FROM mails WHERE folder NOT IN (SELECT id FROM folders))"), [])?;
+		}
 		tx.execute("DELETE FROM mails WHERE folder NOT IN (SELECT id FROM folders)", [])?;
 		tx.execute("DELETE FROM folder_state WHERE folder NOT IN (SELECT id FROM folders)", [])?;
 		tx.commit()?;
@@ -240,6 +271,7 @@ impl Cache {
 					 ON CONFLICT (list, element) DO UPDATE SET folder = ?3, thread = ?4, received = ?5, unread = ?6, summary = ?7",
 					params![m.id.list, m.id.element, folder.0, thread_of(m), m.received_ms, m.unread, summary],
 				)?;
+				index(&tx, &m.id)?;
 			}
 			note(&tx, &m.from, Met::Seen)?;
 		}
@@ -255,9 +287,8 @@ impl Cache {
 				.filter(|(l, e)| !keep.contains(&format!("{l}/{e}")))
 				.collect();
 			drop(stale);
-			for (list, element) in &gone {
-				tx.execute("DELETE FROM mails WHERE list = ?1 AND element = ?2", params![list, element])?;
-				tx.execute("DELETE FROM bodies WHERE list = ?1 AND element = ?2", params![list, element])?;
+			for (list, element) in gone.iter().cloned() {
+				forget(&tx, &MailId { list, element })?;
 			}
 			changed += gone.len();
 		}
@@ -344,6 +375,7 @@ impl Cache {
 			"UPDATE mails SET summary = ?3, unread = ?4, thread = ?5, received = ?6 WHERE list = ?1 AND element = ?2",
 			params![id.list, id.element, serde_json::to_string(&mail.summary)?, mail.summary.unread, thread_of(&mail.summary), mail.summary.received_ms],
 		)?;
+		index(&tx, id)?;
 		let met = if mail.summary.outgoing { Met::Used } else { Met::Seen };
 		for a in mail.to.iter().chain(&mail.cc).chain(&mail.bcc) {
 			note(&tx, a, met)?;
@@ -402,9 +434,10 @@ impl Cache {
 
 	/// Forgets a mail, as when a draft is replaced or sent.
 	pub fn remove(&self, id: &MailId) -> Result<()> {
-		let conn = self.conn();
-		conn.execute("DELETE FROM mails WHERE list = ?1 AND element = ?2", params![id.list, id.element])?;
-		conn.execute("DELETE FROM bodies WHERE list = ?1 AND element = ?2", params![id.list, id.element])?;
+		let mut conn = self.conn();
+		let tx = conn.transaction()?;
+		forget(&tx, id)?;
+		tx.commit()?;
 		Ok(())
 	}
 
@@ -459,6 +492,158 @@ impl Cache {
 		let rows = stmt.query_map(params![format!("{q}%"), format!("% {q}%"), limit as i64], |r| Ok(Address::new(r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
 		Ok(rows.collect::<std::result::Result<_, _>>()?)
 	}
+
+	/// Up to `limit` conversations matching `query`, best first. Words are matched as prefixes
+	/// (ranked by BM25, the subject weighing most); with `meaning` (a model's name and the query's
+	/// vector from it) mails close in meaning are found too, and both rankings are fused.
+	pub fn search(&self, query: &Query, meaning: Option<(&str, &[f32])>, limit: usize) -> Result<Vec<SearchHit>> {
+		let conn = self.conn();
+		// Where to look: the folder asked for by name or kind, else all but Trash and Spam.
+		let mut scope = match &query.folder {
+			Some(_) => "(lower(f.name) = ? OR lower(f.kind) = ?)".to_string(),
+			None => "coalesce(f.kind, '') NOT IN ('Trash', 'Spam')".to_string(),
+		};
+		let scope_args: Vec<Value> = query.folder.iter().flat_map(|f| [Value::Text(f.clone()), Value::Text(f.clone())]).collect();
+		if query.attachment {
+			scope.push_str(" AND json_extract(m.summary, '$.has_attachments') = 1");
+		}
+		let all = query.fts(true);
+		if all.is_none() && !query.words.is_empty() {
+			// Only punctuation typed: nothing can match.
+			return Ok(Vec::new());
+		}
+		let free_words = all != query.fts(false);
+		let (sql, mut args) = match &all {
+			Some(expr) => {
+				let order = if free_words { "bm25(words, 4.0, 2.0, 1.0, 1.0)" } else { "m.received DESC" };
+				(
+					format!("SELECT m.id, m.thread, m.received FROM words JOIN mails m ON m.id = words.rowid LEFT JOIN folders f ON f.id = m.folder WHERE words MATCH ? AND {scope} ORDER BY {order} LIMIT ?"),
+					vec![Value::Text(expr.clone())],
+				)
+			},
+			None => (format!("SELECT m.id, m.thread, m.received FROM mails m LEFT JOIN folders f ON f.id = m.folder WHERE {scope} ORDER BY m.received DESC LIMIT ?"), vec![]),
+		};
+		args.extend(scope_args.iter().cloned());
+		args.push(Value::Integer(DEPTH as i64));
+		let found = |r: &rusqlite::Row| Ok(Found { mail: r.get(0)?, thread: r.get(1)?, received: r.get(2)? });
+		let by_words: Vec<Found> = conn.prepare(&sql)?.query_map(params_from_iter(args), found)?.collect::<std::result::Result<_, _>>()?;
+
+		let mut by_meaning = Vec::new();
+		if let Some((model, vector)) = meaning.filter(|_| free_words) {
+			let mut sql = format!(
+				"SELECT m.id, m.thread, m.received, v.vector FROM vectors v JOIN mails m ON m.id = v.mail LEFT JOIN folders f ON f.id = m.folder WHERE v.model = ? AND {scope}"
+			);
+			let mut args = vec![Value::Text(model.to_string())];
+			args.extend(scope_args);
+			// The filters hold for mails found by meaning too.
+			if let Some(filters) = query.fts(false) {
+				sql.push_str(" AND m.id IN (SELECT rowid FROM words WHERE words MATCH ?)");
+				args.push(Value::Text(filters));
+			}
+			let mut stmt = conn.prepare(&sql)?;
+			let rows = stmt.query_map(params_from_iter(args), |r| Ok((found(r)?, embed::dot_blob(vector, &r.get::<_, Vec<u8>>(3)?))))?;
+			let mut close: Vec<(Found, f32)> = rows.filter(|r| r.as_ref().map_or(true, |(_, cos)| *cos >= MEANING_MIN)).collect::<std::result::Result<_, _>>()?;
+			close.sort_by(|a, b| b.1.total_cmp(&a.1));
+			by_meaning = close.into_iter().take(DEPTH).map(|(f, _)| f).collect();
+		}
+
+		let mut hits = Vec::new();
+		for (key, mail) in search::fuse(&[&by_words, &by_meaning]).into_iter().take(limit) {
+			let folder: String = conn.query_row("SELECT folder FROM mails WHERE id = ?1", [mail], |r| r.get(0))?;
+			let from_here = "FROM mails m LEFT JOIN folders f ON f.id = m.folder WHERE m.thread = ?1 AND (m.folder = ?2 OR coalesce(f.kind, '') NOT IN ('Trash', 'Spam'))";
+			let latest: String = conn.query_row(&format!("SELECT m.summary {from_here} ORDER BY m.received DESC LIMIT 1"), params![key, folder], |r| r.get(0))?;
+			let (count, unread): (u32, bool) = conn.query_row(&format!("SELECT count(*), max(m.unread) {from_here}"), params![key, folder], |r| Ok((r.get(0)?, r.get(1)?)))?;
+			hits.push(SearchHit { row: ThreadRow { key, latest: serde_json::from_str(&latest)?, count, unread }, folder: FolderId(folder) });
+		}
+		Ok(hits)
+	}
+
+	/// Up to `limit` mails, newest first, whose meaning `model` has not worked out yet, with the
+	/// text to work it out from.
+	pub fn unembedded(&self, model: &str, limit: usize) -> Result<Vec<(i64, String)>> {
+		let conn = self.conn();
+		let mut stmt = conn.prepare(
+			"SELECT m.id, w.subject, w.body FROM mails m JOIN words w ON w.rowid = m.id LEFT JOIN vectors v ON v.mail = m.id AND v.model = ?1
+			 WHERE v.mail IS NULL ORDER BY m.received DESC LIMIT ?2",
+		)?;
+		let rows = stmt.query_map(params![model, limit as i64], |r| Ok((r.get(0)?, meaning_text(&r.get::<_, String>(1)?, &r.get::<_, String>(2)?))))?;
+		Ok(rows.collect::<std::result::Result<_, _>>()?)
+	}
+
+	/// Stores vectors worked out by `model` from the texts [`Cache::unembedded`] gave, and returns
+	/// how many. A mail that changed or went meanwhile is left for the next round.
+	pub fn put_vectors(&self, model: &str, vectors: &[(i64, String, Vec<f32>)]) -> Result<usize> {
+		let mut conn = self.conn();
+		let tx = conn.transaction()?;
+		let mut stored = 0;
+		for (id, text, vector) in vectors {
+			let now: Option<String> = tx
+				.query_row("SELECT subject, body FROM words WHERE rowid = ?1", [id], |r| Ok(meaning_text(&r.get::<_, String>(0)?, &r.get::<_, String>(1)?)))
+				.optional()?;
+			if now.as_ref() == Some(text) {
+				tx.execute("INSERT OR REPLACE INTO vectors (mail, model, vector) VALUES (?1, ?2, ?3)", params![id, model, embed::to_blob(vector)])?;
+				stored += 1;
+			}
+		}
+		tx.commit()?;
+		Ok(stored)
+	}
+
+	/// Forgets every mail's meaning, as when search by meaning is turned off.
+	pub fn clear_vectors(&self) -> Result<()> {
+		self.conn().execute("DELETE FROM vectors", [])?;
+		Ok(())
+	}
+}
+
+/// What a mail's meaning is worked out from: its subject and the start of its body.
+fn meaning_text(subject: &str, body: &str) -> String {
+	format!("{subject}\n{body}").chars().take(MEANING_CHARS).collect()
+}
+
+/// Writes the search words of a stored mail from its list row and, once opened, its body. A mail
+/// whose text changed loses its vector, to be worked out again.
+fn index(tx: &Connection, id: &MailId) -> Result<()> {
+	let row: Option<(i64, String, Option<String>)> = tx
+		.query_row(
+			"SELECT m.id, m.summary, b.mail FROM mails m LEFT JOIN bodies b ON b.list = m.list AND b.element = m.element WHERE m.list = ?1 AND m.element = ?2",
+			params![id.list, id.element],
+			|r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+		)
+		.optional()?;
+	let Some((rowid, summary, mail)) = row else { return Ok(()) };
+	let summary: MailSummary = serde_json::from_str(&summary)?;
+	let mail: Option<Mail> = mail.map(|json| serde_json::from_str(&json)).transpose()?;
+	let who = |a: &Address| format!("{} {}", a.name, a.address);
+	let recipients: Vec<String> = match &mail {
+		Some(m) => m.to.iter().chain(&m.cc).chain(&m.bcc).map(who).collect(),
+		None => summary.to.iter().map(who).collect(),
+	};
+	let body = mail.map(|m| search::plain_text(&m.body_html)).unwrap_or_default();
+	let before: Option<String> = tx
+		.query_row("SELECT subject, body FROM words WHERE rowid = ?1", [rowid], |r| Ok(meaning_text(&r.get::<_, String>(0)?, &r.get::<_, String>(1)?)))
+		.optional()?;
+	if before.is_some_and(|b| b != meaning_text(&summary.subject, &body)) {
+		tx.execute("DELETE FROM vectors WHERE mail = ?1", [rowid])?;
+	}
+	tx.execute("DELETE FROM words WHERE rowid = ?1", [rowid])?;
+	tx.execute(
+		"INSERT INTO words (rowid, subject, sender, recipients, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+		params![rowid, summary.subject, who(&summary.from), recipients.join(", "), body],
+	)?;
+	Ok(())
+}
+
+/// Drops a mail with its body, words and vector.
+fn forget(tx: &Connection, id: &MailId) -> Result<()> {
+	let rowid: Option<i64> = tx.query_row("SELECT id FROM mails WHERE list = ?1 AND element = ?2", params![id.list, id.element], |r| r.get(0)).optional()?;
+	if let Some(rowid) = rowid {
+		tx.execute("DELETE FROM words WHERE rowid = ?1", [rowid])?;
+		tx.execute("DELETE FROM vectors WHERE mail = ?1", [rowid])?;
+	}
+	tx.execute("DELETE FROM mails WHERE list = ?1 AND element = ?2", params![id.list, id.element])?;
+	tx.execute("DELETE FROM bodies WHERE list = ?1 AND element = ?2", params![id.list, id.element])?;
+	Ok(())
 }
 
 /// Records one meeting with `a`. A name already known is kept unless this one is from a contact.
@@ -592,6 +777,189 @@ mod tests {
 		assert!(cache.suggest("%", 10).unwrap().is_empty());
 	}
 
+	fn opened(s: &MailSummary, body: &str) -> Mail {
+		Mail {
+			summary: s.clone(),
+			to: vec![Address::new("Sam Okafor", "sam@example.net")],
+			cc: vec![Address::new("", "priya@example.org")],
+			bcc: vec![],
+			reply_to: vec![],
+			body_html: body.into(),
+			attachments: vec![],
+			web_url: String::new(),
+		}
+	}
+
+	/// The newest mail of each conversation `query` finds, best first.
+	fn found(cache: &Cache, query: &str) -> Vec<String> {
+		cache.search(&Query::parse(query), None, 50).unwrap().into_iter().map(|h| h.row.latest.id.element).collect()
+	}
+
+	#[test]
+	fn search_matches_prefixes_and_filters() {
+		let (cache, inbox, sent) = setup();
+		let mut invoice = summary(1, "Your invoice for October", 100);
+		invoice.from = Address::new("Accounts", "accounts@example.org");
+		invoice.has_attachments = true;
+		let lunch = summary(2, "Lunch on Friday?", 200);
+		let mut reply = summary(3, "Re: Lunch on Friday?", 300);
+		reply.from = Address::new("You", "you@tuta.com");
+		cache.merge_page(&inbox, &[lunch.clone(), invoice.clone()], true, true).unwrap();
+		cache.merge_page(&sent, std::slice::from_ref(&reply), true, true).unwrap();
+		cache.put_mail(&opened(&lunch, "<p>Are you free at <b>12:30</b>? The café on Mühlenweg.</p>")).unwrap();
+
+		assert_eq!(found(&cache, "inv"), ["e1"]);
+		// A conversation shows once, as its newest mail; a body word finds it, accents or not.
+		assert_eq!(found(&cache, "lunch"), ["e3"]);
+		assert_eq!(found(&cache, "cafe muhlen"), ["e3"]);
+		assert_eq!(found(&cache, "from:accounts"), ["e1"]);
+		assert_eq!(found(&cache, "from:mia lunch"), ["e3"]);
+		assert_eq!(found(&cache, "from:accounts lunch"), Vec::<String>::new());
+		assert_eq!(found(&cache, "to:sam"), ["e3"]);
+		assert_eq!(found(&cache, "to:priya@example"), ["e3"]);
+		assert_eq!(found(&cache, "subject:october"), ["e1"]);
+		assert_eq!(found(&cache, "subject:12"), Vec::<String>::new());
+		assert_eq!(found(&cache, "has:attachment"), ["e1"]);
+		assert_eq!(found(&cache, "in:sent"), ["e3"]);
+		assert_eq!(found(&cache, "in:Inbox friday"), ["e3"]);
+		assert_eq!(found(&cache, "\"on friday\""), ["e3"]);
+		assert_eq!(found(&cache, "\"friday on\""), Vec::<String>::new());
+		// Filters alone list newest first.
+		assert_eq!(found(&cache, "in:inbox"), ["e3", "e1"]);
+		// The subject weighs most: a subject match ranks above a body match.
+		let mut cafe = summary(4, "Café list", 50);
+		cafe.from = Address::new("Ann", "ann@x.org");
+		cache.merge_page(&inbox, &[lunch, invoice, cafe], true, true).unwrap();
+		assert_eq!(found(&cache, "cafe"), ["e4", "e3"]);
+		// Opening the hit opens its folder's view of the conversation.
+		let hit = cache.search(&Query::parse("12:30"), None, 10).unwrap().remove(0);
+		assert_eq!((hit.folder, hit.row.count), (inbox, 2));
+	}
+
+	#[test]
+	fn the_index_follows_moves_removals_and_new_bodies() {
+		let (cache, inbox, sent) = setup();
+		let trash = FolderId("trash".into());
+		let a = summary(1, "Harbour photos", 100);
+		cache.merge_page(&inbox, &[summary(2, "Other", 200), a.clone()], true, true).unwrap();
+		cache.merge_page(&sent, &[summary(3, "Harbour walk", 300)], true, true).unwrap();
+		cache.put_mail(&opened(&a, "sunset")).unwrap();
+		assert_eq!(found(&cache, "sunset"), ["e1"]);
+		// A new body replaces the old words.
+		cache.put_mail(&opened(&a, "sunrise")).unwrap();
+		assert_eq!((found(&cache, "sunset"), found(&cache, "sunrise")), (vec![], vec!["e1".to_string()]));
+		// Trash and Spam are searched only when asked for.
+		cache.move_to(&a.id, &trash).unwrap();
+		assert_eq!(found(&cache, "harbour"), ["e3"]);
+		assert_eq!(found(&cache, "harbour in:trash"), ["e1"]);
+		cache.remove(&a.id).unwrap();
+		assert_eq!(found(&cache, "sunrise in:trash"), Vec::<String>::new());
+		// Gone from the server: gone from the index.
+		cache.merge_page(&inbox, &[], true, true).unwrap();
+		assert_eq!(found(&cache, "other"), Vec::<String>::new());
+		// A folder that is gone takes its mails' words along.
+		cache.set_folders(&[folder("in", FolderKind::Inbox)]).unwrap();
+		assert_eq!(found(&cache, "harbour"), Vec::<String>::new());
+		let conn = cache.conn();
+		let left: i64 = conn.query_row("SELECT (SELECT count(*) FROM words) + (SELECT count(*) FROM vectors)", [], |r| r.get(0)).unwrap();
+		assert_eq!(left, 0);
+	}
+
+	#[test]
+	fn typed_input_never_breaks_the_query() {
+		let (cache, inbox, _) = setup();
+		cache.merge_page(&inbox, &[summary(1, "Plain \"quoted\" subject: * AND OR", 100)], true, true).unwrap();
+		let nasty = ["\"", "\"\"", "*", "-x", "^a", "a:b:c", "NEAR(a b, 2)", "{subject sender}: x", "a OR", "AND", "(", ")", "'", "subject:\"", "from:*", "in:\"", "\u{345}", "\0", "x\"y\"z\"", ":", "::", "has:", "%_\\", "日本語", "ﬁ"];
+		for q in nasty {
+			assert!(cache.search(&Query::parse(q), Some(("m", &[1.0, 0.0])), 10).is_ok(), "{q:?}");
+		}
+		// And any mix of these characters, in a fixed pseudo-random order.
+		let alphabet: Vec<char> = "ab \"*:^-()+{}'\\.,;&|!@#~é\u{345}\u{301}".chars().collect();
+		let mut seed = 7u64;
+		for _ in 0..2000 {
+			let q: String = (0..12)
+				.map(|_| {
+					seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+					alphabet[(seed >> 33) as usize % alphabet.len()]
+				})
+				.collect();
+			assert!(cache.search(&Query::parse(&q), None, 10).is_ok(), "{q:?}");
+		}
+		assert_eq!(found(&cache, "subject: AND"), ["e1"]);
+	}
+
+	#[test]
+	fn meaning_finds_mails_without_the_words_and_keeps_to_the_filters() {
+		let (cache, inbox, _) = setup();
+		let trash = FolderId("trash".into());
+		let pizza = summary(1, "Pizza tonight?", 100);
+		let pay = summary(2, "Your payment", 200);
+		let dinner = summary(3, "Dinner plans", 300);
+		cache.merge_page(&inbox, &[pay.clone(), pizza.clone()], true, true).unwrap();
+		cache.merge_page(&trash, std::slice::from_ref(&dinner), true, true).unwrap();
+		let model = crate::embed::tests::tiny();
+		assert_eq!(sync::vectors(&cache, &model, "tiny").unwrap(), 3);
+		assert_eq!(sync::vectors(&cache, &model, "tiny").unwrap(), 0, "worked out once");
+		let search = |q: &str| -> Vec<String> {
+			let q = Query::parse(q);
+			let v = model.embed(&q.text());
+			cache.search(&q, Some(("tiny", &v)), 10).unwrap().into_iter().map(|h| h.row.latest.id.element).collect()
+		};
+		// No mail has the word "lunch": meaning finds the pizza, not the payment, and not Trash.
+		assert_eq!(found(&cache, "lunch"), Vec::<String>::new());
+		assert_eq!(search("lunch"), ["e1"]);
+		assert_eq!(search("lunch in:trash"), ["e3"]);
+		assert_eq!(search("lunch from:nobody"), Vec::<String>::new());
+		// A word match and a meaning match: the mail with both comes first.
+		assert_eq!(search("payment"), ["e2"]);
+		assert_eq!(search("pizza"), ["e1"]);
+		// Vectors from another model do not count, and are worked out again for this one.
+		assert_eq!(cache.search(&Query::parse("lunch"), Some(("other", &model.embed("lunch"))), 10).unwrap(), vec![]);
+	}
+
+	#[test]
+	fn a_changed_mail_has_its_meaning_worked_out_again() {
+		let (cache, inbox, _) = setup();
+		let s = summary(1, "Plans", 100);
+		cache.merge_page(&inbox, std::slice::from_ref(&s), true, true).unwrap();
+		let model = crate::embed::tests::tiny();
+		let stale = cache.unembedded("tiny", 10).unwrap();
+		assert_eq!(stale, [(1, "Plans\n".to_string())]);
+		sync::vectors(&cache, &model, "tiny").unwrap();
+		assert!(cache.unembedded("tiny", 10).unwrap().is_empty());
+		// Its body arrives: worked out again, from the body too.
+		cache.put_mail(&opened(&s, "pizza")).unwrap();
+		assert_eq!(cache.unembedded("tiny", 10).unwrap(), [(1, "Plans\npizza".to_string())]);
+		// A vector worked out from the old text while the body arrived is not kept.
+		let (id, text) = stale[0].clone();
+		assert_eq!(cache.put_vectors("tiny", &[(id, text, model.embed("Plans"))]).unwrap(), 0);
+		// Opening it again with the same body keeps the vector.
+		sync::vectors(&cache, &model, "tiny").unwrap();
+		cache.put_mail(&opened(&s, "pizza")).unwrap();
+		assert!(cache.unembedded("tiny", 10).unwrap().is_empty());
+		cache.clear_vectors().unwrap();
+		assert_eq!(cache.unembedded("tiny", 10).unwrap().len(), 1);
+	}
+
+	#[test]
+	fn an_older_layout_is_rebuilt_with_its_index() {
+		let dir = std::env::temp_dir().join(format!("tern-cache-layout-{}", std::process::id()));
+		let path = dir.join("mail.db");
+		let cache = Cache::open(&path, &[7; 32]).unwrap();
+		cache.set_folders(&[folder("in", FolderKind::Inbox)]).unwrap();
+		cache.merge_page(&FolderId("in".into()), &[summary(1, "Kept?", 100)], true, true).unwrap();
+		cache.conn().execute_batch("PRAGMA user_version = 1").unwrap();
+		drop(cache);
+		let cache = Cache::open(&path, &[7; 32]).unwrap();
+		assert!(cache.folders().unwrap().is_empty());
+		assert_eq!(found(&cache, "kept"), Vec::<String>::new());
+		cache.set_folders(&[folder("in", FolderKind::Inbox)]).unwrap();
+		cache.merge_page(&FolderId("in".into()), &[summary(1, "Kept?", 100)], true, true).unwrap();
+		assert_eq!(found(&cache, "kept"), ["e1"]);
+		drop(cache);
+		let _ = std::fs::remove_dir_all(dir);
+	}
+
 	#[test]
 	fn a_database_opened_with_another_key_starts_afresh() {
 		let dir = std::env::temp_dir().join(format!("tern-cache-test-{}", std::process::id()));
@@ -601,15 +969,24 @@ mod tests {
 			cache.set_folders(&[folder("in", FolderKind::Inbox)]).unwrap();
 			(cache, FolderId("in".into()), ())
 		};
-		cache.merge_page(&inbox, &[summary(1, "secret subject", 100)], true, true).unwrap();
+		let s = summary(1, "secret subject", 100);
+		cache.merge_page(&inbox, std::slice::from_ref(&s), true, true).unwrap();
+		// The search words and the meaning of an opened mail stay encrypted too.
+		cache.put_mail(&opened(&s, "<p>The zanzibarite lunch plan</p>")).unwrap();
+		let model = crate::embed::tests::tiny();
+		assert_eq!(sync::vectors(&cache, &model, "tiny").unwrap(), 1);
+		let vector = crate::embed::to_blob(&model.embed("secret subject\nThe zanzibarite lunch plan"));
 		drop(cache);
 		// No file holds readable text, the write-ahead log included.
 		for suffix in ["", "-wal"] {
 			let raw = std::fs::read(format!("{}{suffix}", path.display())).unwrap_or_default();
 			assert!(!raw.windows(14).any(|w| w == b"secret subject"), "plain text in {suffix:?}");
+			assert!(!raw.windows(11).any(|w| w == b"zanzibarite"), "an indexed word in {suffix:?}");
+			assert!(!raw.windows(vector.len()).any(|w| w == vector), "a vector in {suffix:?}");
 		}
 		assert!(std::fs::metadata(&path).unwrap().len() > 0);
 		assert_eq!(Cache::open(&path, &[7; 32]).unwrap().count(&inbox).unwrap(), 1);
+		assert_eq!(found(&Cache::open(&path, &[7; 32]).unwrap(), "zanzib"), ["e1"]);
 		assert_eq!(Cache::open(&path, &[8; 32]).unwrap().count(&inbox).unwrap(), 0);
 		let _ = std::fs::remove_dir_all(dir);
 	}

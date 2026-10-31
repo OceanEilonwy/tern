@@ -2,6 +2,7 @@
 
 use tern_core::{Backend, Error, Folder, FolderId, Result};
 
+use crate::embed::Model;
 use crate::{now_ms, Cache, CacheError, FolderState};
 
 /// How much mail to keep ready offline, a setting.
@@ -124,6 +125,31 @@ pub async fn bodies(backend: &dyn Backend, cache: &Cache, count: usize) -> Resul
 		}
 	}
 	Ok(opened)
+}
+
+/// Mails whose meaning is worked out at a time.
+pub const VECTOR_BATCH: usize = 100;
+
+/// Works out the meaning of every stored mail that lacks it with `model`, stored under `name`.
+/// Returns how many. Runs on the CPU for about a millisecond per hundred mails; call it off the UI thread.
+pub fn vectors(cache: &Cache, model: &Model, name: &str) -> std::result::Result<usize, CacheError> {
+	let mut done = 0;
+	loop {
+		let batch: Vec<(i64, String, Vec<f32>)> = cache
+			.unembedded(name, VECTOR_BATCH)?
+			.into_iter()
+			.map(|(id, text)| {
+				let vector = model.embed(&text);
+				(id, text, vector)
+			})
+			.collect();
+		let stored = cache.put_vectors(name, &batch)?;
+		done += stored;
+		// Mails that changed meanwhile wait for the next round rather than going round here.
+		if batch.len() < VECTOR_BATCH || stored == 0 {
+			return Ok(done);
+		}
+	}
 }
 
 /// Stores the account's contacts for suggestions.

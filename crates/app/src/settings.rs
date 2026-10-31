@@ -14,6 +14,8 @@ pub struct Settings {
 	pub folders_rail: bool,
 	/// The conversation list's width in pixels, as last dragged; 0 is the default.
 	pub list_width: u32,
+	/// Search finds mail by meaning too, with a model downloaded once.
+	pub semantic: bool,
 }
 
 fn dir() -> PathBuf {
@@ -48,6 +50,7 @@ impl Settings {
 			folders_width: width("folders_width"),
 			folders_rail: table.get("folders_rail").and_then(|v| v.as_bool()).unwrap_or(false),
 			list_width: width("list_width"),
+			semantic: table.get("semantic").and_then(|v| v.as_bool()).unwrap_or(false),
 		}
 	}
 
@@ -59,16 +62,18 @@ impl Settings {
 			folders_width: width("folders_width"),
 			folders_rail: json["folders_rail"].as_bool().unwrap_or(false),
 			list_width: width("list_width"),
+			..Settings::default()
 		}
 	}
 
 	fn to_toml(self) -> String {
 		format!(
-			"offline = \"{}\"\nfolders_width = {}\nfolders_rail = {}\nlist_width = {}\n",
+			"offline = \"{}\"\nfolders_width = {}\nfolders_rail = {}\nlist_width = {}\nsemantic = {}\n",
 			self.offline.name(),
 			self.folders_width,
 			self.folders_rail,
-			self.list_width
+			self.list_width,
+			self.semantic
 		)
 	}
 
@@ -87,9 +92,9 @@ mod tests {
 
 	#[test]
 	fn settings_round_trip_and_bad_values_fall_back() {
-		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480 };
+		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480, semantic: true };
 		assert_eq!(Settings::parse(&s.to_toml()), s);
-		assert_eq!(s.to_toml(), "offline = \"high\"\nfolders_width = 240\nfolders_rail = true\nlist_width = 480\n");
+		assert_eq!(s.to_toml(), "offline = \"high\"\nfolders_width = 240\nfolders_rail = true\nlist_width = 480\nsemantic = true\n");
 		assert_eq!(Settings::parse("not = [toml"), Settings::default());
 		assert_eq!(Settings::parse("offline = \"huge\""), Settings::default());
 		// One bad value leaves the others.
@@ -98,7 +103,7 @@ mod tests {
 
 	#[test]
 	fn old_json_settings_carry_over() {
-		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480 };
+		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480, semantic: false };
 		assert_eq!(Settings::from_json(br#"{"offline":"high","folders_width":240,"folders_rail":true,"list_width":480}"#), s);
 		assert_eq!(Settings::from_json(br#"{"offline":"low"}"#), Settings { offline: Level::Low, ..Settings::default() });
 		assert_eq!(Settings::from_json(b"not json"), Settings::default());

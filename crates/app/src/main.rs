@@ -15,6 +15,8 @@ mod reader;
 mod render;
 mod runtime;
 mod screenshot;
+mod search;
+mod semantic;
 mod settings;
 mod suggest;
 mod window;
@@ -47,6 +49,7 @@ fn main() -> glib::ExitCode {
 		app.set_accels_for_action("win.next", &["<Alt>Down"]);
 		app.set_accels_for_action("win.previous", &["<Alt>Up"]);
 		app.set_accels_for_action("win.toggle-folders", &["F9"]);
+		app.set_accels_for_action("win.search", &["<Control>f"]);
 		app.set_accels_for_action("app.preferences", &["<Control>comma"]);
 		for i in 0..9 {
 			app.set_accels_for_action(&format!("win.folder({i})"), &[&format!("<Control>{}", i + 1)]);

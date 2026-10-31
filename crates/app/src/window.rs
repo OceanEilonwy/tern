@@ -12,7 +12,7 @@ use tern_core::{demo::DemoBackend, Backend, Error, FolderKind};
 
 use crate::activity::Activity;
 use crate::settings::Settings;
-use crate::{background, format, keyring, login::Login, mailbox::Mailbox, runtime, screenshot};
+use crate::{background, format, keyring, login::Login, mailbox::Mailbox, runtime, screenshot, semantic};
 
 type ChangedHook = Box<dyn Fn(&[FolderKind])>;
 
@@ -302,6 +302,7 @@ impl Window {
 fn preferences_dialog(ctx: &Ctx) -> adw::PreferencesDialog {
 	let dialog = adw::PreferencesDialog::new();
 	let page = adw::PreferencesPage::new();
+	let search = search_group(ctx);
 	let group = adw::PreferencesGroup::builder()
 		.title("Offline Mail")
 		.description("Tern keeps recent mail on this computer, encrypted, so it shows at once and can be read offline. It checks for new mail every few minutes.")
@@ -321,8 +322,41 @@ fn preferences_dialog(ctx: &Ctx) -> adw::PreferencesDialog {
 	});
 	group.add(&row);
 	page.add(&group);
+	page.add(&search);
 	dialog.add(&page);
 	dialog
+}
+
+/// Search by meaning is off until asked for, as it downloads a model once.
+fn search_group(ctx: &Ctx) -> adw::PreferencesGroup {
+	let group = adw::PreferencesGroup::builder().title("Search").description("Search looks through the mail kept on this computer.").build();
+	let about = format!("Also finds mail about what you type, not only mail with its words. Downloads a {} language model once; your mail never leaves this computer.", semantic::SIZE);
+	let row = adw::SwitchRow::builder().title("Search by Meaning").subtitle(&about).active(ctx.settings().semantic).build();
+	let ctx = ctx.clone();
+	row.connect_active_notify(move |row| {
+		let on = row.is_active();
+		if on == ctx.settings().semantic {
+			return;
+		}
+		ctx.set_settings(Settings { semantic: on, ..ctx.settings() });
+		if !on {
+			return semantic::forget(ctx.cache().as_deref());
+		}
+		// Fetch the model now and say so; the background sync then works out each mail's meaning.
+		row.set_subtitle("Downloading the language model…");
+		let (row, about) = (row.clone(), about.clone());
+		runtime::spawn_local(async move {
+			match runtime::run(semantic::ensure()).await {
+				Ok(_) => row.set_subtitle(&about),
+				Err(e) => {
+					row.set_subtitle(&format!("Could not download the model: {e}"));
+					row.set_active(false);
+				},
+			}
+		});
+	});
+	group.add(&row);
+	group
 }
 
 fn level_label(level: Level) -> &'static str {
@@ -369,6 +403,7 @@ fn shortcuts_dialog() -> adw::ShortcutsDialog {
 				("Mark as Unread", "<Control>u"),
 				("Move Conversation to Trash", "Delete"),
 				("Check for New Mail", "F5"),
+				("Search", "<Control>f"),
 			],
 		),
 		(

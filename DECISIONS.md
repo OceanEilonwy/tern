@@ -139,3 +139,84 @@ attachments must work, KISS, fast, Rust. These are the calls I made, in the orde
   old `settings.json` is moved over once and removed.
 - **Sent toast** names the mail: `Sent “Lunch on Friday?”`, cut at 40 characters.
 - Window checks now run with their own `XDG_CONFIG_HOME`, so they never read or write your settings.
+
+## Search (2026-10-31)
+
+You chose hybrid search: keyword search and search by meaning, fused into one list. Built on branch `search`.
+
+- **Keyword index: SQLite FTS5 inside the encrypted cache.** The bundled SQLCipher (SQLite 3.51.3) has FTS5
+  compiled in; every cache test now runs through it. One table, `words`: subject, sender (name and address),
+  recipients (To, Cc, Bcc once the mail is opened, else the first recipient) and the body as plain text.
+  Tokenizer `unicode61 remove_diacritics 2` ("cafe" finds "café"), with a prefix index for 2 and 3 letters.
+  The HTML is reduced to text by a small function in `tern-cache` (`search::plain_text`: tags, styles and
+  scripts out, common entities decoded), not by an HTML parser; the index only needs the words.
+- **The index is kept in sync in Rust, not by triggers**: `merge_page`, `put_mail`, `remove`, mails gone from
+  the server and `set_folders` rewrite or drop a mail's words (and its vector). The folder is not indexed but
+  joined at query time, so moving a mail needs no index change. `mails` got an explicit
+  `id INTEGER PRIMARY KEY`, the index's row id, because SQLite may renumber implicit row ids on VACUUM.
+  `SCHEMA_VERSION` is now 2: **an existing cache is dropped once and fetched again** on the first start.
+- **Query syntax**: plain words, "quoted phrases", `from:`, `to:`, `subject:`, `has:attachment`, `in:<folder>`
+  (folder name or kind, any case). All terms must match. Every term becomes a quoted FTS5 prefix phrase, so
+  nothing typed is FTS5 syntax (`AND`, `NEAR(`, `*`, `^`, stray quotes are words); terms with no letter or
+  digit drop out. A test throws 2000 random strings of FTS5 punctuation at it. Unknown `x:` terms are words
+  (`12:30` stays a time). Trash and Spam are left out unless `in:` names them.
+- **Ranking**: BM25 with the subject weighing 4, the sender 2, recipients and body 1. A query of filters only
+  (`from:sam`) lists newest first.
+- **Search by meaning: a static embedding model (model2vec), potion-base-8M** (MIT, 256 dimensions, 30 MB,
+  English). A static model is a table of one vector per word piece; a text's vector is the mean. Pure Rust, no
+  neural network at run time, about 0.2 ms per mail. Transformers through candle or ort were not worth it here:
+  hundreds of MB of dependencies or a native ONNX runtime, and milliseconds per mail. potion-retrieval-32M
+  (128 MB) ranks a little better and potion-multilingual-128M (about 500 MB) knows German; both were too big
+  for an opt-in download. Non-English mail still has keyword search; meaning works best in English.
+- **No model2vec or tokenizers crate**: they pull in Hugging Face's tokenizers, hf-hub, ndarray and more.
+  Tern reads the two files itself (`tern-cache/src/embed.rs`): the WordPiece vocabulary from `tokenizer.json`
+  and the table from `model.safetensors` (an 8-byte length, a JSON header, raw floats). The BERT tokenizer is
+  written out (lower case, accents off, punctuation and CJK apart, longest pieces first), about 100 lines.
+  Checked against Hugging Face's own tokenizer (0.23.3) on six texts with accents, CJK, punctuation, an
+  address, a URL and a soft hyphen: identical ids. That check is an ignored test with the reference ids.
+  Accents are stripped by a table for the Latin letters U+00C0–U+024F instead of Unicode decomposition,
+  which would need another crate; other letters pass unchanged, and the English vocabulary knows few of them.
+- **Opt-in, in Preferences → Search → "Search by Meaning"**, which names the 30 MB download. Off by default:
+  keyword search needs nothing. Turning it on downloads the model from huggingface.co at a pinned revision,
+  checks each file's SHA-256, and keeps it in `~/.cache/tern/models/potion-base-8M` (public data, not mail).
+  The download uses the Tuta SDK's own HTTPS client (hyper and rustls, already in the build) through
+  `tern_tuta::download`, which follows redirects only to HTTPS. Turning it off deletes every vector and keeps
+  the download, so turning it on again works offline. The setting is one field, `semantic`, in `Settings`.
+- **Vectors live only in the encrypted database** (table `vectors`), since they reveal what mail is about.
+  Stored as one byte per number with a scale (260 bytes instead of 1 KB; cosines off by about 0.005), and
+  compared by brute force in Rust. Measured on 20,000 mails in an encrypted file, release build: keyword search
+  12–25 ms, keyword and meaning 35–70 ms (140 ms with 32-bit floats). No sqlite-vec. Searches run off the
+  UI thread; a late result for older text is dropped.
+- **Indexing by meaning runs in the background sync, after mails are opened ahead**, a hundred at a time on a
+  blocking thread: 20,000 mails take about 10 s on disk. A mail's vector is worked out from its subject and the
+  first 3000 characters of its body (the model reads 512 word pieces). Mails not opened yet get one from the
+  subject; when the body arrives the vector is dropped and worked out again. A vector worked out from text that
+  changed meanwhile is not stored. Until the first background round has loaded the model after start, search
+  is by keyword only.
+- **A mail counts as close in meaning at a cosine of 0.25 or more** (`MEANING_MIN`), else every mail would be
+  found. Measured with the real model on mails like the demo's: related pairs scored 0.28–0.46 ("pictures" and
+  "Photos from Saturday" 0.46, "security" and a password reset 0.28), unrelated ones at most 0.24.
+- **Fusion: reciprocal rank fusion** with k = 60: each mail scores 1/(60 + rank) in each list it is in. A
+  conversation takes its best mail's score (the maximum, so a long thread of weak matches does not beat one
+  strong match), and the newer conversation wins a tie. A conversation found opens in the folder of its best
+  match, so a match in Trash (with `in:trash`) shows the trashed mails.
+- **UI**: a search button and Ctrl+F in the list's header open a search bar under it. Results replace the list
+  (title "Search") and update as the cache changes; Enter opens the best match; Escape, the button or picking a
+  folder go back to the folder. Clearing the text goes back to the folder too but keeps the bar open. Found
+  while testing: GTK announces an empty search at once, also between select-all and the next letter, and the
+  first version closed the bar there; the `search` window check types over old text and failed on it. Also
+  found: typing on with a result open made the list select that result's neighbour, which opened it and
+  marked it read. New words now leave nothing open; the check types on after opening one and failed before.
+  Nothing found says "No matches in mail on this computer": search sees only what the offline level keeps,
+  and body words only of mails opened or opened ahead. Search shows the best 100 conversations, no paging.
+- **Tests**: query parsing, FTS5 quoting and random input, plain text, fusion (both lists, grouping, ties), the
+  tokenizer against a tiny vocabulary, the stored-vector accuracy, the index following moves, removals, new
+  bodies and folder changes, meaning with a two-dimensional test model and filters, vectors redone after a
+  change, an older layout rebuilt with its index, and the no-plain-text check now also looks for an indexed
+  body word and a vector in the database file and its log. The `search` window check (demo account) searches
+  by filter, body words and a prefix, opens a result, shows "No Matches", goes back with Escape, and opens a
+  conversation spanning Inbox and Sent. Ignored, needing the model or the network: the reference token ids
+  (`TERN_MODEL_DIR=… cargo test -p tern-cache -- --ignored`) and the real download
+  (`cargo test -p tern semantic -- --ignored`); both passed on 2026-10-31.
+- **New dependencies: none.** `tern-tuta` now also depends on the workspace's `crypto-primitives` (vendored
+  Tuta SDK, already built) for SHA-256.
