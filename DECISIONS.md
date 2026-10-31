@@ -298,3 +298,40 @@ Mail is now fetched in batches, and the keys and tokens a batch needs are loaded
   letter typed are compared, which keeps a typo search at about 95 ms against 1.4 million distinct
   words (far more than a real mailbox holds). A dropped first letter ("ugby") is not found.
 - Filters (`from:`, `subject:`…) and quoted phrases are matched as typed.
+
+## Fourth round (2026-10-31)
+
+- **A tighter rail**: on the rail each folder is its icon alone, with the unread count as a small
+  badge on its corner instead of a line under it, and the main menu moves to the list's header. The
+  rail is 52 pixels, down from 92 (more with KDE's window icon on the folders' header, which the
+  panes scene now sets so the width is checked as the user sees it). Counts over 99 show as "99+";
+  the tooltip has the exact number.
+- **Sent icon**: Tern draws its own outlined paper plane, as it does for Inbox and Archive; the
+  theme's `mail-send` was cut off in Breeze.
+- **One language for rules and Move to Spam**: a rule's line is the same thing the spam dialog's
+  search box holds, so what the dialog lists is exactly what a kept rule will catch. `from:`
+  (`sender:`), `to:`, `subject:` (`title:`), bare words (subject or sender), `and`, `or`, `not`/`-`,
+  brackets; `@domain` matches the domain and its subdomains. It lives in `tern-core::rules` and is
+  separate from the search syntax: search is ranked full-text over bodies too, rules are a yes/no
+  test that must run on what the sync has before bodies are opened.
+- **Rules see what the list sees**: sender, the first recipient and the subject. Tuta's list entries
+  carry only the first recipient; all recipients and the body need the mail opened, which rules must
+  not wait for. `to:` is documented as the first recipient.
+- **Rules sort new mail only**, after each sync and before mail is opened ahead, oldest first. A
+  mark in the cache (`marks` table, added without a schema bump so no rebuild) holds the newest
+  Inbox mail looked at; the first run only sets it, so turning rules on never sweeps old mail
+  unasked. Old mail is what the Move to Spam dialog is for; the rule page says how many mails here
+  already match. Mail this account sent is never moved. Of the rules that catch a mail, the first
+  that moves it wins; every label applies. On an error nothing advances, so the next sync tries
+  again.
+- **Rules name folders and labels as shown**, not by id, so `rules.toml` reads and edits by hand. A
+  rule naming one that is gone does nothing. Tern does not create folders or labels (that needs
+  Tuta's key handling for new mail sets); labels are made in Tuta and picked in Tern. Labels are not
+  shown in Tern's sidebar yet: a mail can carry many, and the cache keeps one place per mail.
+- **A broken rule is kept**, flagged in Preferences, and catches nothing, rather than being dropped
+  from the file.
+- **Moving uses Tuta's MoveMailService and ApplyLabelService** (added to the SDK beside its simple
+  move, in batches of 50). The demo account gained three offers from one sender for the spam scene;
+  tests that counted the demo Inbox were updated.
+- **Ctrl+J** moves to Spam (Thunderbird's J; a bare letter would fire while typing).
+

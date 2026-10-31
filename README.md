@@ -17,6 +17,11 @@ images are never loaded, and anything too rich has an "Open in Tuta" button.
   match), `from:`, `to:`, `subject:`, `in:folder` and `has:attachment`. Turn on "Search by Meaning" in
   Preferences to also find mail about what you type; it downloads a 30 MB language model once, and your mail
   never leaves the computer.
+- **Spam and rules**: Move to Spam (Ctrl+J) lists the sender's other mail, or mail from their domain or
+  with the subject, to move along with it, and can keep that as a rule. Rules in Preferences sort new
+  Inbox mail as it arrives (to Spam, a folder, or a Tuta label), written like
+  `(from:@example.com or subject:"offer") and not to:me@tuta.com`; they live in
+  `~/.config/tern/rules.toml`.
 - **Keyboard**: Alt+Up/Down between conversations, Enter to read, Escape back, Delete, Ctrl+1…9 for
   folders, Ctrl+F to search, F9 to fold the folders to icons; Ctrl+? lists them all.
 - **Resizable panes**: drag the edge of the folders or the list; drag the folders narrow (or double-click
@@ -54,6 +59,8 @@ TERN_TEST_EMAIL=you@tuta.com TERN_TEST_PASSWORD=… cargo test -p tern-tuta -- -
 cargo test -p tern semantic -- --ignored    # downloads the search model and finds mail by meaning
 ```
 
-The live test sends you a mail with a PDF attached, finds it in Sent, and compares the attachment bytes.
+The live tests send you a mail with a PDF attached, find it in Sent, and compare the attachment bytes;
+open mail in a batch and one by one and compare; and move your newest Inbox mail to Archive and back
+(and add your first label to it, if you have labels).
 
 GPL-3.0, like the Tuta SDK it builds on.

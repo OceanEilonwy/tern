@@ -40,6 +40,11 @@
   padding-right: 4px;
 }
 
+/* A rule's line, as it is typed. */
+row.rule .title > .title {
+  font-family: monospace;
+}
+
 .pill.small-pill {
   padding: 6px 16px;
 }

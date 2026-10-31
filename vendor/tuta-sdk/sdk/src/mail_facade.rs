@@ -3,14 +3,17 @@ use crate::crypto_entity_client::CryptoEntityClient;
 use crate::element_value::ParsedEntity;
 use crate::entities::generated::sys::{Group, GroupInfo};
 use crate::entities::generated::tutanota::{
-	Mail, MailBox, MailSet, MailboxGroupRoot, SimpleMoveMailPostIn, UnreadMailStatePostIn,
+	ApplyLabelServicePostIn, Mail, MailBox, MailSet, MailboxGroupRoot, MoveMailData,
+	SimpleMoveMailPostIn, UnreadMailStatePostIn,
 };
 use crate::entities::Entity;
 use crate::folder_system::{FolderSystem, MailSetKind};
 use crate::groups::GroupType;
 use crate::id::id_tuple::IdTupleGenerated;
 use crate::rest_error::HttpError;
-use crate::services::generated::tutanota::{SimpleMoveMailService, UnreadMailStateService};
+use crate::services::generated::tutanota::{
+	ApplyLabelService, MoveMailService, SimpleMoveMailService, UnreadMailStateService,
+};
 #[cfg_attr(test, mockall_double::double)]
 use crate::services::service_executor::ResolvingServiceExecutor;
 #[cfg_attr(test, mockall_double::double)]
@@ -120,6 +123,53 @@ impl MailFacade {
 				.await?;
 		}
 
+		Ok(())
+	}
+
+	/// Moves the given mails into `folder` (a mail set's id), in batches the server accepts.
+	pub async fn move_mails(
+		&self,
+		mut mails: Vec<IdTupleGenerated>,
+		folder: IdTupleGenerated,
+	) -> Result<(), ApiCallError> {
+		mails.dedup();
+		for mail in mails.chunks(MAX_MAIL_UPDATE_LIMIT) {
+			self.service_executor
+				.post::<MoveMailService>(
+					MoveMailData {
+						_format: 0,
+						moveReason: None,
+						targetFolder: folder.clone(),
+						mails: mail.to_vec(),
+						excludeMailSet: None,
+					},
+					Default::default(),
+				)
+				.await?;
+		}
+		Ok(())
+	}
+
+	/// Adds `label` (a label mail set's id) to the given mails.
+	pub async fn apply_label(
+		&self,
+		mut mails: Vec<IdTupleGenerated>,
+		label: IdTupleGenerated,
+	) -> Result<(), ApiCallError> {
+		mails.dedup();
+		for mail in mails.chunks(MAX_MAIL_UPDATE_LIMIT) {
+			self.service_executor
+				.post::<ApplyLabelService>(
+					ApplyLabelServicePostIn {
+						_format: 0,
+						mails: mail.to_vec(),
+						addedLabels: vec![label.clone()],
+						removedLabels: Vec::new(),
+					},
+					Default::default(),
+				)
+				.await?;
+		}
 		Ok(())
 	}
 }

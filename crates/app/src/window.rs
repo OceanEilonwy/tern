@@ -13,7 +13,7 @@ use tern_core::{demo::DemoBackend, Backend, Error, FolderKind};
 use crate::activity::Activity;
 use crate::fetcher::{Fetcher, Tuning};
 use crate::settings::Settings;
-use crate::{background, format, keyring, login::Login, mailbox::Mailbox, runtime, screenshot, semantic};
+use crate::{background, format, keyring, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot, semantic};
 
 type ChangedHook = Box<dyn Fn(&[FolderKind])>;
 
@@ -201,7 +201,7 @@ impl Window {
 
 		let ctx = self.ctx.clone();
 		let preferences = gio::SimpleAction::new("preferences", None);
-		preferences.connect_activate(move |_, _| preferences_dialog(&ctx).present(Some(&ctx.window)));
+		preferences.connect_activate(move |_, _| preferences_dialog(&ctx).0.present(Some(&ctx.window)));
 		app.add_action(&preferences);
 
 		let window = self.ctx.window.clone();
@@ -311,10 +311,13 @@ impl Window {
 	}
 }
 
-fn preferences_dialog(ctx: &Ctx) -> adw::PreferencesDialog {
-	let dialog = adw::PreferencesDialog::new();
+/// Preferences, with its Rules section.
+pub fn preferences_dialog(ctx: &Ctx) -> (adw::PreferencesDialog, Rc<rule_editor::Rules>) {
+	// Tall enough for a rule's page without scrolling.
+	let dialog = adw::PreferencesDialog::builder().content_height(680).build();
 	let page = adw::PreferencesPage::new();
 	let search = search_group(ctx);
+	let rules = rule_editor::Rules::new(ctx, &dialog);
 	let group = adw::PreferencesGroup::builder()
 		.title("Offline Mail")
 		.description("Tern keeps recent mail on this computer, encrypted, so it shows at once and can be read offline. It checks for new mail every few minutes.")
@@ -335,8 +338,14 @@ fn preferences_dialog(ctx: &Ctx) -> adw::PreferencesDialog {
 	group.add(&row);
 	page.add(&group);
 	page.add(&search);
+	page.add(&rules.group);
 	dialog.add(&page);
-	dialog
+	// The dialog keeps its rules section alive while open.
+	let keep = RefCell::new(Some(rules.clone()));
+	dialog.connect_closed(move |_| {
+		keep.borrow_mut().take();
+	});
+	(dialog, rules)
 }
 
 /// Search by meaning is off until asked for, as it downloads a model once.
@@ -414,6 +423,7 @@ fn shortcuts_dialog() -> adw::ShortcutsDialog {
 				("Forward", "<Control>l"),
 				("Mark as Unread", "<Control>u"),
 				("Move Conversation to Trash", "Delete"),
+				("Move to Spam", "<Control>j"),
 				("Check for New Mail", "F5"),
 				("Search", "<Control>f"),
 			],

@@ -1,6 +1,6 @@
 //! A hidden debug path that builds a scene, saves a PNG of it and quits.
 //!
-//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|folders-fail|refresh-race|sign-out-race|draft|suggest|keys|arrows|busy|panes|search|focus-first|inbox|reading|invoice|newsletter|compose|narrow|narrow-reading`
+//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|folders-fail|refresh-race|sign-out-race|draft|suggest|keys|arrows|busy|panes|search|focus-first|spam|rules|inbox|reading|invoice|newsletter|compose|spam-dialog|rule-edit|narrow|narrow-reading`
 //! (with `TERN_DEMO=1` for all but login and sign-in; sign-in types "demo" on the sign-in page). For dark mode add `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
 
 use std::path::PathBuf;
@@ -19,6 +19,9 @@ use crate::compose_model::Fields;
 use crate::composer::Composer;
 use crate::mailbox::RAIL;
 use crate::window::Window;
+use crate::{rules, spam};
+use tern_core::rules::{Action, Rule};
+use tern_core::FolderKind;
 
 pub fn scene() -> Option<(PathBuf, String)> {
 	let path = std::env::var_os("TERN_SCREENSHOT")?;
@@ -161,7 +164,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		}
 		// Alt+Down moves to the next conversation; Delete trashes it and opens its neighbour.
 		"keys" => {
-			wait_for(|| mailbox.store.n_items() == 4).await;
+			wait_for(|| mailbox.store.n_items() == 7).await;
 			let window = win.ctx.window.clone();
 			let act = |name: &str| gtk::prelude::WidgetExt::activate_action(&window, name, None).map_err(|e| e.to_string());
 			act("win.next")?;
@@ -172,10 +175,10 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("Alt+Down twice opened {second:?}"));
 			}
 			act("win.trash")?;
-			wait_for(|| mailbox.store.n_items() == 3).await;
+			wait_for(|| mailbox.store.n_items() == 6).await;
 			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
 			let next = mailbox.reader.mails().last().map(|m| m.subject.clone()).unwrap_or_default();
-			if mailbox.store.n_items() != 3 || !next.contains("Lunch") {
+			if mailbox.store.n_items() != 6 || !next.contains("Lunch") {
 				return Err(format!("after Delete: {} conversations, showing {next:?}", mailbox.store.n_items()));
 			}
 			Ok(())
@@ -264,7 +267,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// Ctrl+F searches the mail on this computer across folders; a result opens its conversation,
 		// and Escape goes back to the folder.
 		"search" => {
-			wait_for(|| mailbox.store.n_items() == 4).await;
+			wait_for(|| mailbox.store.n_items() == 7).await;
 			// Body words are found once the background sync has opened the mails ahead.
 			wait_for(|| win.ctx.cache().is_some_and(|c| c.missing_bodies(10).is_ok_and(|m| m.is_empty()))).await;
 			let window = win.ctx.window.clone();
@@ -288,7 +291,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			// Typing on after opening one: nothing opens by itself (which would mark it read).
 			mailbox.type_search("in:inbox")?;
-			wait_for(|| shows(&["Photos from Saturday", "Your invoice for October", "Re: Lunch on Friday?", "This week: five small things"])).await;
+			wait_for(|| shows(&["Photos from Saturday", "Your invoice for October", "Re: Lunch on Friday?", "This week: five small things", "50% off everything this weekend", "Last chance: 50% off ends tonight", "Your exclusive coupon inside"])).await;
 			mailbox.select_by_subject("invoice");
 			wait_for(opened).await;
 			mailbox.append_search(" lunch");
@@ -303,8 +306,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("searching nonsense shows {:?}", mailbox.status()));
 			}
 			mailbox.escape_search();
-			wait_for(|| !mailbox.is_searching() && mailbox.store.n_items() == 4).await;
-			if mailbox.is_searching() || mailbox.shown().0 != "Inbox" || mailbox.store.n_items() != 4 {
+			wait_for(|| !mailbox.is_searching() && mailbox.store.n_items() == 7).await;
+			if mailbox.is_searching() || mailbox.shown().0 != "Inbox" || mailbox.store.n_items() != 7 {
 				return Err(format!("Escape left {:?}", mailbox.shown()));
 			}
 			// A conversation spanning Inbox and Sent opens whole; the shot shows it.
@@ -319,6 +322,95 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				n => Err(format!("the Lunch conversation opened with {n} mails")),
 			}
 		}
+		// Move to Spam: the line finds the sender's other mail, Select All picks it, and the line
+		// is kept as a rule. The moves hold after a sync, so the server has them too.
+		"spam" => {
+			rules::save(&[]);
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			mailbox.select_by_subject("coupon");
+			wait_for(|| mailbox.reader.thread().is_some()).await;
+			let picker = mailbox.spam_conversation().ok_or("Move to Spam did not open")?;
+			let ticked = |p: &spam::Picker| p.listed().iter().filter(|(_, t)| *t).count();
+			if picker.listed().len() != 3 || ticked(&picker) != 1 || picker.listed()[0].0 != "Your exclusive coupon inside" {
+				return Err(format!("the sender's mail listed as {:?}", picker.listed()));
+			}
+			picker.entry.set_text("(from:@deals.example");
+			wait_for(|| picker.listed().len() == 1).await;
+			if picker.listed().len() != 1 || picker.confirm.label().as_deref() != Some("Move to Spam") {
+				return Err(format!("a broken line listed {:?}", picker.listed()));
+			}
+			picker.entry.set_text("from:@deals.example");
+			wait_for(|| picker.listed().len() == 3).await;
+			picker.all.set_active(true);
+			picker.keep.set_active(true);
+			if ticked(&picker) != 3 || picker.confirm.label().as_deref() != Some("Move 3 to Spam") {
+				return Err(format!("Select All ticked {:?}", picker.listed()));
+			}
+			picker.confirm.emit_clicked();
+			let in_spam = || win.ctx.cache().and_then(|c| c.folders().ok()?.into_iter().find(|f| f.kind == FolderKind::Spam).and_then(|f| c.count(&f.id).ok()));
+			if in_spam() != Some(3) {
+				return Err(format!("{:?} in Spam after moving", in_spam()));
+			}
+			wait_for(|| win.ctx.activity.word().is_none()).await;
+			gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.refresh", None).map_err(|e| e.to_string())?;
+			sleep(300).await;
+			wait_for(|| win.ctx.activity.word().is_none()).await;
+			if in_spam() != Some(3) {
+				return Err(format!("{:?} in Spam after a sync", in_spam()));
+			}
+			let rule = Rule { when: "from:@deals.example".into(), action: Action::Spam };
+			if rules::load() != [rule] {
+				return Err(format!("the rules are {:?}", rules::load()));
+			}
+			Ok(())
+		}
+		// Rules in Preferences: one added, labelled, then changed to move to a folder and deleted.
+		"rules" => {
+			rules::save(&[]);
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
+			dialog.present(Some(&win.ctx.window));
+			let edit = section.edit(None);
+			edit.line.set_text("subject:invoice or from:@example.org");
+			edit.does.set_selected(2);
+			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 2)).await;
+			edit.label.set_selected(0);
+			if !edit.save.is_sensitive() {
+				return Err("a whole rule cannot be saved".into());
+			}
+			edit.save.emit_clicked();
+			let labelled = Rule { when: "subject:invoice or from:@example.org".into(), action: Action::Label("Receipts".into()) };
+			if rules::load() != [labelled.clone()] {
+				return Err(format!("saved {:?}", rules::load()));
+			}
+			let edit = section.edit(Some(0));
+			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 2)).await;
+			if edit.does.selected() != 2 || edit.label.selected() != 0 || edit.line.text() != labelled.when {
+				return Err("the rule did not open as saved".into());
+			}
+			edit.line.set_text("subject:(invoice");
+			if edit.save.is_sensitive() {
+				return Err("a broken line can be saved".into());
+			}
+			edit.line.set_text("subject:invoice");
+			edit.does.set_selected(1);
+			edit.folder.set_selected(1);
+			edit.save.emit_clicked();
+			let moved = Rule { when: "subject:invoice".into(), action: Action::Move("Archive".into()) };
+			if rules::load() != [moved.clone()] {
+				return Err(format!("changed to {:?}", rules::load()));
+			}
+			// A second rule, then the first deleted; the shot shows what is left.
+			let edit = section.edit(None);
+			edit.line.set_text("from:@deals.example");
+			edit.save.emit_clicked();
+			section.delete(0);
+			if rules::load() != [Rule { when: "from:@deals.example".into(), action: Action::Spam }] {
+				return Err(format!("after deleting, {:?}", rules::load()));
+			}
+			section.expander.set_expanded(true);
+			Ok(())
+		}
 		_ => Ok(()),
 	}
 }
@@ -328,7 +420,7 @@ pub fn drive(win: Rc<Window>) {
 	if scene == "sign-in" {
 		return sign_in(Rc::downgrade(&win), path);
 	}
-	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first") {
+	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first" | "spam" | "rules") {
 		glib::spawn_future_local(async move {
 			if let Err(e) = check(&win, &scene).await {
 				// No picture, so the check fails.
@@ -376,6 +468,23 @@ pub fn drive(win: Rc<Window>) {
 			mailbox.select_folder(tern_core::FolderKind::Sent);
 			wait_for(|| mailbox.select_by_subject("Route for Sunday")).await;
 			wait_for(|| mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.attachments.len() == 1)).await;
+			win.ctx.window.clone().upcast()
+		} else if scene == "spam-dialog" {
+			mailbox.select_by_subject("coupon");
+			wait_for(|| mailbox.reader.thread().is_some()).await;
+			if let Some(picker) = mailbox.spam_conversation() {
+				picker.entry.set_text("from:@deals.example");
+				wait_for(|| picker.listed().len() == 3).await;
+				picker.all.set_active(true);
+			}
+			win.ctx.window.clone().upcast()
+		} else if scene == "rule-edit" {
+			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
+			dialog.present(Some(&win.ctx.window));
+			let edit = section.edit(None);
+			edit.line.set_text("(from:@example.org or subject:invoice) and not lunch");
+			edit.does.set_selected(1);
+			edit.folder.set_selected(1);
 			win.ctx.window.clone().upcast()
 		} else if scene == "compose" {
 			let fields = Fields {
@@ -500,6 +609,15 @@ impl Backend for Staged {
 	}
 	async fn trash(&self, id: &tern_core::MailId) -> tern_core::Result<()> {
 		self.demo.trash(id).await
+	}
+	async fn move_mails(&self, ids: &[tern_core::MailId], folder: &tern_core::FolderId) -> tern_core::Result<()> {
+		self.demo.move_mails(ids, folder).await
+	}
+	async fn labels(&self) -> tern_core::Result<Vec<tern_core::Label>> {
+		self.demo.labels().await
+	}
+	async fn add_label(&self, ids: &[tern_core::MailId], label: &tern_core::FolderId) -> tern_core::Result<()> {
+		self.demo.add_label(ids, label).await
 	}
 	async fn sign_out(&self) -> tern_core::Result<()> {
 		self.demo.sign_out().await

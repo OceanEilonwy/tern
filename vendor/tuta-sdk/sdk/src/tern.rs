@@ -707,6 +707,16 @@ impl TernMail {
 		Ok(self.sdk.mail_facade().trash_mails(mails).await?)
 	}
 
+	/// Moves mails into a folder, by the folder's own id.
+	pub async fn move_mails(&self, mails: Vec<IdTupleGenerated>, folder: IdTupleGenerated) -> Result<(), TernError> {
+		Ok(self.sdk.mail_facade().move_mails(mails, folder).await?)
+	}
+
+	/// Adds a label to mails, by the label's own id.
+	pub async fn apply_label(&self, mails: Vec<IdTupleGenerated>, label: IdTupleGenerated) -> Result<(), TernError> {
+		Ok(self.sdk.mail_facade().apply_label(mails, label).await?)
+	}
+
 	pub async fn sign_out(&self) {
 		let parts = self.parts();
 		delete_session(parts.rest_client.as_ref(), &parts.base_url, &parts.access_token).await;

@@ -90,6 +90,7 @@ impl Reader {
 		menu.append(Some("_Open in Tuta"), Some("win.open-in-tuta"));
 		header.pack_end(&gtk::MenuButton::builder().icon_name("view-more-symbolic").menu_model(&menu).tooltip_text("More").build());
 		header.pack_end(&gtk::Button::builder().icon_name("user-trash-symbolic").action_name("win.trash").tooltip_text("Move Conversation to Trash (Delete)").build());
+		header.pack_end(&gtk::Button::builder().icon_name("mail-mark-junk-symbolic").action_name("win.spam").tooltip_text("Move to Spam (Ctrl+J)").build());
 
 		let banner = adw::Banner::builder().title("This message has formatting Tern can’t show").button_label("Open in Tuta").build();
 		banner.set_action_name(Some("win.open-in-tuta"));

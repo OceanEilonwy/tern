@@ -478,19 +478,28 @@ mod tests {
 		async fn trash(&self, id: &MailId) -> Result<()> {
 			self.demo.trash(id).await
 		}
+		async fn move_mails(&self, ids: &[MailId], folder: &FolderId) -> Result<()> {
+			self.demo.move_mails(ids, folder).await
+		}
+		async fn labels(&self) -> Result<Vec<tern_core::Label>> {
+			self.demo.labels().await
+		}
+		async fn add_label(&self, ids: &[MailId], label: &FolderId) -> Result<()> {
+			self.demo.add_label(ids, label).await
+		}
 		async fn sign_out(&self) -> Result<()> {
 			Ok(())
 		}
 	}
 
-	/// A cache with every demo folder's list synced, and the fetcher on it.
+	/// A cache with every demo folder's list synced, the fetcher on it, and the five newest mails.
 	async fn setup(backend: Scripted, tuning: Tuning) -> (Arc<Scripted>, Arc<Cache>, Fetcher, Vec<MailId>) {
 		let backend = Arc::new(backend);
 		let cache = Arc::new(Cache::in_memory());
 		for folder in sync::folders(backend.as_ref(), &cache).await.unwrap() {
 			sync::folder(backend.as_ref(), &cache, &folder.id, 100).await.unwrap();
 		}
-		let newest = cache.missing_bodies(100).unwrap();
+		let newest = cache.missing_bodies(5).unwrap();
 		let fetcher = Fetcher::new(backend.clone(), cache.clone(), Handle::current(), tuning);
 		(backend, cache, fetcher, newest)
 	}

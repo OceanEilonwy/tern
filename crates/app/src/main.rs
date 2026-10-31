@@ -14,11 +14,14 @@ mod login;
 mod mailbox;
 mod reader;
 mod render;
+mod rule_editor;
+mod rules;
 mod runtime;
 mod screenshot;
 mod search;
 mod semantic;
 mod settings;
+mod spam;
 mod suggest;
 mod window;
 
@@ -45,6 +48,7 @@ fn main() -> glib::ExitCode {
 		app.set_accels_for_action("win.reply-all", &["<Control><Shift>r"]);
 		app.set_accels_for_action("win.forward", &["<Control>l"]);
 		app.set_accels_for_action("win.trash", &["Delete"]);
+		app.set_accels_for_action("win.spam", &["<Control>j"]);
 		app.set_accels_for_action("win.refresh", &["F5"]);
 		app.set_accels_for_action("win.mark-unread", &["<Control>u"]);
 		app.set_accels_for_action("win.next", &["<Alt>Down"]);

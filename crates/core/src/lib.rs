@@ -4,6 +4,7 @@
 //! [`demo::DemoBackend`] implements it in memory, so the UI runs and is tested without an account.
 
 pub mod demo;
+pub mod rules;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,13 @@ pub struct Folder {
 	pub name: String,
 	pub kind: FolderKind,
 	pub unread: u32,
+}
+
+/// A label (Tuta's tags): unlike a folder, a mail can carry several.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Label {
+	pub id: FolderId,
+	pub name: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +201,11 @@ pub trait Backend: Send + Sync {
 	async fn contacts(&self) -> Result<Vec<Address>>;
 	async fn set_unread(&self, id: &MailId, unread: bool) -> Result<()>;
 	async fn trash(&self, id: &MailId) -> Result<()>;
+	/// Moves mails into `folder`.
+	async fn move_mails(&self, ids: &[MailId], folder: &FolderId) -> Result<()>;
+	async fn labels(&self) -> Result<Vec<Label>>;
+	/// Adds `label` to mails.
+	async fn add_label(&self, ids: &[MailId], label: &FolderId) -> Result<()>;
 	/// Forget the session on the server too.
 	async fn sign_out(&self) -> Result<()>;
 }
@@ -220,6 +233,12 @@ pub fn text_to_html(text: &str) -> String {
 /// The key mails of one conversation share: the subject without "Re:", "Fwd:" and the like, in
 /// lower case with spaces collapsed. Mails without a subject have none and stand alone.
 pub fn thread_key(subject: &str) -> Option<String> {
+	let key = bare_subject(subject).split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+	(!key.is_empty()).then_some(key)
+}
+
+/// The subject without "Re:", "Fwd:" and the like before it.
+pub fn bare_subject(subject: &str) -> &str {
 	const PREFIXES: [&str; 10] = ["re", "fwd", "fw", "aw", "wg", "sv", "vs", "antw", "tr", "rv"];
 	let mut rest = subject.trim();
 	loop {
@@ -239,8 +258,7 @@ pub fn thread_key(subject: &str) -> Option<String> {
 			None => break,
 		}
 	}
-	let key = rest.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
-	(!key.is_empty()).then_some(key)
+	rest
 }
 
 /// Splits `"Ann <ann@x.org>, bob@y.org"` into addresses. Returns the parts that are not addresses as the error.
@@ -316,6 +334,12 @@ mod tests {
 		let parsed = parse_addresses("\"Ann Lee\" <Ann@X.org>; bob@y.org,").unwrap();
 		assert_eq!(parsed, vec![Address::new("Ann Lee", "ann@x.org"), Address::new("", "bob@y.org")]);
 		assert_eq!(parse_addresses("bob@y.org, nope, a@b").unwrap_err(), vec!["nope".to_string(), "a@b".to_string()]);
+	}
+
+	#[test]
+	fn bare_subjects_keep_their_case() {
+		assert_eq!(bare_subject("Re: FWD: RE[2]: 50% Off"), "50% Off");
+		assert_eq!(bare_subject("Rear window"), "Rear window");
 	}
 
 	#[test]

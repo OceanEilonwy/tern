@@ -15,13 +15,14 @@ pub enum Word {
 	Fetching,
 	Opening,
 	Downloading,
+	Moving,
 	Deleting,
 	Attaching,
 	Drafting,
 	Sending,
 }
 
-const WORDS: usize = 7;
+const WORDS: usize = 8;
 
 impl Word {
 	pub fn label(self) -> &'static str {
@@ -29,6 +30,7 @@ impl Word {
 			Word::Fetching => "Fetching…",
 			Word::Opening => "Opening…",
 			Word::Downloading => "Downloading…",
+			Word::Moving => "Moving…",
 			Word::Deleting => "Deleting…",
 			Word::Attaching => "Attaching…",
 			Word::Drafting => "Drafting…",
@@ -46,7 +48,7 @@ struct State {
 impl State {
 	fn word(&self) -> Option<Word> {
 		use Word::*;
-		[Sending, Drafting, Attaching, Deleting, Downloading, Opening, Fetching].into_iter().find(|w| self.running[*w as usize] > 0)
+		[Sending, Drafting, Attaching, Deleting, Moving, Downloading, Opening, Fetching].into_iter().find(|w| self.running[*w as usize] > 0)
 	}
 
 	fn update(&mut self) {

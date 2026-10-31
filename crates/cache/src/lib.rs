@@ -14,6 +14,7 @@ use std::sync::Mutex;
 
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use tern_core::rules::Expr;
 use tern_core::{thread_key, Address, Folder, FolderId, FolderKind, Mail, MailId, MailSummary};
 
 use search::{Found, Query};
@@ -213,6 +214,9 @@ impl Cache {
 			conn.execute_batch(SCHEMA)?;
 			conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
 		}
+		// Named points in time, such as how far new mail has been through the rules. Kept apart from
+		// the schema's version: adding it does not start the cache afresh.
+		conn.execute_batch("CREATE TABLE IF NOT EXISTS marks (name TEXT PRIMARY KEY, value INTEGER NOT NULL);")?;
 		// Every word in the search index with how many mails hold it, for finding what a typo meant.
 		// A view of the index, on this connection only: nothing more is stored.
 		conn.execute_batch("CREATE VIRTUAL TABLE temp.vocab USING fts5vocab(main, words, row);")?;
@@ -441,6 +445,46 @@ impl Cache {
 	/// Moves a mail to another folder, as trashing does.
 	pub fn move_to(&self, id: &MailId, folder: &FolderId) -> Result<()> {
 		self.conn().execute("UPDATE mails SET folder = ?3 WHERE list = ?1 AND element = ?2", params![id.list, id.element, folder.0])?;
+		Ok(())
+	}
+
+	/// The mails `rule` catches, newest first, leaving out folders of the kinds in `skip`, each with
+	/// its folder: at most `limit` of them, and how many there are in all.
+	pub fn matching(&self, rule: &Expr, skip: &[FolderKind], limit: usize) -> Result<(Vec<(MailSummary, FolderId)>, usize)> {
+		let conn = self.conn();
+		let mut stmt = conn.prepare("SELECT m.summary, m.folder, f.kind FROM mails m JOIN folders f ON f.id = m.folder ORDER BY m.received DESC")?;
+		let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+		let (mut found, mut total) = (Vec::new(), 0);
+		for row in rows {
+			let (json, folder, kind) = row?;
+			if skip.contains(&kind_from(&kind)) {
+				continue;
+			}
+			let summary: MailSummary = serde_json::from_str(&json)?;
+			if rule.matches(&summary) {
+				total += 1;
+				if found.len() < limit {
+					found.push((summary, FolderId(folder)));
+				}
+			}
+		}
+		Ok((found, total))
+	}
+
+	/// The mails of `folder` received after `after_ms`, oldest first.
+	pub fn received_after(&self, folder: &FolderId, after_ms: i64) -> Result<Vec<MailSummary>> {
+		let conn = self.conn();
+		let mut stmt = conn.prepare("SELECT summary FROM mails WHERE folder = ?1 AND received > ?2 ORDER BY received")?;
+		let rows = stmt.query_map(params![folder.0, after_ms], |r| r.get::<_, String>(0))?;
+		rows.map(|json| Ok(serde_json::from_str(&json?)?)).collect()
+	}
+
+	pub fn mark(&self, name: &str) -> Result<Option<i64>> {
+		Ok(self.conn().query_row("SELECT value FROM marks WHERE name = ?1", params![name], |r| r.get(0)).optional()?)
+	}
+
+	pub fn set_mark(&self, name: &str, value: i64) -> Result<()> {
+		self.conn().execute("INSERT INTO marks (name, value) VALUES (?1, ?2) ON CONFLICT (name) DO UPDATE SET value = ?2", params![name, value])?;
 		Ok(())
 	}
 
@@ -743,6 +787,31 @@ mod tests {
 		let cache = Cache::in_memory();
 		cache.set_folders(&[folder("in", FolderKind::Inbox), folder("sent", FolderKind::Sent), folder("trash", FolderKind::Trash)]).unwrap();
 		(cache, FolderId("in".into()), FolderId("sent".into()))
+	}
+
+	#[test]
+	fn rules_find_their_mail_outside_skipped_folders() {
+		let (cache, inbox, sent) = setup();
+		cache.merge_page(&inbox, &[summary(3, "50% off", 300), summary(2, "Lunch", 200), summary(1, "Last chance: 50% off", 100)], true, true).unwrap();
+		cache.merge_page(&sent, &[summary(4, "Re: 50% off", 400)], true, true).unwrap();
+		let rule = tern_core::rules::parse("subject:\"50% off\"").unwrap();
+		let (found, total) = cache.matching(&rule, &[FolderKind::Sent], 1).unwrap();
+		assert_eq!(total, 2, "the sent one is skipped");
+		assert_eq!(found.iter().map(|(m, f)| (m.id.element.as_str(), f)).collect::<Vec<_>>(), [("e3", &inbox)], "newest first, up to the limit");
+		let (_, total) = cache.matching(&rule, &[], 10).unwrap();
+		assert_eq!(total, 3);
+	}
+
+	#[test]
+	fn new_mail_is_what_came_after_the_mark() {
+		let (cache, inbox, _) = setup();
+		cache.merge_page(&inbox, &[summary(3, "c", 300), summary(2, "b", 200), summary(1, "a", 100)], true, true).unwrap();
+		assert_eq!(cache.mark("rules").unwrap(), None);
+		cache.set_mark("rules", 100).unwrap();
+		cache.set_mark("rules", 150).unwrap();
+		let after = cache.mark("rules").unwrap().unwrap();
+		let ids: Vec<String> = cache.received_after(&inbox, after).unwrap().into_iter().map(|m| m.id.element).collect();
+		assert_eq!(ids, ["e2", "e3"], "oldest first");
 	}
 
 	#[test]

@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::{Account, Address, Attachment, Backend, Draft, Error, Folder, FolderId, FolderKind, Mail, MailId, MailPage, MailSummary, Result};
+use crate::{Account, Address, Attachment, Backend, Draft, Error, Folder, FolderId, FolderKind, Label, Mail, MailId, MailPage, MailSummary, Result};
 
 const ME: (&str, &str) = ("You", "you@tuta.com");
 
@@ -14,6 +14,7 @@ struct Stored {
 	folder: FolderKind,
 	mail: Mail,
 	files: Vec<Vec<u8>>,
+	labels: Vec<FolderId>,
 }
 
 pub struct DemoBackend {
@@ -31,6 +32,12 @@ const FOLDERS: [(FolderKind, &str); 6] = [
 
 fn folder_id(kind: FolderKind) -> FolderId {
 	FolderId(format!("{kind:?}").to_lowercase())
+}
+
+const LABELS: [&str; 2] = ["Receipts", "Travel"];
+
+fn label_id(name: &str) -> FolderId {
+	FolderId(format!("label-{}", name.to_lowercase()))
 }
 
 /// A small sunset, so the demo's photos look like photos.
@@ -82,6 +89,7 @@ impl DemoBackend {
 					web_url: format!("https://app.tuta.com/mail/demo/{}", id.element),
 				},
 				files: data,
+				labels: Vec::new(),
 			});
 		};
 		let att = |n: &str, name: &str, mime: &str, data: &[u8], cid: Option<&str>| {
@@ -134,6 +142,11 @@ impl DemoBackend {
 			 <ol><li>One</li><li>Two</li></ol><p><a href=\"https://example.com/unsubscribe\">Unsubscribe</a></p>",
 			vec![],
 		);
+		// One sender's offers, for marking as spam together.
+		let deals = Address::new("Mega Deals", "offers@deals.example");
+		add(6, FolderKind::Inbox, deals.clone(), "50% off everything this weekend", 70, false, "<p>Everything must go.</p>", vec![]);
+		add(7, FolderKind::Inbox, deals.clone(), "Last chance: 50% off ends tonight", 90, false, "<p>Hurry.</p>", vec![]);
+		add(8, FolderKind::Inbox, deals, "Your exclusive coupon inside", 120, false, "<p>Just for you.</p>", vec![]);
 		add(5, FolderKind::Sent, Address::new("You", "you@tuta.com"), "Lunch on Friday?", 30, false, "<div>Are you free for lunch on Friday?</div>", vec![]);
 		// The one sent mail went to Sam.
 		let sam = Address::new("Sam Okafor", "sam@example.net");
@@ -142,6 +155,11 @@ impl DemoBackend {
 			stored.mail.summary.to = Some(sam.clone());
 		}
 		Self { mails: Mutex::new(mails) }
+	}
+
+	/// Where a mail is and the labels it carries, for tests.
+	pub fn place_of(&self, id: &MailId) -> Option<(FolderKind, Vec<FolderId>)> {
+		self.find(id, |m| (m.folder, m.labels.clone())).ok()
 	}
 
 	/// Files `draft` in `folder` as a new mail, replacing the draft it was saved over.
@@ -188,6 +206,7 @@ impl DemoBackend {
 				web_url: format!("https://app.tuta.com/mail/demo/{}", id.element),
 			},
 			files: data,
+			labels: Vec::new(),
 		});
 		id
 	}
@@ -271,6 +290,32 @@ impl Backend for DemoBackend {
 		self.find(id, |m| m.folder = FolderKind::Trash)
 	}
 
+	async fn move_mails(&self, ids: &[MailId], folder: &FolderId) -> Result<()> {
+		let kind = FOLDERS.iter().map(|&(k, _)| k).find(|&k| &folder_id(k) == folder).ok_or_else(|| Error::Other("Folder not found".into()))?;
+		for id in ids {
+			self.find(id, |m| m.folder = kind)?;
+		}
+		Ok(())
+	}
+
+	async fn labels(&self) -> Result<Vec<Label>> {
+		Ok(LABELS.iter().map(|&name| Label { id: label_id(name), name: name.into() }).collect())
+	}
+
+	async fn add_label(&self, ids: &[MailId], label: &FolderId) -> Result<()> {
+		if !LABELS.iter().any(|&name| &label_id(name) == label) {
+			return Err(Error::Other("Label not found".into()));
+		}
+		for id in ids {
+			self.find(id, |m| {
+				if !m.labels.contains(label) {
+					m.labels.push(label.clone());
+				}
+			})?;
+		}
+		Ok(())
+	}
+
 	async fn sign_out(&self) -> Result<()> {
 		Ok(())
 	}
@@ -307,8 +352,10 @@ mod tests {
 		let first = demo.list(&inbox, None, 3).await.unwrap();
 		assert_eq!(first.mails.len(), 3);
 		let second = demo.list(&inbox, first.next, 3).await.unwrap();
-		assert_eq!(second.mails.len(), 1);
-		assert!(second.next.is_none());
+		assert_eq!(second.mails.len(), 3);
+		let third = demo.list(&inbox, second.next, 3).await.unwrap();
+		assert_eq!(third.mails.len(), 1);
+		assert!(third.next.is_none());
 	}
 
 	#[tokio::test]

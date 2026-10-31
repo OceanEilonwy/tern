@@ -1,7 +1,7 @@
-//! Keeps the cache up to date while signed in: the folder list, each folder's newest mail, contacts,
-//! then the newest mails opened ahead by the fetcher, and their meaning for search when that is
-//! turned on. A round runs at sign-in, every few minutes after, and at once when something asks for
-//! it (F5, a changed setting).
+//! Keeps the cache up to date while signed in: the folder list, each folder's newest mail, the
+//! rules on new mail in the Inbox, contacts, then the newest mails opened ahead by the fetcher, and
+//! their meaning for search when that is turned on. A round runs at sign-in, every few minutes
+//! after, and at once when something asks for it (F5, a changed setting).
 
 use std::rc::Weak;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use tern_core::{Error, FolderKind};
 
 use crate::activity::Word;
 use crate::mailbox::Mailbox;
-use crate::{runtime, semantic, window::Ctx};
+use crate::{rules, runtime, semantic, window::Ctx};
 
 const INTERVAL: Duration = Duration::from_secs(5 * 60);
 
@@ -60,6 +60,17 @@ pub fn start(ctx: &Ctx, mailbox: Weak<Mailbox>) {
 							},
 							Err(e) => eprintln!("tern: could not sync {}: {e}", folder.name),
 						}
+					}
+					// New mail in the Inbox through the rules, before it is opened ahead.
+					let (b, c, rules) = (backend.clone(), cache.clone(), rules::load());
+					match runtime::run(async move { rules::run_on_new(b.as_ref(), &c, &rules).await }).await {
+						Ok(0) => {},
+						Ok(_) => {
+							if let Some(mb) = mailbox.upgrade() {
+								mb.cache_changed(None);
+							}
+						},
+						Err(e) => eprintln!("tern: could not run the rules: {e}"),
 					}
 					if !contacts_done {
 						let (b, c) = (backend.clone(), cache.clone());

@@ -18,7 +18,7 @@ use crate::reader::Reader;
 use crate::activity::Word;
 use crate::search::{self, Searching};
 use crate::settings::Settings;
-use crate::{composer, format, grip, runtime, window::Ctx};
+use crate::{composer, format, grip, runtime, spam, window::Ctx};
 
 /// Conversations taken from the cache at a time.
 const ROWS: usize = 100;
@@ -595,7 +595,7 @@ impl Mailbox {
 	}
 
 	fn add_actions(self: &Rc<Self>) {
-		let entries: [(&str, MailAction); 13] = [
+		let entries: [(&str, MailAction); 14] = [
 			("compose", |m| {
 				composer::Composer::open(&m.ctx, Fields::default(), None);
 			}),
@@ -609,6 +609,9 @@ impl Mailbox {
 				m.reader.answer(Answer::Forward);
 			}),
 			("trash", |m| m.trash_conversation()),
+			("spam", |m| {
+				m.spam_conversation();
+			}),
 			("refresh", |m| m.refresh()),
 			("mark-unread", |m| m.mark_unread()),
 			("open-in-tuta", |m| {
@@ -664,7 +667,7 @@ impl Mailbox {
 		for name in ["reply", "reply-all", "forward"] {
 			self.action(name).set_enabled(answerable);
 		}
-		for name in ["trash", "mark-unread", "open-in-tuta"] {
+		for name in ["trash", "spam", "mark-unread", "open-in-tuta"] {
 			self.action(name).set_enabled(open || self.reader.thread().is_some());
 		}
 	}
@@ -1123,6 +1126,29 @@ impl Mailbox {
 		let ids: Vec<MailId> = cache.thread(&key, &folder).unwrap_or_default().into_iter().filter(|m| m.folder_id == folder).map(|m| m.summary.id).collect();
 		let message = if ids.len() > 1 { "Conversation moved to Trash" } else { "Moved to Trash" };
 		self.trash(ids, message);
+	}
+
+	/// Opens Move to Spam for the conversation's mails in this folder that came from others.
+	pub fn spam_conversation(self: &Rc<Self>) -> Option<Rc<spam::Picker>> {
+		let (cache, (key, folder)) = (self.ctx.cache()?, self.reader.thread()?);
+		let spam = self.folders.borrow().iter().find(|r| r.folder.kind == FolderKind::Spam).map(|r| r.folder.id.clone());
+		let Some(spam) = spam else {
+			self.ctx.toast("This account has no Spam folder");
+			return None;
+		};
+		let own: Vec<MailSummary> =
+			cache.thread(&key, &folder).unwrap_or_default().into_iter().filter(|m| m.folder_id == folder && !m.summary.outgoing).map(|m| m.summary).rev().collect();
+		if own.is_empty() {
+			self.ctx.toast("Only mail from others can go to Spam");
+			return None;
+		}
+		let weak = Rc::downgrade(self);
+		spam::open(&self.ctx, own, spam, move || {
+			if let Some(this) = weak.upgrade() {
+				this.cache_changed(None);
+				this.focus_list();
+			}
+		})
 	}
 
 	fn trash(self: &Rc<Self>, ids: Vec<MailId>, message: &'static str) {

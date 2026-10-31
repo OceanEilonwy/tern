@@ -17,6 +17,7 @@ pub enum MailSetKind {
 	Spam = 5,
 	Draft = 6,
 	All = 7,
+	Label = 8,
 	Unknown = 9999,
 }
 

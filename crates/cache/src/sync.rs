@@ -157,7 +157,7 @@ mod tests {
 		for f in &all {
 			folder(&demo, &cache, &f.id, Level::Low.headers()).await.unwrap();
 		}
-		assert_eq!(cache.count(&inbox).unwrap(), 4);
+		assert_eq!(cache.count(&inbox).unwrap(), 7);
 		assert!(cache.folder_state(&inbox).unwrap().complete);
 		assert_eq!(cache.folders().unwrap().iter().find(|f| f.id == inbox).unwrap().unread, 2);
 
@@ -180,9 +180,9 @@ mod tests {
 		let cache = Cache::in_memory();
 		let all = folders(&demo, &cache).await.unwrap();
 		let inbox = all.iter().find(|f| f.kind == FolderKind::Inbox).unwrap().id.clone();
-		// Keep only one page worth (the demo inbox has 4; pages are 50, so fake a small keep).
+		// Keep only one page worth (the demo inbox has 7; pages are 50, so fake a small keep).
 		folder(&demo, &cache, &inbox, 1).await.unwrap();
-		assert_eq!(cache.count(&inbox).unwrap(), 4, "a page is the smallest step");
+		assert_eq!(cache.count(&inbox).unwrap(), 7, "a page is the smallest step");
 		assert!(!older(&demo, &cache, &inbox).await.unwrap(), "that page was the whole folder");
 	}
 

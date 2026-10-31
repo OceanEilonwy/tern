@@ -1,14 +1,14 @@
 //! Tern's [`Backend`] for a Tuta account, on the vendored Tuta SDK.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tern_core::{
-	Account, Address, Attachment, Backend, Draft, Error, Folder, FolderId, FolderKind, Mail, MailId, MailPage, MailSummary, ReplyKind, Result,
+	Account, Address, Attachment, Backend, Draft, Error, Folder, FolderId, FolderKind, Label, Mail, MailId, MailPage, MailSummary, ReplyKind, Result,
 };
 use tutasdk::bindings::file_client::{FileClient, FileClientError};
 use tutasdk::bindings::rest_client::{HttpMethod, RestClient, RestClientError, RestClientOptions, RestResponse};
@@ -229,13 +229,33 @@ fn to_error(error: TernError) -> Error {
 struct TutaBackend {
 	mail: Arc<TernMail>,
 	account: Arc<TernAccount>,
+	/// The folders and labels as last fetched: moving or labelling names them by their own id.
+	sets: Mutex<Vec<MailSet>>,
 }
 
 impl TutaBackend {
 	async fn new(mail: TernMail, login: &str) -> Result<Self> {
 		let account = mail.account(login).await.map_err(to_error)?;
 		trace("account loaded");
-		Ok(Self { mail: Arc::new(mail), account: Arc::new(account) })
+		Ok(Self { mail: Arc::new(mail), account: Arc::new(account), sets: Mutex::default() })
+	}
+
+	async fn mail_sets(&self) -> Result<Vec<MailSet>> {
+		let mail = self.mail.clone();
+		let sets = guarded(async move { mail.folders().await.map_err(to_error) }).await?;
+		*self.sets.lock().unwrap() = sets.clone();
+		Ok(sets)
+	}
+
+	/// The own id of the folder or label Tern knows as `id`, fetching the folders again if it is new.
+	async fn set_id(&self, id: &FolderId) -> Result<IdTupleGenerated> {
+		let element = id.0.rsplit('/').next().unwrap_or_default().to_string();
+		let find = |sets: &[MailSet]| sets.iter().filter_map(|s| s._id.clone()).find(|i| i.element_id.as_str() == element);
+		let known = find(&self.sets.lock().unwrap());
+		match known {
+			Some(found) => Ok(found),
+			None => find(&self.mail_sets().await?).ok_or_else(|| Error::Other("That folder or label no longer exists".into())),
+		}
 	}
 
 	/// An opened mail as Tern shows it.
@@ -290,7 +310,7 @@ fn folder_kind(set: &MailSet) -> Option<FolderKind> {
 		MailSetKind::Trash => Some(FolderKind::Trash),
 		MailSetKind::Custom => Some(FolderKind::Custom),
 		// "All" and labels are views across folders; Tern shows folders only.
-		MailSetKind::All | MailSetKind::Unknown => None,
+		MailSetKind::All | MailSetKind::Label | MailSetKind::Unknown => None,
 	}
 }
 
@@ -311,6 +331,11 @@ fn folder(set: &MailSet) -> Option<Folder> {
 	// The folder id carries the entry list (to page through) and the folder's own id (for links).
 	let element = set._id.as_ref().map(|id| id.element_id.to_string()).unwrap_or_default();
 	Some(Folder { id: FolderId(format!("{}/{}", set.entries, element)), name, kind, unread: 0 })
+}
+
+fn label(set: &MailSet) -> Option<Label> {
+	let element = set._id.as_ref()?.element_id.to_string();
+	(set.folderType == MailSetKind::Label as i64).then(|| Label { id: FolderId(format!("{}/{element}", set.entries)), name: set.name.clone() })
 }
 
 fn summary(mail: &TutaMail, me: &str) -> Option<MailSummary> {
@@ -375,8 +400,7 @@ impl Backend for TutaBackend {
 	}
 
 	async fn folders(&self) -> Result<Vec<Folder>> {
-		let mail = self.mail.clone();
-		let sets = guarded(async move { mail.folders().await.map_err(to_error) }).await?;
+		let sets = self.mail_sets().await?;
 		let order = |k: FolderKind| FOLDER_ORDER.iter().position(|&o| o == k);
 		let mut folders: Vec<Folder> = sets.iter().filter_map(folder).collect();
 		folders.sort_by(|a, b| order(a.kind).cmp(&order(b.kind)).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
@@ -456,6 +480,22 @@ impl Backend for TutaBackend {
 	async fn trash(&self, id: &MailId) -> Result<()> {
 		let (mail, id) = (self.mail.clone(), id_tuple(id));
 		guarded(async move { mail.trash(vec![id]).await.map_err(to_error) }).await
+	}
+
+	async fn move_mails(&self, ids: &[MailId], folder: &FolderId) -> Result<()> {
+		let (mail, ids, folder) = (self.mail.clone(), ids.iter().map(id_tuple).collect(), self.set_id(folder).await?);
+		guarded(async move { mail.move_mails(ids, folder).await.map_err(to_error) }).await
+	}
+
+	async fn labels(&self) -> Result<Vec<Label>> {
+		let mut labels: Vec<Label> = self.mail_sets().await?.iter().filter_map(label).collect();
+		labels.sort_by_key(|l| l.name.to_lowercase());
+		Ok(labels)
+	}
+
+	async fn add_label(&self, ids: &[MailId], label: &FolderId) -> Result<()> {
+		let (mail, ids, label) = (self.mail.clone(), ids.iter().map(id_tuple).collect(), self.set_id(label).await?);
+		guarded(async move { mail.apply_label(ids, label).await.map_err(to_error) }).await
 	}
 
 	async fn sign_out(&self) -> Result<()> {
@@ -598,6 +638,33 @@ mod tests {
 				(Err(b), Err(s)) => eprintln!("{id:?} does not open either way: {b} / {s}"),
 				(b, s) => panic!("{id:?} batched {:?}, single {:?}", b.map(|m| m.summary.subject), s.map(|m| m.summary.subject)),
 			}
+		}
+		backend.sign_out().await.unwrap();
+	}
+
+	#[tokio::test]
+	#[ignore = "talks to app.tuta.com; set TERN_TEST_EMAIL and TERN_TEST_PASSWORD"]
+	async fn live_move_and_label_round_trip_over_http() {
+		let email = std::env::var("TERN_TEST_EMAIL").unwrap();
+		let password = std::env::var("TERN_TEST_PASSWORD").unwrap();
+		let (backend, _) = login(&email, &password).await.unwrap();
+		let folders = backend.folders().await.unwrap();
+		let folder = |kind| folders.iter().find(|f| f.kind == kind).unwrap().id.clone();
+		let (inbox, archive) = (folder(FolderKind::Inbox), folder(FolderKind::Archive));
+		// The newest mail in the Inbox goes to Archive and back.
+		let mail = backend.list(&inbox, None, 1).await.unwrap().mails.remove(0);
+		backend.move_mails(&[mail.id.clone()], &archive).await.unwrap();
+		let in_archive = backend.list(&archive, None, 50).await.unwrap().mails;
+		let moved = in_archive.iter().find(|m| m.subject == mail.subject && m.received_ms == mail.received_ms);
+		let moved = moved.expect("the mail is in Archive").id.clone();
+		backend.move_mails(&[moved], &inbox).await.unwrap();
+		assert!(backend.list(&inbox, None, 50).await.unwrap().mails.iter().any(|m| m.subject == mail.subject && m.received_ms == mail.received_ms));
+		// Labelling it works when the account has a label; it is left on.
+		let labels = backend.labels().await.unwrap();
+		eprintln!("labels: {:?}", labels.iter().map(|l| &l.name).collect::<Vec<_>>());
+		if let Some(label) = labels.first() {
+			let mail = backend.list(&inbox, None, 1).await.unwrap().mails.remove(0);
+			backend.add_label(&[mail.id], &label.id).await.unwrap();
 		}
 		backend.sign_out().await.unwrap();
 	}
