@@ -8,6 +8,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use tern_core::{Attachment, Error, MailId};
 
+use crate::activity::Word;
 use crate::compose_model::safe_file_name;
 use crate::{format, runtime, window::Ctx};
 
@@ -44,6 +45,7 @@ pub fn chip(ctx: &Ctx, mail: &MailId, att: &Attachment) -> gtk::Widget {
 async fn download(ctx: &Ctx, mail: &MailId, att: &Attachment) -> Result<Vec<u8>, Error> {
 	let backend = ctx.backend().ok_or(Error::SessionExpired)?;
 	let (mail, att) = (mail.clone(), att.clone());
+	let _busy = ctx.activity.start(Word::Downloading);
 	runtime::run(async move { backend.attachment(&mail, &att).await }).await
 }
 

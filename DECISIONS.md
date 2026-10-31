@@ -128,8 +128,14 @@ attachments must work, KISS, fast, Rust. These are the calls I made, in the orde
   icons with the unread count under each (names in tooltips). F9 on a narrow window shows or hides the
   folders instead. The rail keeps the last width for when it opens again. A double click on the list's
   edge puts it back to its default width.
-- **One word for waiting**: "Opening…" in a mail's card when it takes more than 150 ms (cached mail
-  opens at once, so the word would only flicker), "Sending…" on the Send button. Saving a draft on close
-  already ends with a toast, so it gets no word.
+- **One word for what Tern is doing**, beside a spinner in the list header and in each composer's
+  header: Fetching…, Opening…, Downloading…, Deleting…, Attaching…, Drafting…, Sending…. Each piece of
+  work holds the word while it runs; when several run, the one the person is waiting on wins
+  (Sending over Drafting over Attaching over Deleting over Downloading over Opening over Fetching).
+  Opening counts only after 150 ms, so mail from the cache does not flicker it. The background sync
+  says Fetching for its whole round, opening mail ahead included.
+- **Settings are TOML** (`~/.config/tern/settings.toml`), written by hand as four plain lines and read
+  with `toml` 1.1.8, which the build already used. Each value falls back to its default on its own. An
+  old `settings.json` is moved over once and removed.
 - **Sent toast** names the mail: `Sent “Lunch on Friday?”`, cut at 40 characters.
 - Window checks now run with their own `XDG_CONFIG_HOME`, so they never read or write your settings.

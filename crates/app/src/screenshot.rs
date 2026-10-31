@@ -14,6 +14,7 @@ use gtk::{glib, graphene};
 use tern_core::demo::DemoBackend;
 use tern_core::{Backend, NewAttachment};
 
+use crate::activity::Word;
 use crate::compose_model::Fields;
 use crate::composer::Composer;
 use crate::mailbox::RAIL_SNAP;
@@ -208,21 +209,23 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			Ok(())
 		}
-		// A mail that takes a while to open or send says so in a word.
+		// One word says what Tern is doing: fetching (the sync opens mail ahead, slowly here), then
+		// opening a slow mail over that, then sending over both.
 		"busy" => {
+			wait_for(|| win.ctx.activity.word() == Some(Word::Fetching)).await;
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			mailbox.select_by_subject("Photos from Saturday");
 			sleep(800).await;
-			if mailbox.reader.busy_word().as_deref() != Some("Opening…") {
-				return Err(format!("while opening, the reader says {:?}", mailbox.reader.busy_word()));
+			if win.ctx.activity.word() != Some(Word::Opening) {
+				return Err(format!("while opening, the word is {:?}", win.ctx.activity.word()));
 			}
 			let fields = Fields { to: "mia@tuta.com".into(), subject: "Route".into(), body: "Here.".into(), ..Default::default() };
 			let composer = Composer::open(&win.ctx, fields, None);
 			composer.send();
 			sleep(300).await;
-			match composer.busy_word() {
-				Some(w) if w == "Sending…" => Ok(()),
-				other => Err(format!("while sending, the composer says {other:?}")),
+			match win.ctx.activity.word() {
+				Some(Word::Sending) => Ok(()),
+				other => Err(format!("while sending and opening, the word is {other:?}")),
 			}
 		}
 		// Arrowing onto an unread conversation marks it read without moving the focus off it.

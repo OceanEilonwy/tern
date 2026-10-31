@@ -9,6 +9,7 @@ use std::time::Duration;
 use tern_cache::sync;
 use tern_core::{Error, FolderKind};
 
+use crate::activity::Word;
 use crate::mailbox::Mailbox;
 use crate::{runtime, window::Ctx};
 
@@ -26,6 +27,7 @@ pub fn start(ctx: &Ctx, mailbox: Weak<Mailbox>) {
 				return;
 			}
 			let level = ctx.settings().offline;
+			let busy = ctx.activity.start(Word::Fetching);
 			let (b, c) = (backend.clone(), cache.clone());
 			let folders = runtime::run(async move { sync::folders(b.as_ref(), &c).await }).await;
 			let Some(mb) = mailbox.upgrade() else { return };
@@ -69,6 +71,7 @@ pub fn start(ctx: &Ctx, mailbox: Weak<Mailbox>) {
 				},
 				Err(e) => mb.sync_failed(&e),
 			}
+			drop(busy);
 			let wake = ctx.wake();
 			runtime::run(async move {
 				tokio::select! {

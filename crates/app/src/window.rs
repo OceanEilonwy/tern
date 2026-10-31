@@ -10,6 +10,7 @@ use gtk::gio;
 use tern_cache::{sync::Level, Cache};
 use tern_core::{demo::DemoBackend, Backend, Error, FolderKind};
 
+use crate::activity::Activity;
 use crate::settings::Settings;
 use crate::{background, format, keyring, login::Login, mailbox::Mailbox, runtime, screenshot};
 
@@ -26,6 +27,8 @@ pub struct Ctx {
 	/// Wakes the background sync.
 	wake: Arc<tokio::sync::Notify>,
 	changed: Rc<RefCell<Option<ChangedHook>>>,
+	/// What Tern is doing now, in a word.
+	pub activity: Activity,
 }
 
 impl Ctx {
@@ -122,6 +125,7 @@ impl Window {
 			settings: Rc::new(Cell::new(Settings::load())),
 			wake: Arc::default(),
 			changed: Rc::default(),
+			activity: Activity::default(),
 		};
 
 		let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build();

@@ -10,6 +10,7 @@ use gtk::glib;
 use tern_cache::ThreadMail;
 use tern_core::{Address, FolderId, FolderKind, Mail, MailId, MailSummary};
 
+use crate::activity::{Busy, Word};
 use crate::compose_model::{self, Answer};
 use crate::html_doc::{Doc, ImageSrc};
 use crate::{attachments, composer, format, render, runtime, window::Ctx};
@@ -35,7 +36,7 @@ struct Card {
 	recipients: gtk::Label,
 	attachments: gtk::FlowBox,
 	body: gtk::TextView,
-	loading: gtk::Box,
+	loading: adw::Spinner,
 	opened: RefCell<Option<Rc<Opened>>>,
 	links: RefCell<Vec<(gtk::TextTag, String)>>,
 	/// Inline images with their natural size, refitted when the pane changes width.
@@ -44,6 +45,8 @@ struct Card {
 	generation: Cell<u64>,
 	/// Waiting for the mail, from the cache or the server.
 	opening: Cell<bool>,
+	/// Says "Opening…" while the wait is long enough to notice.
+	busy: RefCell<Option<Busy>>,
 }
 
 pub struct Reader {
@@ -278,8 +281,7 @@ impl Reader {
 			gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).column_spacing(8).row_spacing(8).max_children_per_line(4).homogeneous(false).visible(false).build();
 		let body = gtk::TextView::builder().editable(false).cursor_visible(false).wrap_mode(gtk::WrapMode::WordChar).pixels_below_lines(2).css_classes(["reader-body"]).build();
 		body.set_accessible_role(gtk::AccessibleRole::Document);
-		let loading = format::busy("Opening…");
-		loading.set_visible(false);
+		let loading = adw::Spinner::builder().width_request(24).height_request(24).halign(gtk::Align::Center).visible(false).build();
 
 		// Wraps onto a second line on a narrow window.
 		let actions = adw::WrapBox::builder().child_spacing(8).line_spacing(8).margin_top(6).build();
@@ -310,6 +312,7 @@ impl Reader {
 			pictures: RefCell::default(),
 			generation: Cell::new(0),
 			opening: Cell::new(false),
+			busy: RefCell::default(),
 		});
 		self.update_snippet(&card);
 
@@ -412,11 +415,6 @@ impl Reader {
 		});
 	}
 
-	/// For the screenshot scenes: the word saying what the reader is doing, if it shows one.
-	pub fn busy_word(&self) -> Option<String> {
-		format::busy_word(self.cards_box.upcast_ref())
-	}
-
 	/// Opens a card's mail from the cache, or from the server and stores it.
 	fn load(self: &Rc<Self>, card: &Rc<Card>) {
 		let (Some(cache), Some(backend)) = (self.ctx.cache(), self.ctx.backend()) else { return };
@@ -425,10 +423,11 @@ impl Reader {
 		card.body.set_visible(false);
 		card.opening.set(true);
 		// Mail from the cache opens at once; only a wait on the server shows what is happening.
-		let c = Rc::downgrade(card);
+		let (c, activity) = (Rc::downgrade(card), self.ctx.activity.clone());
 		glib::timeout_add_local_once(Duration::from_millis(150), move || {
 			if let Some(card) = c.upgrade().filter(|card| card.generation.get() == generation && card.opening.get()) {
 				card.loading.set_visible(true);
+				*card.busy.borrow_mut() = Some(activity.start(Word::Opening));
 			}
 		});
 		let id = card.summary.id.clone();
@@ -452,6 +451,7 @@ impl Reader {
 				return;
 			}
 			card.opening.set(false);
+			card.busy.borrow_mut().take();
 			card.loading.set_visible(false);
 			match result {
 				Ok(opened) => {
@@ -513,6 +513,7 @@ impl Reader {
 						match (att, ctx.backend()) {
 							(Some(att), Some(backend)) => {
 								let id = mail.summary.id.clone();
+								let _busy = ctx.activity.start(Word::Opening);
 								runtime::run(async move { backend.attachment(&id, &att).await.ok() }).await
 							},
 							_ => None,

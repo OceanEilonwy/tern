@@ -7,6 +7,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use tern_core::{mime_for, Attachment, FolderKind, MailId, NewAttachment};
 
+use crate::activity::Word;
 use crate::compose_model::{Fields, MAX_TOTAL_BYTES};
 use crate::{attachments::icon_for, format, runtime, suggest, window::Ctx};
 
@@ -60,6 +61,7 @@ impl Composer {
 		header.pack_start(&attach);
 		header.pack_end(&send);
 		header.pack_end(&discard);
+		header.pack_end(&ctx.activity.indicator());
 
 		let (to_row, to) = field("To");
 		let (cc_row, cc) = field("Cc");
@@ -269,7 +271,7 @@ impl Composer {
 		let busy = self.sending.get() || self.pending.get() > 0;
 		self.send.set_sensitive(!busy);
 		if self.sending.get() {
-			self.send.set_child(Some(&format::busy("Sending…")));
+			self.send.set_child(Some(&adw::Spinner::new()));
 		} else {
 			self.send.set_label("Send");
 		}
@@ -344,9 +346,11 @@ impl Composer {
 			this.pending.set(this.pending.get() + 1);
 			this.update_send();
 			this.refresh_files();
+			let busy = this.ctx.activity.start(Word::Attaching);
 			runtime::spawn_local(async move {
 				let name = file.basename().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into());
 				let result = file.load_contents_future().await;
+				drop(busy);
 				this.pending.set(this.pending.get() - 1);
 				this.update_send();
 				match result {
@@ -366,9 +370,11 @@ impl Composer {
 		self.update_send();
 		self.refresh_files();
 		let this = self.clone();
+		let busy = self.ctx.activity.start(Word::Attaching);
 		runtime::spawn_local(async move {
 			let a = att.clone();
 			let result = runtime::run(async move { backend.attachment(&mail, &a).await }).await;
+			drop(busy);
 			this.pending.set(this.pending.get() - 1);
 			this.update_send();
 			match result {
@@ -491,8 +497,10 @@ impl Composer {
 		let draft = fields.saved_draft();
 		let replaced = draft.existing.clone();
 		let this = self.clone();
+		let busy = self.ctx.activity.start(Word::Drafting);
 		runtime::spawn_local(async move {
 			let result = runtime::run(async move { backend.save_draft(draft).await }).await;
+			drop(busy);
 			match result {
 				Ok(id) => {
 					if let (Some(old), Some(cache)) = (replaced, this.ctx.cache()) {
@@ -538,8 +546,11 @@ impl Composer {
 				let _ = cache.remove(&id);
 				this.ctx.changed(&[FolderKind::Drafts]);
 				let ctx = this.ctx.clone();
+				let busy = ctx.activity.start(Word::Deleting);
 				runtime::spawn_local(async move {
-					match runtime::run(async move { backend.trash(&id).await }).await {
+					let result = runtime::run(async move { backend.trash(&id).await }).await;
+					drop(busy);
+					match result {
 						Ok(()) => ctx.changed(&[FolderKind::Drafts, FolderKind::Trash]),
 						Err(e) => ctx.error(&e),
 					}
@@ -547,11 +558,6 @@ impl Composer {
 			}
 		});
 		dialog.present(Some(&self.window));
-	}
-
-	/// For the screenshot scenes: the word saying what the composer is doing, if it shows one.
-	pub fn busy_word(&self) -> Option<String> {
-		format::busy_word(self.send.upcast_ref())
 	}
 
 	pub fn send(self: &Rc<Self>) {
@@ -583,8 +589,10 @@ impl Composer {
 		self.sending.set(true);
 		self.update_send();
 		let this = self.clone();
+		let busy = self.ctx.activity.start(Word::Sending);
 		runtime::spawn_local(async move {
 			let result = runtime::run(async move { backend.send(draft).await }).await;
+			drop(busy);
 			this.sending.set(false);
 			this.update_send();
 			match result {

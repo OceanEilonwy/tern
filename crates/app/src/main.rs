@@ -1,5 +1,6 @@
 //! Tern, a small GNOME mail client for Tuta.
 
+mod activity;
 mod attachments;
 mod background;
 mod compose_model;

@@ -14,6 +14,7 @@ use tern_core::{Folder, FolderId, FolderKind, MailId, MailSummary};
 
 use crate::compose_model::{Answer, Fields};
 use crate::reader::Reader;
+use crate::activity::Word;
 use crate::settings::Settings;
 use crate::{composer, format, grip, runtime, window::Ctx};
 
@@ -43,7 +44,6 @@ pub struct Mailbox {
 	list_title: adw::WindowTitle,
 	list_stack: gtk::Stack,
 	empty: adw::StatusPage,
-	syncing: adw::Spinner,
 	pub store: gio::ListStore,
 	/// The row widget showing each conversation on screen, so a changed one is redrawn in place.
 	bound: Rc<RefCell<HashMap<glib::Object, gtk::Box>>>,
@@ -197,12 +197,12 @@ impl Mailbox {
 		let sidebar_toggle = gtk::ToggleButton::builder().icon_name("sidebar-show-symbolic").tooltip_text("Show Folders").build();
 		let compose_content = adw::ButtonContent::builder().icon_name("mail-message-new-symbolic").label("_New").use_underline(true).build();
 		let compose = gtk::Button::builder().child(&compose_content).action_name("win.compose").tooltip_text("New Message (Ctrl+N)").css_classes(["suggested-action"]).build();
-		let syncing = adw::Spinner::builder().tooltip_text("Checking for new mail").visible(false).build();
+		let activity = ctx.activity.indicator();
 		let refresh = gtk::Button::builder().icon_name("view-refresh-symbolic").action_name("win.refresh").tooltip_text("Check for New Mail (F5)").build();
 		list_header.pack_start(&sidebar_toggle);
 		list_header.pack_start(&compose);
 		list_header.pack_end(&refresh);
-		list_header.pack_end(&syncing);
+		list_header.pack_end(&activity);
 		let list_view_tb = adw::ToolbarView::new();
 		list_view_tb.add_top_bar(&list_header);
 		list_view_tb.set_content(Some(&list_stack));
@@ -245,7 +245,6 @@ impl Mailbox {
 			list_title,
 			list_stack,
 			empty,
-			syncing,
 			store,
 			bound,
 			selection,
@@ -599,7 +598,6 @@ impl Mailbox {
 		self.folders.borrow_mut().clear();
 		*self.current.borrow_mut() = None;
 		self.in_flight.borrow_mut().clear();
-		self.syncing.set_visible(false);
 		self.store.remove_all();
 		self.reader.clear();
 		self.set_enabled(false);
@@ -765,15 +763,15 @@ impl Mailbox {
 			return;
 		}
 		self.in_flight.borrow_mut().push(folder.clone());
-		self.update_syncing();
+		let busy = self.ctx.activity.start(Word::Fetching);
 		let keep = self.ctx.settings().offline.headers();
 		let (this, id) = (self.clone(), folder.clone());
 		runtime::spawn_local(async move {
 			let i = id.clone();
 			let b = backend.clone();
 			let result = runtime::run(async move { sync::folder(b.as_ref(), &cache, &i, keep).await }).await;
+			drop(busy);
 			this.in_flight.borrow_mut().retain(|f| f != &id);
-			this.update_syncing();
 			// Signed out, or into another account, meanwhile.
 			if !this.ctx.backend().is_some_and(|now| std::sync::Arc::ptr_eq(&now, &backend)) {
 				return;
@@ -790,12 +788,6 @@ impl Mailbox {
 				},
 			}
 		});
-	}
-
-	fn update_syncing(&self) {
-		let current = self.current.borrow().as_ref().map(|f| f.id.clone());
-		let busy = current.is_some_and(|c| self.in_flight.borrow().contains(&c)) || self.fetching_older.get();
-		self.syncing.set_visible(busy);
 	}
 
 	/// Brings the folders of these kinds up to date, as after sending or saving a draft.
@@ -820,13 +812,13 @@ impl Mailbox {
 			return;
 		}
 		self.fetching_older.set(true);
-		self.update_syncing();
+		let busy = self.ctx.activity.start(Word::Fetching);
 		let this = self.clone();
 		runtime::spawn_local(async move {
 			let id = folder.id.clone();
 			let result = runtime::run(async move { sync::older(backend.as_ref(), &cache, &id).await }).await;
+			drop(busy);
 			this.fetching_older.set(false);
-			this.update_syncing();
 			match result {
 				Ok(_) => {
 					this.shown.set(this.shown.get() + ROWS);
@@ -932,6 +924,7 @@ impl Mailbox {
 		self.cache_changed(None);
 		self.focus_list();
 		let this = self.clone();
+		let busy = self.ctx.activity.start(Word::Deleting);
 		runtime::spawn_local(async move {
 			let result = runtime::run(async move {
 				for id in &ids {
@@ -940,6 +933,7 @@ impl Mailbox {
 				Ok::<_, tern_core::Error>(())
 			})
 			.await;
+			drop(busy);
 			match result {
 				Ok(()) => this.ctx.toast(message),
 				Err(e) => {
