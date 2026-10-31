@@ -1,5 +1,5 @@
-# Checks every push and pull request: clippy, the unit tests and the window scenes (on a virtual
-# kwin_wayland display, as when run locally; Broadway lays out panes differently). Runs on Arch, which has the GTK 4.22 and libadwaita 1.9 Tern needs.
+# Checks every push and pull request: clippy, the unit tests and the window scenes (on GNOME's
+# headless mutter). Runs on Arch, which has the GTK 4.22 and libadwaita 1.9 Tern needs.
 name: CI
 
 on:
@@ -18,20 +18,21 @@ jobs:
       - name: Install build dependencies
         run: |
           pacman -Syu --noconfirm --needed base-devel git gtk4 libadwaita openssl dbus rustup \
-            cantarell-fonts noto-fonts adwaita-icon-theme kwin
+            cantarell-fonts noto-fonts adwaita-icon-theme mutter
           rustup default stable
           rustup component add clippy
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
+      # Clippy is off for the vendored Tuta SDK (see Cargo.toml); this checks Tern's own crates.
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Unit tests
         run: cargo test --workspace --locked
+      # GNOME's mutter, headless, drawn in software: the runner has no GPU.
       - name: Window scenes
         env:
           XDG_RUNTIME_DIR: /tmp/runtime
-        # kwin_wayland carries a file capability that an unprivileged container refuses to run.
+          GSK_RENDERER: cairo
         run: |
-          setcap -r /usr/bin/kwin_wayland
           mkdir -p -m 700 /tmp/runtime
-          make test-ui
+          dbus-run-session -- make test-ui

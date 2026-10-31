@@ -17,7 +17,8 @@ test: test-ui
 	cargo test -p tern -p tern-core -p tern-tuta -p tern-cache
 
 # Drives the real window on a headless display: KDE's kwin_wayland in virtual mode when installed
-# (it draws real frames, so layout settles as on screen), else GTK's broadway. Each scene saves a
+# (it draws real frames, so layout settles as on screen), else GNOME's mutter, headless (as in CI;
+# it needs a D-Bus session, and with no GPU set GSK_RENDERER=cairo), else GTK's broadway. Each scene saves a
 # picture only if its check passed.
 UI_SCENES = sign-in folders-fail refresh-race sign-out-race draft suggest keys arrows busy panes search focus-first spam rules rule-edit menu from quote cleanup
 test-ui:
@@ -25,6 +26,9 @@ test-ui:
 	@dir=$$(mktemp -d); \
 	if command -v kwin_wayland >/dev/null; then \
 		kwin_wayland --virtual --no-lockscreen --socket=tern-test-$$$$ --width=1400 --height=860 >/dev/null 2>&1 & srv=$$!; \
+		display="WAYLAND_DISPLAY=tern-test-$$$$ GDK_BACKEND=wayland"; \
+	elif command -v mutter >/dev/null; then \
+		mutter --headless --wayland --no-x11 --wayland-display=tern-test-$$$$ --virtual-monitor 1400x860 >/dev/null 2>&1 & srv=$$!; \
 		display="WAYLAND_DISPLAY=tern-test-$$$$ GDK_BACKEND=wayland"; \
 	else \
 		gtk4-broadwayd :77 >/dev/null 2>&1 & srv=$$!; display="GDK_BACKEND=broadway BROADWAY_DISPLAY=:77"; \

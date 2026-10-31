@@ -2,6 +2,13 @@
   <img src="data/icons/xyz.hollingworth.Tern.svg" width="128" height="128" alt="Tern">
 </p>
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/reading-dark.png">
+    <img src="docs/readme/reading.png" width="720" alt="Reading a mail in Tern">
+  </picture>
+</p>
+
 <h1 align="center">Tern</h1>
 
 <p align="center">
@@ -19,15 +26,17 @@
 <p align="center">
   <a href="#install"><b>Install</b></a> ·
   <a href="https://github.com/OceanEilonwy/tern/releases/tag/latest-main"><b>Downloads</b></a> ·
-  <a href="DECISIONS.md"><b>Decisions</b></a>
+  <a href="#build-from-source"><b>Build from source</b></a>
 </p>
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/reading-dark.png">
-    <img src="docs/readme/reading.png" alt="Reading a mail in Tern">
-  </picture>
-</p>
+## Why Tern
+
+- **Fast.** Recent mail is kept on your computer in an encrypted database, so folders open at once and work offline.
+- **Private.** No web view: mail is drawn natively, remote images never load, and the cache key lives in your keyring.
+- **Conversations.** Mail is grouped by subject across folders, with pins, read and unread, and spam from a right-click.
+- **Search and rules.** Search everything on this computer, optionally by meaning. Rules sort new mail into folders, labels or Spam.
+- **Several addresses.** Send from any alias; a reply starts from the address the mail came to.
+- **Keyboard first.** Every action has a shortcut; press Ctrl+? to see them.
 
 <table>
   <tr>
@@ -41,15 +50,6 @@
     <td align="center">Clean Up when the cache grows</td>
   </tr>
 </table>
-
-## Why Tern
-
-- **Fast.** Recent mail is kept on your computer in an encrypted database, so folders open at once and work offline.
-- **Private.** No web view: mail is drawn natively, remote images never load, and the cache key lives in your keyring.
-- **Conversations.** Mail is grouped by subject across folders, with pins, read and unread, and spam from a right-click.
-- **Search and rules.** Search everything on this computer, optionally by meaning. Rules sort new mail into folders, labels or Spam.
-- **Several addresses.** Send from any alias; a reply starts from the address the mail came to.
-- **Keyboard first.** Every action has a shortcut; press Ctrl+? to see them.
 
 ## Install
 
