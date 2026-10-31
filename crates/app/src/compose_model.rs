@@ -14,7 +14,7 @@ pub enum Answer {
 
 /// The earlier mail a reply or forward carries, kept apart from what is written so it can be left
 /// out with a click.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Quote {
 	/// Lines picked in the reader before answering, and whose they are: quoted above the reply.
 	pub picked: Option<(String, String)>,
@@ -22,7 +22,7 @@ pub struct Quote {
 	pub whole: Option<Whole>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Whole {
 	/// What it is, in a few words: "Sam's message", "Forwarded: Accounts, 26 Oct".
 	pub label: String,
@@ -54,13 +54,67 @@ impl Quote {
 	}
 }
 
+/// The opening of the blockquote [`blockquote`] writes, which finds Tern's own quotes again.
+const QUOTE_OPEN: &str = "<blockquote style=\"margin:0 0 0 0.8ex;border-left:1px solid #ccc;padding-left:1ex\">";
+const QUOTE_CLOSE: &str = "</blockquote>";
+
+/// Text from the HTML [`text_to_html`] makes of it, or `None` for any other HTML.
+fn untext(html: &str) -> Option<String> {
+	let inner = html.strip_prefix("<div>")?.strip_suffix("</div>")?;
+	if inner.replace("<br>", "").contains('<') {
+		return None;
+	}
+	Some(inner.split("<br>").map(|line| line.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&amp;", "&")).collect::<Vec<_>>().join("\n"))
+}
+
+/// Takes `<div>…</div>` made by [`text_to_html`] off the front of `html`: its text and the rest.
+fn take_div(html: &str) -> Option<(String, &str)> {
+	let end = html.find("</div>")? + "</div>".len();
+	Some((untext(&html[..end])?, &html[end..]))
+}
+
+/// Takes a blockquote made by [`blockquote`] off the front of `html`: its text and the rest.
+fn take_quote(html: &str) -> Option<(String, &str)> {
+	let rest = html.strip_prefix(QUOTE_OPEN)?;
+	let end = rest.find(QUOTE_CLOSE)?;
+	Some((untext(&rest[..end])?, &rest[end + QUOTE_CLOSE.len()..]))
+}
+
+/// What a draft Tern wrote is made of: the quotes [`Quote::around`] put around the text, and the
+/// text. `None` when its HTML is not Tern's, as for a draft written in Tuta's own app. The whole
+/// mail's short label is not in the HTML, so it is a general one.
+pub fn split_quotes(html: &str) -> Option<(Quote, String)> {
+	let mut rest = html;
+	let mut quote = Quote::default();
+	if let Some((who, after)) = take_div(rest).and_then(|(line, after)| Some((line.strip_suffix(" wrote:")?.to_string(), after))) {
+		if let Some((lines, after)) = take_quote(after) {
+			quote.picked = Some((who, lines));
+			rest = after;
+		}
+	}
+	let (body, after) = take_div(rest)?;
+	if let Some(after) = after.strip_prefix("<br>") {
+		let (head, after) = take_div(after)?;
+		let forward = head.starts_with("---------- Forwarded message ----------");
+		let (text, after) = if forward { take_div(after)? } else { take_quote(after)? };
+		if !after.is_empty() {
+			return None;
+		}
+		let label = if forward { "Forwarded Mail" } else { "Earlier Message" };
+		quote.whole = Some(Whole { label: label.into(), head, text, included: true, forward });
+	} else if !after.is_empty() {
+		return None;
+	}
+	Some((quote, body))
+}
+
 fn escape(text: &str) -> String {
 	text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 /// Quoted text as mail apps show it: indented under a line, and folded away by those that fold quotes.
 fn blockquote(text: &str) -> String {
-	format!("<blockquote style=\"margin:0 0 0 0.8ex;border-left:1px solid #ccc;padding-left:1ex\">{}</blockquote>", text_to_html(text))
+	format!("{QUOTE_OPEN}{}{QUOTE_CLOSE}", text_to_html(text))
 }
 
 /// What the composer's fields hold.
@@ -278,13 +332,21 @@ pub fn answer_fields(mail: &Mail, text: &str, date: &str, answer: Answer, me: &A
 }
 
 /// The fields of a saved draft, to continue writing it. `text` is its body as plain text.
-pub fn draft_fields(draft: &Mail, text: &str) -> Fields {
+pub fn draft_fields(draft: &Mail, text: &str, kept_quote: Option<Quote>) -> Fields {
+	// Tern's own drafts come apart into the text and its quotes, which show as written: as kept
+	// here when they were (a quote left out included), else as read back from the mail. Any other
+	// draft is all text.
+	let (quote, body) = match split_quotes(&draft.body_html) {
+		Some((read, body)) => (kept_quote.unwrap_or(read), body),
+		None => (Quote::default(), text.to_string()),
+	};
 	Fields {
 		to: format_addresses(&draft.to),
 		cc: format_addresses(&draft.cc),
 		bcc: format_addresses(&draft.bcc),
 		subject: draft.summary.subject.clone(),
-		body: text.to_string(),
+		body,
+		quote,
 		existing: Some(draft.summary.id.clone()),
 		kept: draft.attachments.clone(),
 		from: draft.summary.from.address.clone(),
@@ -314,7 +376,7 @@ mod tests {
 		draft.summary.draft = true;
 		draft.bcc = vec![Address::new("", "boss@x.org")];
 		draft.attachments = vec![tern_core::Attachment { id: "f/1".into(), name: "a.pdf".into(), mime: "application/pdf".into(), size: 3, cid: None }];
-		let fields = draft_fields(&draft, "Hello");
+		let fields = draft_fields(&draft, "Hello", None);
 		assert_eq!(fields.to, "You <you@tuta.com>, sam@x.org");
 		assert_eq!(fields.bcc, "boss@x.org");
 		assert_eq!(fields.existing, Some(draft.summary.id.clone()));
@@ -325,6 +387,57 @@ mod tests {
 		assert_eq!(saved.existing, fields.existing);
 		assert_eq!(saved.kept, fields.kept);
 		assert_eq!(saved.bcc, vec![Address::new("", "boss@x.org")]);
+	}
+
+	/// A draft saved from `fields`, as Tuta gives it back.
+	fn saved(fields: &Fields) -> Mail {
+		let mut draft = mail();
+		draft.summary.draft = true;
+		draft.body_html = fields.saved_draft().body_html;
+		draft
+	}
+
+	#[test]
+	fn a_reopened_draft_shows_its_quotes_apart_from_the_text() {
+		let mut f = answer_fields(&mail(), "Hi <all>\n\nThe photos & more", "today", Answer::Reply, &me(), Some("The photos"));
+		f.body = "Lovely!\n\nSee you".into();
+		f.quote.whole.as_mut().unwrap().included = true;
+		// Kept here: exactly as written.
+		let again = draft_fields(&saved(&f), "flattened", Some(f.quote.clone()));
+		assert_eq!((again.body.as_str(), &again.quote), ("Lovely!\n\nSee you", &f.quote));
+		// Not kept (saved on another computer): read back from the mail, under a general label.
+		let again = draft_fields(&saved(&f), "flattened", None);
+		assert_eq!(again.body, "Lovely!\n\nSee you");
+		assert_eq!(again.quote.picked, f.quote.picked);
+		let (read, wrote) = (again.quote.whole.unwrap(), f.quote.whole.clone().unwrap());
+		assert_eq!((read.head, read.text, read.included, read.forward, read.label.as_str()), (wrote.head, wrote.text, true, false, "Earlier Message"));
+
+		// A quote left out is not in the mail: only what was kept here brings it back.
+		f.quote.whole.as_mut().unwrap().included = false;
+		f.quote.picked = None;
+		assert!(draft_fields(&saved(&f), "x", None).quote.whole.is_none());
+		assert_eq!(draft_fields(&saved(&f), "x", Some(f.quote.clone())).quote, f.quote);
+		assert_eq!(draft_fields(&saved(&f), "x", None).body, "Lovely!\n\nSee you");
+	}
+
+	#[test]
+	fn a_reopened_forward_keeps_the_forwarded_mail_apart() {
+		let mut f = answer_fields(&mail(), "Body\nmore", "today", Answer::Forward, &me(), None);
+		f.body = "FYI".into();
+		let again = draft_fields(&saved(&f), "x", None);
+		let (read, wrote) = (again.quote.whole.unwrap(), f.quote.whole.unwrap());
+		assert_eq!(again.body, "FYI");
+		assert_eq!((read.head, read.text, read.forward, read.label.as_str()), (wrote.head, wrote.text, true, "Forwarded Mail"));
+	}
+
+	#[test]
+	fn a_draft_from_elsewhere_is_all_text() {
+		let mut draft = mail();
+		draft.body_html = "<p>Hi</p><blockquote>quoted</blockquote>".into();
+		let f = draft_fields(&draft, "Hi\nquoted", Some(Quote { picked: Some(("A".into(), "b".into())), whole: None }));
+		assert_eq!((f.body.as_str(), f.quote), ("Hi\nquoted", Quote::default()), "a kept quote is not shown twice over text that holds it");
+		draft.body_html = "<div>Typed &lt;div&gt; and <b>bold</b></div>".into();
+		assert_eq!(draft_fields(&draft, "plain", None).body, "plain");
 	}
 
 	#[test]

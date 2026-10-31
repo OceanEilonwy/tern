@@ -578,7 +578,9 @@ impl Reader {
 			self.expand(card, true);
 			return None;
 		};
-		let fields = compose_model::draft_fields(&opened.mail, &opened.doc.to_plain_text());
+		// The quotes as the composer kept them, when it was this computer's.
+		let kept = self.ctx.cache().and_then(|c| c.draft_quote(&opened.mail.summary.id).ok().flatten()).and_then(|json| serde_json::from_str(&json).ok());
+		let fields = compose_model::draft_fields(&opened.mail, &opened.doc.to_plain_text(), kept);
 		Some(composer::Composer::open(&self.ctx, fields, None))
 	}
 

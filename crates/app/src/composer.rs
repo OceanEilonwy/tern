@@ -537,6 +537,17 @@ impl Composer {
 		suggest::open_count(&self.to)
 	}
 
+	/// For the screenshot scenes: types `text` as the message.
+	pub fn type_body(&self, text: &str) {
+		self.body.buffer().set_text(text);
+	}
+
+	/// For the screenshot scenes: the message as written, quotes apart.
+	pub fn body_text(&self) -> String {
+		let buffer = self.body.buffer();
+		buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string()
+	}
+
 	/// For the screenshot scenes: the subject and To as written.
 	pub fn subject_and_to(&self) -> (String, String) {
 		(self.subject.text().into(), self.to.text().into())
@@ -638,6 +649,7 @@ impl Composer {
 		self.window.set_visible(false);
 		let draft = fields.saved_draft();
 		let replaced = draft.existing.clone();
+		let quote = (fields.quote != Quote::default()).then(|| serde_json::to_string(&fields.quote).ok()).flatten();
 		let this = self.clone();
 		let busy = self.ctx.activity.start(Word::Drafting);
 		runtime::spawn_local(async move {
@@ -645,10 +657,12 @@ impl Composer {
 			drop(busy);
 			match result {
 				Ok(id) => {
-					if let (Some(old), Some(cache)) = (replaced, this.ctx.cache()) {
-						if old != id {
+					if let Some(cache) = this.ctx.cache() {
+						if let Some(old) = replaced.filter(|old| old != &id) {
 							let _ = cache.remove(&old);
 						}
+						// Kept here so reopening shows the quotes as they were, not merged into the text.
+						let _ = cache.set_draft_quote(&id, quote.as_deref());
 					}
 					this.done.set(true);
 					this.window.close();

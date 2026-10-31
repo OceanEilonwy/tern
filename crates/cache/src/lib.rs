@@ -232,6 +232,9 @@ impl Cache {
 		// The conversations pinned to the top of the list, by thread key. Only here, as Tuta has no
 		// pins, so a new schema keeps them.
 		conn.execute_batch("CREATE TABLE IF NOT EXISTS pins (thread TEXT PRIMARY KEY);")?;
+		// What a draft written here quotes of the mail it answers, as the composer keeps it apart from
+		// the text: Tuta stores only the body, with the quotes in it.
+		conn.execute_batch("CREATE TABLE IF NOT EXISTS draft_quotes (list TEXT NOT NULL, element TEXT NOT NULL, quote TEXT NOT NULL, PRIMARY KEY (list, element));")?;
 		// Every word in the search index with how many mails hold it, for finding what a typo meant.
 		// A view of the index, on this connection only: nothing more is stored.
 		conn.execute_batch("CREATE VIRTUAL TABLE temp.vocab USING fts5vocab(main, words, row);")?;
@@ -456,6 +459,21 @@ impl Cache {
 		}
 		tx.commit()?;
 		Ok(())
+	}
+
+	/// Keeps what draft `id` quotes, as the composer describes it, or forgets it with `None`. It
+	/// goes when the draft does.
+	pub fn set_draft_quote(&self, id: &MailId, quote: Option<&str>) -> Result<()> {
+		let conn = self.conn();
+		match quote {
+			Some(q) => conn.execute("INSERT OR REPLACE INTO draft_quotes (list, element, quote) VALUES (?1, ?2, ?3)", params![id.list, id.element, q])?,
+			None => conn.execute("DELETE FROM draft_quotes WHERE list = ?1 AND element = ?2", params![id.list, id.element])?,
+		};
+		Ok(())
+	}
+
+	pub fn draft_quote(&self, id: &MailId) -> Result<Option<String>> {
+		Ok(self.conn().query_row("SELECT quote FROM draft_quotes WHERE list = ?1 AND element = ?2", params![id.list, id.element], |r| r.get(0)).optional()?)
 	}
 
 	/// Pins the conversation `key` to the top of the lists it is in, or unpins it.
@@ -775,6 +793,7 @@ fn forget(tx: &Connection, id: &MailId) -> Result<()> {
 	}
 	tx.execute("DELETE FROM mails WHERE list = ?1 AND element = ?2", params![id.list, id.element])?;
 	tx.execute("DELETE FROM bodies WHERE list = ?1 AND element = ?2", params![id.list, id.element])?;
+	tx.execute("DELETE FROM draft_quotes WHERE list = ?1 AND element = ?2", params![id.list, id.element])?;
 	Ok(())
 }
 
@@ -888,6 +907,20 @@ mod tests {
 		let hits = cache.rule_hits(&rule, 10).unwrap();
 		assert_eq!(hits.iter().map(|h| (h.row.latest.id.element.as_str(), h.row.count, h.folder.0.as_str())).collect::<Vec<_>>(), [("e4", 3, "in"), ("e3", 1, "in")], "one row per conversation; Trash left out");
 		assert_eq!(cache.rule_hits(&rule, 1).unwrap().len(), 1);
+	}
+
+	#[test]
+	fn a_draft_s_quote_goes_with_the_draft() {
+		let (cache, inbox, _) = setup();
+		let draft = summary(1, "Re: Lunch", 100);
+		cache.merge_page(&inbox, std::slice::from_ref(&draft), true, true).unwrap();
+		cache.set_draft_quote(&draft.id, Some("{\"picked\":null}")).unwrap();
+		assert_eq!(cache.draft_quote(&draft.id).unwrap().as_deref(), Some("{\"picked\":null}"));
+		cache.set_draft_quote(&draft.id, None).unwrap();
+		assert_eq!(cache.draft_quote(&draft.id).unwrap(), None);
+		cache.set_draft_quote(&draft.id, Some("q")).unwrap();
+		cache.remove(&draft.id).unwrap();
+		assert_eq!(cache.draft_quote(&draft.id).unwrap(), None, "replaced, sent or deleted, the draft takes its quote along");
 	}
 
 	#[test]

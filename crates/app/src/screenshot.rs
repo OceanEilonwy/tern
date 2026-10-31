@@ -212,6 +212,34 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if newest_sent().await?.contains("Forwarded message") {
 				return Err("the forward left out still carried the mail".into());
 			}
+			// A reply closed unsent reopens from Drafts with its quotes apart from the text: as kept
+			// here, the whole mail left out included; without that, as read back from the draft.
+			mailbox.select_by_subject("Lunch");
+			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
+			sleep(300).await;
+			mailbox.reader.select_in_current("12:30 at the usual place?");
+			let reply = mailbox.reader.answer(crate::compose_model::Answer::Reply).ok_or("no reply")?;
+			let written = reply.quote();
+			reply.type_body("Yes, see you then.");
+			reply.window.close();
+			wait_for(|| !reply.window.is_visible()).await;
+			drop(reply);
+			mailbox.select_folder(FolderKind::Drafts);
+			wait_for(|| mailbox.select_by_subject("Re: Lunch")).await;
+			wait_for(|| mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.summary.draft)).await;
+			let again = mailbox.reader.edit_current_draft().ok_or("the draft did not open")?;
+			if again.body_text() != "Yes, see you then." || again.quote() != written {
+				return Err(format!("the draft reopened as {:?} quoting {:?}, written {written:?}", again.body_text(), again.quote()));
+			}
+			again.window.set_visible(false);
+			drop(again);
+			let id = mailbox.reader.current.borrow().as_ref().map(|o| o.mail.summary.id.clone()).ok_or("no draft")?;
+			win.ctx.cache().ok_or("no cache")?.set_draft_quote(&id, None).map_err(|e| e.to_string())?;
+			let again = mailbox.reader.edit_current_draft().ok_or("the draft did not open")?;
+			if again.quote().picked != written.picked || again.quote().whole.is_some() {
+				return Err(format!("read back from the draft: {:?}", again.quote()));
+			}
+			again.window.set_visible(false);
 			Ok(())
 		}
 		// A reply goes out from the address the mail came to; a new mail from the main one, unless

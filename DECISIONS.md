@@ -407,3 +407,19 @@ Built from the approved mockups (rule editor A; the quoting design with its four
   in its body and reopens with them as text.
 - The pill sits at the bottom of the writing area, not straight under the last line: the text area
   fills the window so a click anywhere in it types.
+
+## Reopened drafts keep their quotes apart (2026-10-31)
+
+- Tuta stores a draft's body only, with the quotes merged in, and reopening turned it all into
+  text. Now both ways back, the first that applies:
+  - **Kept here**: saving a draft keeps what it quotes (picked lines, the whole mail, whether that
+    was added) in the encrypted cache, by draft, and it goes when the draft is replaced, sent or
+    deleted. Reopening on this computer shows the box and the pill exactly as left, a whole mail
+    left out included.
+  - **Read back**: Tern's own quotes are written in a fixed shape (a `<div>` line, then a
+    blockquote with Tern's style, or a forward's header), so a draft saved by Tern elsewhere comes
+    apart into text, picked lines and the whole mail. What was left out is not in the mail, so it
+    cannot come back this way, and the pill gets a general label ("Earlier Message", "Forwarded
+    Mail") as the short one is not in the mail.
+  - **Anything else** (a draft written in Tuta's own app, or edited there) opens as text, as
+    before; quotes kept here are not shown over it, so nothing shows twice.
