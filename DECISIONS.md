@@ -282,3 +282,19 @@ Mail is now fetched in batches, and the keys and tokens a batch needs are loaded
   only against scripted answers.
 - Found while checking: the `draft` window check fails about one run in ten on main too (the saved
   draft does not reach the Drafts list within its five seconds); not changed here.
+
+## Typos in search (2026-10-31)
+
+- **A misspelt word finds what was meant**: "touch rutby" finds "touch rugby". A plain word of four
+  letters or more that is in fewer than three mails also matches the one indexed word nearest to it:
+  one typo for up to seven letters, two from eight (a letter wrong, missing, extra, or two swapped).
+  The nearest is the one with the fewest typos, then in the most mails, and it must be in at least
+  twice as many mails as the typed word, so a rare word spelled right is left alone.
+- **One fix per word, not several**: BM25 ranks rarer words higher, so offering several near words
+  let an unlikely one ("ruby") outrank the meant one ("rugby"). The typed word still matches too and
+  ranks first when present.
+- **No new storage**: the words come from FTS5's own `fts5vocab` view of the index, created per
+  connection in the temp schema; no cache rebuild. Only words starting with the first or second
+  letter typed are compared, which keeps a typo search at about 95 ms against 1.4 million distinct
+  words (far more than a real mailbox holds). A dropped first letter ("ugby") is not found.
+- Filters (`from:`, `subject:`…) and quoted phrases are matched as typed.

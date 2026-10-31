@@ -49,16 +49,69 @@ impl Query {
 	/// when there is nothing to match. Every term is quoted, so nothing typed is FTS5 syntax, and
 	/// matches as a prefix ("inv" finds "invoice").
 	pub fn fts(&self, words: bool) -> Option<String> {
+		self.expression(words.then_some(&[]))
+	}
+
+	/// As `fts(true)`, with each plain word also matching the indexed word `fixes` gives for it, in
+	/// order (none for most): "rutby" finds "rugby" too.
+	pub fn fts_fixed(&self, fixes: &[Option<String>]) -> Option<String> {
+		self.expression(Some(fixes))
+	}
+
+	fn expression(&self, words: Option<&[Option<String>]>) -> Option<String> {
 		let mut parts = Vec::new();
 		let columns = [("subject", &self.subject), ("sender", &self.from), ("recipients", &self.to)];
 		for (column, terms) in columns {
 			parts.extend(terms.iter().filter_map(|t| phrase(t)).map(|p| format!("{column} : {p}")));
 		}
-		if words {
-			parts.extend(self.words.iter().filter_map(|t| phrase(t)));
+		if let Some(fixes) = words {
+			for (i, word) in self.words.iter().enumerate() {
+				let Some(typed) = phrase(word) else { continue };
+				parts.push(match fixes.get(i).and_then(Option::as_ref) {
+					Some(fix) => format!("({typed} OR \"{}\")", fix.replace('"', "\"\"")),
+					None => typed,
+				});
+			}
 		}
 		(!parts.is_empty()).then(|| parts.join(" AND "))
 	}
+}
+
+/// How many typos a word of `len` letters may hold and still find what was meant: none in short
+/// words, where one letter off is usually another word.
+pub fn typos_allowed(len: usize) -> usize {
+	match len {
+		0..=3 => 0,
+		4..=7 => 1,
+		_ => 2,
+	}
+}
+
+/// The typos between `a` and `b` (a letter wrong, missing, extra, or two swapped), if at most `max`.
+pub fn typos(a: &str, b: &str, max: usize) -> Option<usize> {
+	let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+	if a.len().abs_diff(b.len()) > max {
+		return None;
+	}
+	// Edit distance, counting a swap of neighbours as one (optimal string alignment).
+	let mut rows = vec![(0..=b.len()).collect::<Vec<_>>(); 3];
+	for i in 1..=a.len() {
+		let (two_back, before) = (rows[0].clone(), rows[1].clone());
+		let row = &mut rows[2];
+		row[0] = i;
+		for j in 1..=b.len() {
+			let cost = usize::from(a[i - 1] != b[j - 1]);
+			row[j] = (before[j] + 1).min(row[j - 1] + 1).min(before[j - 1] + cost);
+			if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+				row[j] = row[j].min(two_back[j - 2] + 1);
+			}
+		}
+		if rows[2].iter().min().is_some_and(|&least| least > max) {
+			return None;
+		}
+		rows.rotate_left(1);
+	}
+	Some(rows[1][b.len()]).filter(|&d| d <= max)
 }
 
 /// A term as an FTS5 prefix phrase, or `None` when it has no letters or digits to match.
@@ -194,6 +247,29 @@ pub fn fuse(lists: &[&[Found]]) -> Vec<(String, i64)> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn typos_count_wrong_missing_extra_and_swapped_letters() {
+		assert_eq!(typos("rutby", "rugby", 1), Some(1));
+		assert_eq!(typos("rguby", "rugby", 1), Some(1));
+		assert_eq!(typos("rugy", "rugby", 1), Some(1));
+		assert_eq!(typos("rugbby", "rugby", 1), Some(1));
+		assert_eq!(typos("rugby", "rugby", 1), Some(0));
+		assert_eq!(typos("rutbu", "rugby", 1), None);
+		assert_eq!(typos("rutbu", "rugby", 2), Some(2));
+		assert_eq!(typos("tuch", "touchline", 2), None);
+		assert_eq!(typos("zürich", "zurich", 1), Some(1));
+		assert_eq!(typos_allowed(3), 0);
+		assert_eq!(typos_allowed(5), 1);
+		assert_eq!(typos_allowed(9), 2);
+	}
+
+	#[test]
+	fn fixed_words_also_match_what_was_meant() {
+		let q = Query::parse("touch rutby from:sam");
+		assert_eq!(q.fts_fixed(&[None, Some("rugby".into())]).unwrap(), r#"sender : "sam"* AND "touch"* AND ("rutby"* OR "rugby")"#);
+		assert_eq!(q.fts_fixed(&[]), q.fts(true));
+	}
 
 	#[test]
 	fn queries_read_filters_and_quoted_phrases() {

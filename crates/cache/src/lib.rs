@@ -213,6 +213,9 @@ impl Cache {
 			conn.execute_batch(SCHEMA)?;
 			conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
 		}
+		// Every word in the search index with how many mails hold it, for finding what a typo meant.
+		// A view of the index, on this connection only: nothing more is stored.
+		conn.execute_batch("CREATE VIRTUAL TABLE temp.vocab USING fts5vocab(main, words, row);")?;
 		Ok(Cache { conn: Mutex::new(conn) })
 	}
 
@@ -516,7 +519,8 @@ impl Cache {
 		if query.attachment {
 			scope.push_str(" AND json_extract(m.summary, '$.has_attachments') = 1");
 		}
-		let all = query.fts(true);
+		let fixes: Vec<Option<String>> = query.words.iter().map(|w| typo_fix(&conn, w)).collect::<Result<_>>()?;
+		let all = query.fts_fixed(&fixes);
 		if all.is_none() && !query.words.is_empty() {
 			// Only punctuation typed: nothing can match.
 			return Ok(Vec::new());
@@ -608,6 +612,43 @@ impl Cache {
 /// What a mail's meaning is worked out from: its subject and the start of its body.
 fn meaning_text(subject: &str, body: &str) -> String {
 	format!("{subject}\n{body}").chars().take(MEANING_CHARS).collect()
+}
+
+/// The indexed word `word` is most likely a typo of: the one with the fewest typos, then in the
+/// most mails. Only for a word in fewer than `RARE` mails, and only a word in at least twice as
+/// many, so a word spelled right but rare is left alone.
+fn typo_fix(conn: &Connection, word: &str) -> Result<Option<String>> {
+	const RARE: i64 = 3;
+	let typed = word.to_lowercase();
+	let len = typed.chars().count();
+	let max = search::typos_allowed(len);
+	if max == 0 || !typed.chars().all(char::is_alphanumeric) {
+		return Ok(None);
+	}
+	// Mails holding a word that starts with what was typed, as the search matches prefixes.
+	let have: i64 = conn.query_row("SELECT coalesce(sum(doc), 0) FROM temp.vocab WHERE term >= ?1 AND term < ?1 || char(1114111)", [&typed], |r| r.get(0))?;
+	if have >= RARE {
+		return Ok(None);
+	}
+	// Only words starting with the first or second letter typed: a typo is seldom the first letter,
+	// and looking only there keeps a large index quick to search.
+	let mut stmt = conn.prepare("SELECT term, doc FROM temp.vocab WHERE term >= ?1 AND term < ?1 || char(1114111) AND length(term) BETWEEN ?2 AND ?3 AND doc >= ?4")?;
+	let mut starts: Vec<char> = typed.chars().take(2).collect();
+	starts.dedup();
+	let mut best: Option<(usize, i64, String)> = None;
+	for start in starts {
+		let range = params![start.to_string(), len.saturating_sub(max) as i64, (len + max) as i64, (2 * have).max(1)];
+		let found = stmt
+			.query_map(range, |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+			.filter_map(|r| r.ok())
+			.filter(|(term, _)| !term.starts_with(&typed))
+			.filter_map(|(term, doc)| search::typos(&typed, &term, max).map(|d| (d, -doc, term)))
+			.min();
+		if let Some(found) = found {
+			best = Some(best.map_or(found.clone(), |b| b.min(found)));
+		}
+	}
+	Ok(best.map(|(_, _, term)| term))
 }
 
 /// Writes the search words of a stored mail from its list row and, once opened, its body. A mail
@@ -845,6 +886,29 @@ mod tests {
 		// Opening the hit opens its folder's view of the conversation.
 		let hit = cache.search(&Query::parse("12:30"), None, 10).unwrap().remove(0);
 		assert_eq!((hit.folder, hit.row.count), (inbox, 2));
+	}
+
+	#[test]
+	fn search_finds_what_a_typo_meant() {
+		let (cache, inbox, _) = setup();
+		let mails: Vec<MailSummary> = (1..=3).map(|n| summary(n, &format!("Touch rugby on Saturday, week {n}"), n as i64 * 100)).collect();
+		let ruby = summary(4, "Ruby meetup", 400);
+		cache.merge_page(&inbox, &[mails.clone(), vec![ruby]].concat(), true, true).unwrap();
+		let sorted = |q: &str| {
+			let mut f = found(&cache, q);
+			f.sort();
+			f
+		};
+		// One letter off, two swapped, one missing.
+		assert_eq!(sorted("touch rutby"), ["e1", "e2", "e3"]);
+		assert_eq!(sorted("rguby"), ["e1", "e2", "e3"]);
+		assert_eq!(sorted("saturdy"), ["e1", "e2", "e3"]);
+		// A word in enough mails is taken as meant: "ruby" is not also "rugby".
+		let more: Vec<MailSummary> = (5..=7).map(|n| summary(n, &format!("Ruby notes {n}"), n as i64 * 100)).collect();
+		cache.merge_page(&inbox, &[mails, more].concat(), true, true).unwrap();
+		assert_eq!(found(&cache, "ruby").len(), 3);
+		// Short words are not guessed at, and nothing far off is.
+		assert!(found(&cache, "rub").len() == 3 && found(&cache, "xylophone").is_empty());
 	}
 
 	#[test]
