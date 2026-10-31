@@ -15,7 +15,7 @@ tag, never to master. GPL-3.0.
 - `sdk/src/crypto/asymmetric_crypto_facade.rs`: `PubEncSymKey` fields readable in the crate.
 - `sdk/src/login/login_facade.rs`: `parse_session_id` readable in the crate.
 - `crypto-primitives/src/compatibility_test_utils.rs`: test data path points at `../testdata/`.
-- `entities/entity_facade.rs`: encrypted fields holding their default value (empty string, 0, false)
+- `sdk/src/entities/entity_facade.rs`: encrypted fields holding their default value (empty string, 0, false)
   are encrypted like any other value instead of being sent as an empty string, as the TypeScript
   client at this tag does. Tuta's server decrypts drafts itself for recipients outside Tuta and
   answered 500 to the empty strings.
