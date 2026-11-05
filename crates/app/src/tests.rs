@@ -90,7 +90,7 @@ fn harness_with(secrets: Arc<Secrets>) -> Harness {
 	std::fs::create_dir_all(&dir).unwrap();
 	let paths = Paths::new(&dir, &dir);
 	let seen: Arc<Mutex<Seen>> = Arc::default();
-	let engine = Engine::start(paths.clone(), secrets, Arc::new(Screen_(seen.clone())));
+	let engine = Engine::open_with(paths.clone(), Options::default(), secrets, Arc::new(Screen_(seen.clone())));
 	Harness { engine, seen, dir, paths }
 }
 
@@ -641,4 +641,74 @@ fn a_conversation_asked_for_before_the_account_opens_waits_for_it() {
 	h.send(Action::OpenThread { key: "lunch on friday?".into(), folder_id: "inbox".into() });
 	std::thread::sleep(Duration::from_millis(50));
 	assert_eq!(h.top(), Some(Screen::SignIn));
+}
+
+#[derive(Default)]
+struct Told {
+	sessions: Mutex<Vec<Option<String>>>,
+	changed: AtomicU32,
+}
+
+impl Host for Told {
+	fn session(&self, parts: Option<SessionParts>) {
+		self.sessions.lock().unwrap().push(parts.map(|p| p.backend.account().address));
+	}
+	fn mail_changed(&self, _: Option<tern_mail::FolderId>) {
+		self.changed.fetch_add(1, Ordering::Relaxed);
+	}
+	fn folders_failed(&self, _: tern_mail::Error) {}
+}
+
+#[test]
+fn a_host_hears_of_the_session_and_of_changed_mail() {
+	let dir = std::env::temp_dir().join(format!("tern-host-test-{}", std::process::id()));
+	let told: Arc<Told> = Arc::default();
+	let seen: Arc<Mutex<Seen>> = Arc::default();
+	let options = Options { device: "computer", host: Some(told.clone()), ..Options::default() };
+	let engine = Engine::open_with(Paths::new(&dir, &dir), options, Arc::<Secrets>::default(), Arc::new(Screen_(seen.clone())));
+	let h = Harness { engine, seen, paths: Paths::new(&dir, &dir), dir };
+	h.demo();
+	h.until("mail to be told of", |_| told.changed.load(Ordering::Relaxed) > 0);
+	h.send(Action::OpenSettings);
+	h.until("the wording for this device", |s| s.settings.as_ref().is_some_and(|v| v.semantic_line.contains("this computer")));
+	h.send(Action::SignOut);
+	h.until_screen(Screen::SignIn);
+	let sessions = told.sessions.lock().unwrap().clone();
+	assert_eq!(sessions.first().unwrap().as_deref(), Some("you@tuta.com"));
+	assert_eq!(sessions.last().unwrap(), &None, "told it has gone");
+}
+
+#[test]
+fn an_account_given_at_the_start_opens_at_once_and_is_kept_nowhere() {
+	let dir = std::env::temp_dir().join(format!("tern-given-test-{}", std::process::id()));
+	let secrets: Arc<Secrets> = Arc::default();
+	let seen: Arc<Mutex<Seen>> = Arc::default();
+	let options = Options { signed_in: Some(Arc::new(tern_demo::DemoBackend::new())), ..Options::default() };
+	let engine = Engine::open_with(Paths::new(&dir, &dir), options, secrets.clone(), Arc::new(Screen_(seen.clone())));
+	let h = Harness { engine, seen, paths: Paths::new(&dir, &dir), dir };
+	h.until_screen(Screen::Inbox);
+	h.until_row("Photos from Saturday");
+	assert!(secrets.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn dropping_the_engine_ends_its_account_and_keeps_it_signed_in() {
+	let dir = std::env::temp_dir().join(format!("tern-drop-test-{}", std::process::id()));
+	let told: Arc<Told> = Arc::default();
+	let secrets: Arc<Secrets> = Arc::default();
+	secrets.put(SESSION_SECRET.into(), serde_json::to_vec(&("me@tuta.com", "not a session the server knows")).unwrap()).unwrap();
+	let options = Options { host: Some(told.clone()), ..Options::default() };
+	let engine = Engine::open_with(Paths::new(&dir, &dir), options, secrets.clone(), Arc::new(Screen_(Arc::default())));
+	let start = Instant::now();
+	while told.sessions.lock().unwrap().is_empty() {
+		assert!(start.elapsed() < Duration::from_secs(10), "no session opened");
+		std::thread::sleep(Duration::from_millis(5));
+	}
+	drop(engine);
+	while told.sessions.lock().unwrap().last().unwrap().is_some() {
+		assert!(start.elapsed() < Duration::from_secs(10), "the account went on after the engine");
+		std::thread::sleep(Duration::from_millis(5));
+	}
+	assert!(secrets.get(SESSION_SECRET.into()).unwrap().is_some(), "still signed in for next time");
+	let _ = std::fs::remove_dir_all(dir);
 }

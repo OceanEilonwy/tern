@@ -33,7 +33,7 @@ use tokio::sync::Notify;
 
 use crate::doc::{block_text, flatten, Picture};
 use crate::view::*;
-use crate::{EngineListener, SecretError, SecretStore};
+use crate::{EngineListener, Host, CACHE_KEY_SECRET, SESSION_SECRET, Options, SecretError, SecretStore, SessionParts};
 
 /// Conversations listed before scrolling asks for more.
 const ROWS: usize = 100;
@@ -48,7 +48,6 @@ const PREVIEW: usize = 4;
 const SPAM_SHOWN: usize = 500;
 /// Mail in these is not offered for Spam: it is already gone, or this account's own.
 const SPAM_SKIP: [FolderKind; 4] = [FolderKind::Spam, FolderKind::Trash, FolderKind::Sent, FolderKind::Drafts];
-const SESSION: &str = "session";
 /// How far the Inbox has been seen or told about: the newest received time looked at.
 const NOTIFIED: &str = "notified";
 /// Conversations the system is told about at once; the rest are only counted.
@@ -64,6 +63,10 @@ pub enum Msg {
 	Done(u64, Apply),
 	/// The system woke the app to check for mail; the answer goes back here.
 	Background(std::sync::mpsc::Sender<BackgroundResult>),
+	/// The platform wants the sync's next round now.
+	SyncNow,
+	/// The engine has been dropped.
+	Stop,
 }
 
 /// What Tern is doing, from least to most important to the person waiting.
@@ -180,6 +183,8 @@ struct Session {
 
 /// One round of keeping the cache up to date, for a session.
 struct Round {
+	host: Option<Arc<dyn Host>>,
+	on_screen: Option<Arc<Mutex<Option<FolderId>>>>,
 	paths: Paths,
 	meaning: Arc<Meaning>,
 	backend: Arc<dyn Backend>,
@@ -221,17 +226,29 @@ impl Round {
 		self.post(Box::new(|app| app.start_work(Word::Fetching)));
 		let settings = *self.settings.lock().unwrap_or_else(|p| p.into_inner());
 		let current = self.current.clone();
+		let platform_says = self.on_screen.clone();
 		let job = Job {
 			backend: self.backend.clone(),
 			cache: self.cache.clone(),
 			fetcher: self.fetcher.clone(),
 			level: settings.offline,
 			rules: rules::load(&self.paths),
-			on_screen: Arc::new(move || current.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|f| f.id.clone())),
+			on_screen: Arc::new(move || match &platform_says {
+				Some(folder) => folder.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+				None => current.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|f| f.id.clone()),
+			}),
 			labels: true,
 			contacts_done: self.contacts_done.clone(),
 		};
 		let finished = tern_sync::round(&job, &|event| {
+			if let Some(host) = &self.host {
+				match &event {
+					Event::Folders(_) | Event::RulesMoved => host.mail_changed(None),
+					Event::FolderChanged(id) => host.mail_changed(Some(id.clone())),
+					Event::NoFolders(e) => host.folders_failed(e.clone()),
+					Event::Labels(_) | Event::Problem(_) => {},
+				}
+			}
 			self.post(Box::new(move |app| match event {
 				Event::Folders(folders) => {
 					app.note_fine();
@@ -448,6 +465,11 @@ pub struct App {
 	resuming: bool,
 	/// The session to ask the server for again, for an account not yet connected.
 	saved_session: Option<String>,
+	device: &'static str,
+	host: Option<Arc<dyn Host>>,
+	on_screen: Option<Arc<Mutex<Option<FolderId>>>>,
+	/// An account to open at the start in place of any saved one.
+	start_with: Option<Arc<dyn Backend>>,
 	paths: Paths,
 	meaning: Arc<Meaning>,
 	/// A conversation asked for, from a notification, before the account was open.
@@ -529,9 +551,9 @@ fn limit_label(mb: u32) -> String {
 	}
 }
 
-fn storage_line(usage: Usage) -> String {
+fn storage_line(usage: Usage, device: &str) -> String {
 	let can_go = usage.older + usage.vectors + usage.model;
-	format!("{} on this phone · {} can go", format::size(usage.total), format::size(can_go))
+	format!("{} on this {device} · {} can go", format::size(usage.total), format::size(can_go))
 }
 
 /// The background checks' pace when turning on notifications turns them on.
@@ -545,7 +567,9 @@ fn background_label(minutes: u32) -> String {
 	}
 }
 
-const SEMANTIC_ABOUT: &str = "Also finds mail about what you type, not only mail with its words. Downloads a language model once; your mail never leaves this phone.";
+fn semantic_about(device: &str) -> String {
+	format!("Also finds mail about what you type, not only mail with its words. Downloads a {} language model once; your mail never leaves this {device}.", semantic::SIZE)
+}
 
 /// The word being typed in an address field: what follows the last separator.
 fn current_word(text: &str) -> (usize, &str) {
@@ -582,14 +606,14 @@ fn private_file(dir: &std::path::Path, name: &str, data: &[u8]) -> std::io::Resu
 
 /// The saved session and its address. `None` only when there really is none.
 fn saved_session(secrets: &dyn SecretStore) -> Result<Option<(String, String)>, SecretError> {
-	Ok(secrets.get(SESSION.into())?.and_then(|raw| serde_json::from_slice(&raw).ok()))
+	Ok(secrets.get(SESSION_SECRET.into())?.and_then(|raw| serde_json::from_slice(&raw).ok()))
 }
 
 /// The key of `email`'s mail cache, made and stored on first use. `None` means this session keeps
 /// no cache on disk: a store that cannot answer, or holds something unusable, must not lose the
 /// key by having it replaced, and one that cannot save a new key would lose the cache next start.
 fn cache_key(secrets: &dyn SecretStore, email: &str) -> Option<[u8; 32]> {
-	let name = format!("cache-key:{email}");
+	let name = format!("{CACHE_KEY_SECRET}{email}");
 	match secrets.get(name.clone()) {
 		Ok(Some(key)) => return <[u8; 32]>::try_from(key.as_slice()).ok(),
 		Ok(None) => {},
@@ -602,10 +626,14 @@ fn cache_key(secrets: &dyn SecretStore, email: &str) -> Option<[u8; 32]> {
 }
 
 impl App {
-	pub fn new(tx: UnboundedSender<Msg>, listener: Arc<dyn EngineListener>, secrets: Arc<dyn SecretStore>, runtime: tokio::runtime::Handle, paths: Paths) -> App {
+	pub fn new(tx: UnboundedSender<Msg>, listener: Arc<dyn EngineListener>, secrets: Arc<dyn SecretStore>, runtime: tokio::runtime::Handle, paths: Paths, options: Options) -> App {
 		App {
+			device: options.device,
+			host: options.host,
+			on_screen: options.on_screen,
+			start_with: options.signed_in,
 			settings: Arc::new(Mutex::new(Settings::load(&paths))),
-			meaning: Meaning::new(&paths),
+			meaning: options.meaning.unwrap_or_else(|| Meaning::new(&paths)),
 			open_dir: paths.opened_dir(),
 			paths,
 			tx,
@@ -653,6 +681,28 @@ impl App {
 			open_when_ready: None,
 			published: Published::default(),
 			revision: 1,
+		}
+	}
+
+	pub fn settings_handle(&self) -> Arc<Mutex<Settings>> {
+		self.settings.clone()
+	}
+
+	/// Ends everything under way, leaving what is saved as it is.
+	pub fn stop(&mut self) {
+		self.reset_account();
+	}
+
+	pub fn sync_now(&self) {
+		if let Some(session) = &self.session {
+			session.wake.notify_one();
+		}
+	}
+
+	/// Tells a platform still using the session's parts directly that they changed.
+	fn tell_host_session(&self) {
+		if let Some(host) = &self.host {
+			host.session(self.session.as_ref().map(|s| SessionParts { backend: s.backend.clone(), cache: s.cache.clone(), fetcher: s.fetcher.clone() }));
 		}
 	}
 
@@ -755,6 +805,11 @@ impl App {
 				log::warn!("could not clear opened files: {e}");
 			}
 		}
+		if let Some(backend) = self.start_with.take() {
+			let email = backend.account().address;
+			self.enter(email, backend, Cache::in_memory(), false, true);
+			return self.publish();
+		}
 		let (secrets, paths) = (self.secrets.clone(), self.paths.clone());
 		self.task(async move {
 			// The platform may take its time over secrets, and the cache over its first read.
@@ -849,6 +904,7 @@ impl App {
 		session.fetcher = Fetcher::new(backend, session.cache.clone(), self.runtime.clone(), Tuning::DEFAULT);
 		session.connected = true;
 		self.note_fine();
+		self.tell_host_session();
 		self.start_sync();
 		self.run_background();
 	}
@@ -878,6 +934,7 @@ impl App {
 		self.signin.busy = false;
 		self.signin.error = None;
 		self.rules = rules::load(&self.paths);
+		self.tell_host_session();
 		match cache.folders() {
 			Ok(folders) => self.show_folders(folders),
 			Err(e) => log::warn!("could not read folders: {e}"),
@@ -918,7 +975,7 @@ impl App {
 					tokio::task::spawn_blocking(move || {
 						if let Ok(raw) = serde_json::to_vec(&(&email, &session)) {
 							// Not remembered is not fatal: the next start asks again.
-							let _ = secrets.put(SESSION.into(), raw);
+							let _ = secrets.put(SESSION_SECRET.into(), raw);
 						}
 						cache_key(secrets.as_ref(), &email).and_then(|key| Cache::open(&paths.mail_cache(&email), &key).ok())
 					})
@@ -947,6 +1004,7 @@ impl App {
 		self.generation += 1;
 		if let Some(session) = self.session.take() {
 			session.fetcher.stop();
+			self.tell_host_session();
 		}
 		self.folders.clear();
 		self.labels.clear();
@@ -986,9 +1044,9 @@ impl App {
 		let (secrets, paths) = (self.secrets.clone(), self.paths.clone());
 		self.runtime.spawn(async move {
 			let _ = tokio::task::spawn_blocking(move || {
-				secrets.remove(SESSION.into());
+				secrets.remove(SESSION_SECRET.into());
 				if persistent && forget {
-					secrets.remove(format!("cache-key:{email}"));
+					secrets.remove(format!("{CACHE_KEY_SECRET}{email}"));
 					let path = paths.mail_cache(&email);
 					for suffix in ["", "-wal", "-shm"] {
 						let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
@@ -1005,6 +1063,8 @@ impl App {
 	fn round(&self) -> Option<Round> {
 		let session = self.session.as_ref()?;
 		Some(Round {
+			host: self.host.clone(),
+			on_screen: self.on_screen.clone(),
 			paths: self.paths.clone(),
 			meaning: self.meaning.clone(),
 			backend: session.backend.clone(),
@@ -2950,7 +3010,7 @@ impl App {
 			query: search.query.clone(),
 			searching: search.searching,
 			title: if search.rule.is_some() { "Mail the rule catches".into() } else { "Search".into() },
-			note: "Searching the mail kept on this phone".into(),
+			note: format!("Searching the mail kept on this {}", self.device),
 			empty: asked && !search.searching && rows.is_empty(),
 			rows,
 		}
@@ -2965,9 +3025,9 @@ impl App {
 			forget_on_sign_out: s.forget_on_sign_out,
 			cleanup_limits: CLEANUP_MB.iter().map(|mb| ChoiceView { value: mb.to_string(), label: limit_label(*mb), selected: *mb == s.cleanup_mb }).collect(),
 			cleanup_limit_line: limit_label(s.cleanup_mb),
-			storage_line: self.usage.map_or_else(|| "Measuring…".to_string(), storage_line),
+			storage_line: self.usage.map_or_else(|| "Measuring…".to_string(), |usage| storage_line(usage, self.device)),
 			semantic: s.semantic,
-			semantic_line: self.semantic_note.clone().unwrap_or_else(|| SEMANTIC_ABOUT.replace("a language model", &format!("a {} language model", semantic::SIZE))),
+			semantic_line: self.semantic_note.clone().unwrap_or_else(|| semantic_about(self.device)),
 			pure_black: s.pure_black,
 			match_wallpaper: s.match_wallpaper,
 			background: BACKGROUND_MINUTES.iter().map(|m| ChoiceView { value: m.to_string(), label: background_label(*m), selected: *m == s.background_minutes }).collect(),
@@ -3092,7 +3152,7 @@ impl App {
 				if usage.model > 0 {
 					choices.push(CleanupChoice { part: CleanupPart::Model, title: "Language model".into(), detail: "Downloaded again if search by meaning is turned on".into(), size: format::size(usage.model) });
 				}
-				choices.push(CleanupChoice { part: CleanupPart::All, title: "All mail".into(), detail: "Deletes all mail on this phone. It downloads again from Tuta.".into(), size: format::size(usage.total) });
+				choices.push(CleanupChoice { part: CleanupPart::All, title: "All mail".into(), detail: format!("Deletes all mail on this {}. It downloads again from Tuta.", self.device), size: format::size(usage.total) });
 				Some(SheetView::Cleanup { total: format::size(usage.total), choices })
 			},
 			Sheet::Discard => Some(SheetView::Discard),
@@ -3201,7 +3261,7 @@ mod session_tests {
 		let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
 		// Kept open: the loop must stop because the account went, not because the app did.
 		let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-		let mut app = App::new(tx, Arc::new(Nobody), Arc::new(Store::default()), runtime.handle().clone(), Paths::new(std::env::temp_dir(), std::env::temp_dir()));
+		let mut app = App::new(tx, Arc::new(Nobody), Arc::new(Store::default()), runtime.handle().clone(), Paths::new(std::env::temp_dir(), std::env::temp_dir()), Options::default());
 		app.sign_in("demo".into(), String::new());
 		let demo = Arc::downgrade(app.session.as_ref().unwrap().demo.as_ref().unwrap());
 		app.sign_out();

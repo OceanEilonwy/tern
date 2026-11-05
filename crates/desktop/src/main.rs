@@ -5,7 +5,6 @@
 
 mod activity;
 mod attachments;
-mod background;
 mod cleanup;
 mod composer;
 mod default_app;
@@ -33,7 +32,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use tern_app::paths::Paths;
 use tern_app::semantic::Meaning;
-use tern_app::{rules, semantic, settings};
+use tern_app::{rules, semantic};
 
 pub const APP_ID: &str = "xyz.hollingworth.Tern";
 
