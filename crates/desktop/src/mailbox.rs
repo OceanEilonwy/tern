@@ -9,13 +9,12 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
-use tern_app::view::{Action, FolderIcon, FolderView, ListState, ListView, RowView, SearchView};
-use tern_compose::{Answer, Fields};
+use tern_app::view::{Action, AnswerKind, FolderIcon, FolderView, ListState, ListView, RowView, SearchView};
 use tern_mail::FolderKind;
 
 use crate::layout::Layout;
 use crate::reader::Reader;
-use crate::{composer, grip, runtime, search, window::Ctx};
+use crate::{grip, search, window::Ctx};
 
 /// The folder sidebar's width bounds, in pixels, and its width as a rail of icons. Dragged narrower
 /// than `RAIL_SNAP` it becomes the rail.
@@ -665,10 +664,7 @@ impl Mailbox {
 		let weak = Rc::downgrade(self);
 		self.list_view.connect_activate(move |_, _| {
 			let Some(this) = weak.upgrade() else { return };
-			if this.reader.current().is_some_and(|c| c.draft) {
-				runtime::spawn_local(async move {
-					this.reader.edit_current_draft().await;
-				});
+			if this.reader.edit_current_draft() {
 				return;
 			}
 			this.inner.set_show_content(true);
@@ -711,12 +707,10 @@ impl Mailbox {
 
 	fn add_actions(self: &Rc<Self>) {
 		let entries: [(&str, MailAction); 15] = [
-			("compose", |m| {
-				composer::Composer::open(&m.ctx, Fields::default(), None);
-			}),
-			("reply", |m| m.answer(Answer::Reply)),
-			("reply-all", |m| m.answer(Answer::ReplyAll)),
-			("forward", |m| m.answer(Answer::Forward)),
+			("compose", |m| m.ctx.engine.send(Action::ComposeNew)),
+			("reply", |m| m.answer(AnswerKind::Reply)),
+			("reply-all", |m| m.answer(AnswerKind::ReplyAll)),
+			("forward", |m| m.answer(AnswerKind::Forward)),
 			("trash", |m| {
 				m.ctx.engine.send(Action::ConversationTrash);
 				m.focus_list();
@@ -864,8 +858,8 @@ impl Mailbox {
 
 	/// Mail actions work only while a conversation is open.
 	fn update_actions(&self) {
-		let open = self.reader.current().is_some() && self.ctx.backend().is_some();
-		let answerable = open && self.reader.current().is_some_and(|c| !c.draft);
+		let open = self.reader.current().is_some();
+		let answerable = self.reader.opened().is_some_and(|c| !c.draft);
 		for name in ["reply", "reply-all", "forward"] {
 			self.action(name).set_enabled(answerable);
 		}
@@ -909,11 +903,8 @@ impl Mailbox {
 		}
 	}
 
-	fn answer(self: &Rc<Self>, answer: Answer) {
-		let this = self.clone();
-		runtime::spawn_local(async move {
-			this.reader.answer(answer).await;
-		});
+	fn answer(&self, kind: AnswerKind) {
+		self.reader.answer(kind);
 	}
 
 	/// The core says whether a search is on show instead of the folder.

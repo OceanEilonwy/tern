@@ -17,6 +17,7 @@ struct Seen {
 	list: Option<ListView>,
 	conversation: Option<ConversationView>,
 	composer: Option<ComposerView>,
+	composers: Vec<ComposerView>,
 	search: Option<SearchView>,
 	settings: Option<SettingsView>,
 	rules: Option<RulesView>,
@@ -38,6 +39,7 @@ impl EngineListener for Screen_ {
 			Update::List { view } => seen.list = Some(view),
 			Update::Conversation { view } => seen.conversation = view,
 			Update::Composer { view } => seen.composer = view,
+			Update::Composers { views } => seen.composers = views,
 			Update::Search { view } => seen.search = Some(view),
 			Update::Settings { view } => seen.settings = Some(view),
 			Update::Rules { view } => seen.rules = Some(view),
@@ -816,4 +818,64 @@ fn a_card_says_its_subject_and_where_it_shows_on_the_web() {
 	h.open("Photos from Saturday");
 	h.until("its web link once open", |s| s.conversation.as_ref().is_some_and(|c| c.cards.iter().any(|c| c.open_url.is_some())));
 	assert_eq!(h.with(|s| s.conversation.as_ref().unwrap().cards[0].subject.clone()), "Photos from Saturday");
+}
+
+
+#[test]
+fn several_composers_stay_apart() {
+	let h = side_by_side();
+	h.demo();
+	h.send(Action::ComposeNew);
+	h.send(Action::ComposeNew);
+	h.until("two composers", |s| s.composers.len() == 2);
+	let (first, second) = h.with(|s| (s.composers[0].id, s.composers[1].id));
+	h.send(Action::ComposeFocus { id: first });
+	h.send(Action::ComposeAttach { name: "a.txt".into(), mime: "text/plain".into(), data: b"a".to_vec() });
+	h.until("the attachment on the first", |s| s.composers[0].attachments.len() == 1 && s.composers[1].attachments.is_empty());
+	// Sending one leaves the other, which actions then apply to.
+	h.send(Action::ComposeFocus { id: second });
+	h.send(Action::ComposeSend { text: text("mia@tuta.com", "Second", "Hi") });
+	h.until("the second gone", |s| s.composers.len() == 1 && s.composers[0].id == first);
+	assert_eq!(h.with(|s| s.composer.as_ref().map(|c| c.id)), Some(first));
+	h.send(Action::ComposeClose { text: text("", "", "") });
+	h.until("the first saved and gone", |s| s.composers.is_empty());
+}
+
+#[test]
+fn a_failed_send_stays_with_its_own_composer() {
+	let h = side_by_side();
+	h.demo();
+	h.send(Action::ComposeNew);
+	h.send(Action::ComposeNew);
+	h.until("two composers", |s| s.composers.len() == 2);
+	let first = h.with(|s| s.composers[0].id);
+	h.send(Action::ComposeFocus { id: first });
+	h.send(Action::ComposeSend { text: text("not an address", "One", "Hi") });
+	h.until("the error on the first", |s| s.composers[0].bad_to && s.composers[0].error.is_some());
+	assert!(h.with(|s| !s.composers[1].bad_to && s.composers[1].error.is_none()));
+}
+
+#[test]
+fn the_lines_a_platform_selected_are_what_a_reply_quotes() {
+	let h = side_by_side();
+	h.demo();
+	h.open("Re: Lunch on Friday?");
+	h.until("it opens", |s| s.conversation.as_ref().is_some_and(|c| c.cards.iter().any(|c| c.current && c.open_url.is_some())));
+	let mail = h.with(|s| s.conversation.as_ref().unwrap().cards.iter().find(|c| c.current).unwrap().id.clone());
+	h.send(Action::AnswerPicked { mail, kind: AnswerKind::Reply, picked: Some("just these words".into()) });
+	h.until("a composer", |s| s.composers.len() == 1);
+	assert_eq!(h.with(|s| s.composers[0].picked_text.clone()).as_deref(), Some("just these words"));
+}
+
+#[test]
+fn a_mail_link_from_outside_waits_for_an_account() {
+	let dir = std::env::temp_dir().join(format!("tern-link-test-{}", std::process::id()));
+	let seen: Arc<Mutex<Seen>> = Arc::default();
+	let engine = Engine::open_with(Paths::new(&dir, &dir), Options::default(), Arc::<Secrets>::default(), Arc::new(Screen_(seen.clone())));
+	let h = Harness { engine, seen, paths: Paths::new(&dir, &dir), dir };
+	h.engine.compose(tern_compose::mailto_fields("mailto:mia@tuta.com?subject=Hello").unwrap());
+	h.until_screen(Screen::SignIn);
+	assert!(h.with(|s| s.composers.is_empty()));
+	h.demo();
+	h.until("the composer", |s| s.composers.len() == 1 && s.composers[0].text.subject == "Hello");
 }

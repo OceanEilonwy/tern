@@ -1,11 +1,13 @@
 //! Draws the blocks of a mail, as the core published them, into a read-only `gtk::TextView`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::{gdk, glib, pango};
 
-use tern_app::view::{BlockKind, BlockView, SpanView, TableRowView};
+use tern_app::view::{Action, BlockKind, BlockView, SpanView, TableRowView};
+use tern_app::Engine;
 
 const INDENT: i32 = 28;
 const MAX_IMAGE_WIDTH: i32 = 640;
@@ -22,6 +24,7 @@ struct Painter<'a> {
 	buffer: gtk::TextBuffer,
 	tags: HashMap<String, gtk::TextTag>,
 	view: &'a gtk::TextView,
+	engine: Arc<Engine>,
 	out: Rendered,
 	accent: gdk::RGBA,
 	dim: gdk::RGBA,
@@ -29,7 +32,7 @@ struct Painter<'a> {
 }
 
 /// Replaces what `view` shows with `blocks`.
-pub fn render(view: &gtk::TextView, blocks: &[BlockView]) -> Rendered {
+pub fn render(view: &gtk::TextView, blocks: &[BlockView], engine: &Arc<Engine>) -> Rendered {
 	// Children can only be anchored in the view's own buffer, so attach it first.
 	let buffer = gtk::TextBuffer::new(None);
 	view.set_buffer(Some(&buffer));
@@ -40,6 +43,7 @@ pub fn render(view: &gtk::TextView, blocks: &[BlockView]) -> Rendered {
 		buffer,
 		tags: HashMap::new(),
 		view,
+		engine: engine.clone(),
 		out: Rendered::default(),
 		accent,
 		dim: gdk::RGBA::new(fg.red(), fg.green(), fg.blue(), 0.62),
@@ -214,8 +218,9 @@ impl Painter<'_> {
 				if cell.header {
 					label.add_css_class("heading");
 				}
-				label.connect_activate_link(|label, uri| {
-					open_uri(label, uri);
+				let engine = self.engine.clone();
+				label.connect_activate_link(move |_, uri| {
+					engine.send(Action::OpenLink { url: uri.to_string() });
 					glib::Propagation::Stop
 				});
 				grid.attach(&label, c as i32, y, 1, 1);

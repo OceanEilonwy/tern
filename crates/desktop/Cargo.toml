@@ -8,14 +8,10 @@ publish = false
 [dependencies]
 tern-mail = { workspace = true }
 tern-rules = { workspace = true }
-tern-html = { workspace = true }
 tern-compose = { workspace = true }
 tern-demo = { workspace = true }
-tern-tuta = { workspace = true }
 tern-cache = { workspace = true }
-tern-sync = { workspace = true }
 tern-app = { workspace = true }
-serde = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }
 toml = "=1.1.8"
@@ -23,7 +19,6 @@ gtk = { package = "gtk4", version = "0.11", features = ["v4_22"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_8"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync", "macros"] }
 oo7 = { version = "0.6", default-features = false, features = ["tokio", "native_crypto"] }
-base64 = { workspace = true }
 async-trait = "0.1.77"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 

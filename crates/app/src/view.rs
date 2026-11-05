@@ -312,12 +312,14 @@ pub struct SuggestionView {
 pub struct ComposerAttachment {
 	pub name: String,
 	pub size: String,
+	pub mime: String,
 	pub pending: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ComposerView {
+	pub id: u64,
 	/// Changes when this side puts new text in the fields; the text fields take it then.
 	pub revision: u64,
 	pub title: String,
@@ -329,6 +331,7 @@ pub struct ComposerView {
 	pub whole_label: Option<String>,
 	pub whole_text: Option<String>,
 	pub whole_included: bool,
+	pub whole_forward: bool,
 	pub attachments: Vec<ComposerAttachment>,
 	pub total: Option<String>,
 	pub sending: bool,
@@ -530,6 +533,8 @@ pub enum Update {
 	List { view: ListView },
 	Conversation { view: Option<ConversationView> },
 	Composer { view: Option<ComposerView> },
+	/// All of them, for a platform that shows several at once.
+	Composers { views: Vec<ComposerView> },
 	Search { view: SearchView },
 	Settings { view: SettingsView },
 	Rules { view: RulesView },
@@ -596,6 +601,10 @@ pub enum Action {
 	OpenLink { url: String },
 
 	Answer { mail: MailRef, kind: AnswerKind },
+	/// As `Answer`, with the lines the platform had selected in the mail.
+	AnswerPicked { mail: MailRef, kind: AnswerKind, picked: Option<String> },
+	/// The composer the actions after this one are for.
+	ComposeFocus { id: u64 },
 	EditDraft { mail: MailRef },
 	DiscardDraft { mail: MailRef },
 	ComposeNew,

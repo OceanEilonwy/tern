@@ -4,16 +4,15 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::glib;
-use tern_app::view::{Action, BlockKind, BlockView, CardView, ConversationView, MailRef};
-use tern_compose::Answer;
-use tern_html::Doc;
-use tern_mail::MailId;
+use tern_app::view::{Action, AnswerKind, BlockKind, BlockView, CardView, ConversationView};
+use tern_app::Engine;
 
-use crate::{attachments, composer, render, runtime, window::Ctx};
+use crate::{attachments, render, runtime, window::Ctx};
 
 /// How much narrower a card's body is than the conversation column: its margins and border.
 const CARD_INSET: i32 = 2 * 12 + 2;
@@ -293,28 +292,19 @@ impl Reader {
 			let edit = labeled("document-edit-symbolic", "Continue _Editing");
 			edit.add_css_class("suggested-action");
 			let discard = labeled("user-trash-symbolic", "_Discard");
-			let (weak, id) = (Rc::downgrade(self), s.id.clone());
-			edit.connect_clicked(move |_| {
-				if let Some(this) = weak.upgrade() {
-					let id = id.clone();
-					runtime::spawn_local(async move {
-						this.edit_draft(&id).await;
-					});
-				}
-			});
+			let (engine, id) = (self.ctx.engine.clone(), s.id.clone());
+			edit.connect_clicked(move |_| engine.send(Action::EditDraft { mail: id.clone() }));
 			let (engine, id) = (self.ctx.engine.clone(), s.id.clone());
 			discard.connect_clicked(move |_| engine.send(Action::DiscardDraft { mail: id.clone() }));
 			actions.append(&edit);
 			actions.append(&discard);
 		} else {
-			for (icon, label, answer) in [("tern-reply-symbolic", "_Reply", Answer::Reply), ("tern-reply-all-symbolic", "Reply _All", Answer::ReplyAll), ("tern-forward-symbolic", "_Forward", Answer::Forward)] {
+			for (icon, label, kind) in [("tern-reply-symbolic", "_Reply", AnswerKind::Reply), ("tern-reply-all-symbolic", "Reply _All", AnswerKind::ReplyAll), ("tern-forward-symbolic", "_Forward", AnswerKind::Forward)] {
 				let button = labeled(icon, label);
 				let (weak, c) = (Rc::downgrade(self), Rc::downgrade(&card));
 				button.connect_clicked(move |_| {
 					if let (Some(this), Some(card)) = (weak.upgrade(), c.upgrade()) {
-						runtime::spawn_local(async move {
-							this.answer_card(&card, answer).await;
-						});
+						this.answer_card(&card, kind);
 					}
 				});
 				actions.append(&button);
@@ -323,7 +313,7 @@ impl Reader {
 
 		let (engine, id) = (self.ctx.engine.clone(), s.id.clone());
 		card.header.connect_clicked(move |_| engine.send(Action::ToggleCard { id: id.clone() }));
-		connect_links(&card);
+		connect_links(&card, &self.ctx.engine);
 		card
 	}
 
@@ -400,7 +390,7 @@ impl Reader {
 			return;
 		}
 		card.generation.set(card.generation.get() + 1);
-		let rendered = render::render(&card.body, &blocks);
+		let rendered = render::render(&card.body, &blocks, &self.ctx.engine);
 		settle(&card.body);
 		*card.links.borrow_mut() = rendered.links;
 		*card.pictures.borrow_mut() = rendered.images;
@@ -437,58 +427,23 @@ impl Reader {
 		}
 	}
 
-	/// Opens a composer answering the current mail.
-	pub async fn answer(self: &Rc<Self>, answer: Answer) -> Option<Rc<composer::Composer>> {
-		let card = self.current_card()?;
-		self.answer_card(&card, answer).await
+	/// Opens a composer answering the current mail. Lines selected in it are what a reply answers.
+	pub fn answer(&self, kind: AnswerKind) {
+		if let Some(card) = self.current_card() {
+			self.answer_card(&card, kind);
+		}
 	}
 
-	async fn answer_card(self: &Rc<Self>, card: &Rc<Card>, answer: Answer) -> Option<Rc<composer::Composer>> {
-		let id = mail_id(&card.view.borrow().id);
-		if card.view.borrow().draft {
-			return None;
-		}
-		let (me, fetcher) = (self.ctx.backend()?.account(), self.ctx.fetcher()?);
-		// Lines selected in the mail are what a reply answers.
+	fn answer_card(&self, card: &Card, kind: AnswerKind) {
 		let picked = card.body.buffer().selection_bounds().map(|(start, end)| card.body.buffer().text(&start, &end, false).to_string());
-		let date = card.view.borrow().date.clone();
-		let (mail, doc) = self.opened_mail(fetcher, id).await?;
-		let fields = tern_compose::answer_fields(&mail, &doc.to_plain_text(), &date, answer, &me, picked.as_deref());
-		let forwarded = (answer == Answer::Forward).then(|| (mail.summary.id.clone(), mail.attachments.clone()));
-		Some(composer::Composer::open(&self.ctx, fields, forwarded))
+		self.ctx.engine.send(Action::AnswerPicked { mail: card.view.borrow().id.clone(), kind, picked });
 	}
 
-	/// Opens the current mail in a composer when it is a draft.
-	pub async fn edit_current_draft(self: &Rc<Self>) -> Option<Rc<composer::Composer>> {
-		let id = self.current().filter(|c| c.draft)?.id;
-		self.edit_draft(&id).await
-	}
-
-	async fn edit_draft(self: &Rc<Self>, id: &MailRef) -> Option<Rc<composer::Composer>> {
-		let id = mail_id(id);
-		let fetcher = self.ctx.fetcher()?;
-		// The quotes as the composer kept them, when it was this computer's.
-		let kept = self.ctx.cache().and_then(|c| c.draft_quote(&id).ok().flatten()).and_then(|json| serde_json::from_str(&json).ok());
-		let (mail, doc) = self.opened_mail(fetcher, id).await?;
-		let fields = tern_compose::draft_fields(&mail, &doc.to_plain_text(), kept);
-		Some(composer::Composer::open(&self.ctx, fields, None))
-	}
-
-	/// A mail in full, for the composer until it moves to the core.
-	async fn opened_mail(&self, fetcher: tern_sync::fetcher::Fetcher, id: MailId) -> Option<(tern_mail::Mail, Doc)> {
-		let result = runtime::run(async move {
-			let mail = fetcher.mail(&id).await?;
-			let doc = Doc::parse(&mail.body_html);
-			Ok::<_, tern_mail::Error>((mail, doc))
-		})
-		.await;
-		match result {
-			Ok(opened) => Some(opened),
-			Err(e) => {
-				self.ctx.error(&e);
-				None
-			},
-		}
+	/// Opens the current mail in a composer when it is a draft, and says whether it is.
+	pub fn edit_current_draft(&self) -> bool {
+		let Some(card) = self.current().filter(|c| c.draft) else { return false };
+		self.ctx.engine.send(Action::EditDraft { mail: card.id });
+		true
 	}
 
 	pub fn web_url(&self) -> Option<String> {
@@ -501,10 +456,6 @@ impl Reader {
 	}
 }
 
-fn mail_id(id: &MailRef) -> MailId {
-	MailId { list: id.list.clone(), element: id.element.clone() }
-}
-
 /// A text view outside a scrolled window keeps the height of its first layout, done before it
 /// knows its width, until asked again: ask once it has laid out the text at its real width.
 fn settle(body: &gtk::TextView) {
@@ -513,9 +464,10 @@ fn settle(body: &gtk::TextView) {
 }
 
 /// Clicking a link opens it; hovering shows where it goes.
-fn connect_links(card: &Rc<Card>) {
+fn connect_links(card: &Rc<Card>, engine: &Arc<Engine>) {
 	let click = gtk::GestureClick::new();
 	let c = Rc::downgrade(card);
+	let engine = engine.clone();
 	click.connect_released(move |gesture, n, x, y| {
 		let Some(card) = c.upgrade() else { return };
 		// A drag that selected text is not a click.
@@ -524,7 +476,7 @@ fn connect_links(card: &Rc<Card>) {
 		}
 		if let Some(url) = link_at(&card, x, y) {
 			gesture.set_state(gtk::EventSequenceState::Claimed);
-			render::open_uri(&card.body, &url);
+			engine.send(Action::OpenLink { url });
 		}
 	});
 	card.body.add_controller(click);
