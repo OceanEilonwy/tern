@@ -465,6 +465,8 @@ pub struct App {
 	resuming: bool,
 	/// The session to ask the server for again, for an account not yet connected.
 	saved_session: Option<String>,
+	/// Clean Up was asked for before anything was measured.
+	cleanup_waiting: bool,
 	device: &'static str,
 	host: Option<Arc<dyn Host>>,
 	on_screen: Option<Arc<Mutex<Option<FolderId>>>>,
@@ -678,6 +680,7 @@ impl App {
 			background_running: false,
 			resuming: false,
 			saved_session: None,
+			cleanup_waiting: false,
 			open_when_ready: None,
 			published: Published::default(),
 			revision: 1,
@@ -2615,6 +2618,7 @@ impl App {
 			},
 			Action::OpenCleanup => {
 				let Some(usage) = self.usage else {
+					self.cleanup_waiting = true;
 					self.measure();
 					return;
 				};
@@ -2746,6 +2750,9 @@ impl App {
 			move |app: &mut App| {
 				app.usage = Some(usage);
 				app.cleanup_offer = shown.then_some(usage.total);
+				if std::mem::take(&mut app.cleanup_waiting) {
+					app.sheet = Some(Sheet::Cleanup(usage));
+				}
 			}
 		});
 	}
@@ -2762,6 +2769,9 @@ impl App {
 				app.say(format!("Freed {}", format::size(freed)));
 				app.measure();
 				app.folder_changed(None);
+				if let Some(host) = &app.host {
+					host.mail_changed(None);
+				}
 				if let Some(session) = &app.session {
 					session.wake.notify_one();
 				}
@@ -3150,14 +3160,14 @@ impl App {
 				})
 			},
 			Sheet::Cleanup(usage) => {
-				let mut choices = vec![CleanupChoice { part: CleanupPart::Older, title: "Older mail".into(), detail: "Mail past Keep ready, and the text of older mail opened".into(), size: format::size(usage.older) }];
+				let mut choices = vec![CleanupChoice { part: CleanupPart::Older, title: "Older mail".into(), detail: "Mail past Keep ready, and the text of older mail opened".into(), size: format::size(usage.older), bytes: usage.older }];
 				if usage.vectors > 0 {
-					choices.push(CleanupChoice { part: CleanupPart::Vectors, title: "Meanings for search".into(), detail: "Worked out again as mail is synced".into(), size: format::size(usage.vectors) });
+					choices.push(CleanupChoice { part: CleanupPart::Vectors, title: "Meanings for search".into(), detail: "Worked out again as mail is synced".into(), size: format::size(usage.vectors), bytes: usage.vectors });
 				}
 				if usage.model > 0 {
-					choices.push(CleanupChoice { part: CleanupPart::Model, title: "Language model".into(), detail: "Downloaded again if search by meaning is turned on".into(), size: format::size(usage.model) });
+					choices.push(CleanupChoice { part: CleanupPart::Model, title: "Language model".into(), detail: "Downloaded again if search by meaning is turned on".into(), size: format::size(usage.model), bytes: usage.model });
 				}
-				choices.push(CleanupChoice { part: CleanupPart::All, title: "All mail".into(), detail: format!("Deletes all mail on this {}. It downloads again from Tuta.", self.device), size: format::size(usage.total) });
+				choices.push(CleanupChoice { part: CleanupPart::All, title: "All mail".into(), detail: format!("Deletes all mail on this {}. It downloads again from Tuta.", self.device), size: format::size(usage.total), bytes: usage.total });
 				Some(SheetView::Cleanup { total: format::size(usage.total), choices })
 			},
 			Sheet::Discard => Some(SheetView::Discard),

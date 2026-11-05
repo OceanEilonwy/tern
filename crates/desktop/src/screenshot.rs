@@ -3,7 +3,6 @@
 //! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|mailto|default-app|folders-fail|refresh-race|sign-out-race|draft|suggest|keys|arrows|busy|panes|search|focus-first|spam|rules|inbox|reading|invoice|newsletter|compose|spam-dialog|rule-edit|narrow|narrow-reading`
 //! (with `TERN_DEMO=1` for all but login, sign-in and mailto; these two type "demo" on the sign-in page). For dark mode add `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
 
-use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -325,7 +324,6 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		"cleanup" => {
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			sleep(500).await;
-			crate::cleanup::check(&win.ctx).await;
 			if mailbox.cleanup_offered() {
 				return Err("the demo's small cache is offered for cleanup".into());
 			}
@@ -333,31 +331,37 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if !mailbox.cleanup_offered() {
 				return Err("no broom past the limit".into());
 			}
-			let usage = crate::cleanup::measure(&win.ctx).await.ok_or("not signed in")?;
-			let freed = Rc::new(Cell::new(None));
-			let f = freed.clone();
-			let (dialog, all) = crate::cleanup::dialog(&win.ctx, usage, move |bytes| f.set(Some(bytes)));
-			dialog.present(Some(&win.ctx.window));
-			let older = format!("_Free {}", gtk::glib::format_size(usage.older));
-			if dialog.response_label("clean") != older || dialog.is_response_enabled("clean") != (usage.older > 0) {
-				return Err(format!("the button reads {:?} for {older:?}", dialog.response_label("clean")));
+			win.ctx.engine.send(tern_app::view::Action::OpenCleanup);
+			wait_for(|| win.ctx.cleanup.borrow().is_some()).await;
+			let (dialog, all) = win.ctx.cleanup.borrow().clone().ok_or("Clean Up did not open")?;
+			if !dialog.response_label("clean").starts_with("_Free ") {
+				return Err(format!("the button reads {:?}", dialog.response_label("clean")));
 			}
 			all.set_active(true);
 			if dialog.response_label("clean") != "_Delete All Mail" || dialog.response_appearance("clean") != adw::ResponseAppearance::Destructive || !dialog.is_response_enabled("clean") {
 				return Err(format!("with All Mail ticked the button reads {:?}", dialog.response_label("clean")));
 			}
 			dialog.emit_by_name::<()>("response", &[&"clean"]);
-			dialog.force_close();
-			wait_for(|| freed.get().is_some()).await;
+			wait_for(|| win.ctx.cleanup.borrow().is_none()).await;
+			if win.ctx.cleanup.borrow().is_some() {
+				return Err("Clean Up stayed open".into());
+			}
 			let cache = win.ctx.cache().ok_or("no cache")?;
-			wait_for(|| mailbox.store.n_items() > 0).await;
-			let inbox = cache.folders().map_err(|e| e.to_string())?.into_iter().find(|f| f.kind == tern_mail::FolderKind::Inbox).ok_or("no inbox")?;
-			if cache.count(&inbox.id).map_err(|e| e.to_string())? == 0 {
+			let inbox = || cache.folders().ok()?.into_iter().find(|f| f.kind == tern_mail::FolderKind::Inbox).and_then(|f| cache.count(&f.id).ok());
+			wait_for(|| inbox().is_some_and(|n| n > 0) && mailbox.store.n_items() > 0).await;
+			if !inbox().is_some_and(|n| n > 0) {
 				return Err("the Inbox did not fetch again".into());
 			}
 			win.ctx.offer_cleanup(Some("1.3 GB"));
-			let (dialog, _) = crate::cleanup::dialog(&win.ctx, crate::cleanup::Usage { total: 1_300_000_000, older: 940_000_000, vectors: 210_000_000, model: 30_000_000 }, |_| {});
-			dialog.present(Some(&win.ctx.window));
+			let choice = |part, title: &str, detail: &str, size: &str, bytes| tern_app::view::CleanupChoice { part, title: title.into(), detail: detail.into(), size: size.into(), bytes };
+			use tern_app::view::CleanupPart as Part;
+			let choices = [
+				choice(Part::Older, "Older mail", "Mail past Keep ready, and the text of older mail opened", "940 MB", 940_000_000),
+				choice(Part::Vectors, "Meanings for search", "Worked out again as mail is synced", "210 MB", 210_000_000),
+				choice(Part::Model, "Language model", "Downloaded again if search by meaning is turned on", "30 MB", 30_000_000),
+				choice(Part::All, "All mail", "Deletes all mail on this computer. It downloads again from Tuta.", "1.3 GB", 1_300_000_000),
+			];
+			crate::cleanup::dialog(&win.ctx, "1.3 GB", &choices).0.present(Some(&win.ctx.window));
 			Ok(())
 		}
 		// Typing in To suggests contacts and people written to.

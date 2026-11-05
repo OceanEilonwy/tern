@@ -19,7 +19,7 @@ use crate::reader::Reader;
 use crate::activity::Word;
 use crate::search::{self, Searching};
 use crate::layout::Layout;
-use crate::{cleanup, composer, format, grip, runtime, spam, window::Ctx};
+use crate::{composer, format, grip, runtime, spam, window::Ctx};
 
 /// Conversations taken from the cache at a time.
 const ROWS: usize = 100;
@@ -769,10 +769,7 @@ impl Mailbox {
 			("focus-list", |m| m.focus_list()),
 			("toggle-folders", |m| m.toggle_rail()),
 			("search", |m| m.start_search()),
-			("clean-up", |m| {
-				let ctx = m.ctx.clone();
-				cleanup::open(&m.ctx, m.ctx.window.upcast_ref(), move |freed| ctx.toast(&cleanup::freed_toast(freed)));
-			}),
+			("clean-up", |m| m.ctx.engine.send(tern_app::view::Action::OpenCleanup)),
 		];
 		for (name, f) in entries {
 			let action = gio::SimpleAction::new(name, None);

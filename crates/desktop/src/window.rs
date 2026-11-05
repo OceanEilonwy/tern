@@ -5,9 +5,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
-use gtk::gio;
+use gtk::{gio, glib};
 use tern_app::settings::Settings;
-use tern_app::view::{Action, ChoiceView, ConnectionKind, Effect, RuleEditorView, RulesView, Screen, SettingsView, ShellView, Update};
+use tern_app::view::{Action, ChoiceView, ConnectionKind, Effect, RuleEditorView, RulesView, Screen, SettingsView, SheetView, ShellView, SnackView, Update};
 use tern_app::{Engine, EngineListener, Host, Options, SecretStore, SessionParts};
 use tern_cache::Cache;
 use tern_compose::Fields;
@@ -38,6 +38,12 @@ pub struct Ctx {
 	cache: Rc<RefCell<Option<Arc<Cache>>>>,
 	fetcher: Rc<RefCell<Option<Fetcher>>>,
 	pub engine: Arc<Engine>,
+	/// Preferences, when open: what Clean Up opens over, and where it says it is done.
+	preferences: Rc<RefCell<Option<glib::WeakRef<adw::PreferencesDialog>>>>,
+	/// Clean Up, while open, with its tick for all mail.
+	pub cleanup: Rc<RefCell<Option<(adw::AlertDialog, gtk::CheckButton)>>>,
+	/// The last message the core gave, so it is said once.
+	said: Rc<Cell<u64>>,
 	/// What the core last said about the settings.
 	settings_view: Rc<RefCell<Option<SettingsView>>>,
 	on_settings: Rc<RefCell<Option<SettingsHook>>>,
@@ -107,6 +113,41 @@ impl Ctx {
 			f(view.as_ref());
 		}
 		*self.rule_editor_view.borrow_mut() = view;
+	}
+
+	/// A message from the core, wherever the person is looking.
+	fn say(&self, snack: &SnackView) {
+		if self.said.replace(snack.id) == snack.id {
+			return;
+		}
+		match self.open_preferences() {
+			Some(preferences) => preferences.add_toast(adw::Toast::new(&snack.text)),
+			None => self.toast(&snack.text),
+		}
+		self.engine.send(Action::SnackGone { id: snack.id });
+	}
+
+	fn open_preferences(&self) -> Option<adw::PreferencesDialog> {
+		self.preferences.borrow().as_ref().and_then(|d| d.upgrade()).filter(|d| d.is_mapped())
+	}
+
+	/// Clean Up opens when the core offers it, and goes when the core has finished with it.
+	fn show_sheet(&self, view: Option<SheetView>) {
+		match view {
+			Some(SheetView::Cleanup { total, choices }) => {
+				let (dialog, all) = cleanup::dialog(self, &total, &choices);
+				match self.open_preferences() {
+					Some(preferences) => dialog.present(Some(&preferences)),
+					None => dialog.present(Some(&self.window)),
+				}
+				*self.cleanup.borrow_mut() = Some((dialog, all));
+			},
+			_ => {
+				if let Some((dialog, _)) = self.cleanup.borrow_mut().take() {
+					dialog.force_close();
+				}
+			},
+		}
 	}
 
 	fn show_settings(&self, view: SettingsView) {
@@ -210,6 +251,9 @@ impl Window {
 			window: window.clone(),
 			toasts: toasts.clone(),
 			engine: engine.clone(),
+			preferences: Rc::default(),
+			cleanup: Rc::default(),
+			said: Rc::default(),
 			settings_view: Rc::default(),
 			on_settings: Rc::default(),
 			on_rules: Rc::default(),
@@ -325,6 +369,7 @@ impl Window {
 					}
 				},
 				Update::Settings { view } => self.ctx.show_settings(view),
+				Update::Sheet { view } => self.ctx.show_sheet(view),
 				Update::Rules { view } => self.ctx.show_rules(view),
 				Update::RuleEditor { view } => self.ctx.show_rule_editor(view),
 				_ => {},
@@ -368,6 +413,9 @@ impl Window {
 			},
 		}
 		self.ctx.offer_cleanup(view.cleanup_offer.as_deref());
+		if let Some(snack) = &view.snack {
+			self.ctx.say(snack);
+		}
 	}
 
 	fn session_changed(self: &Rc<Self>, parts: Option<SessionParts>) {
@@ -439,7 +487,7 @@ pub fn preferences_dialog(ctx: &Ctx) -> (adw::PreferencesDialog, Rc<rule_editor:
 	// Tall enough for a rule's page without scrolling.
 	let dialog = adw::PreferencesDialog::builder().content_height(680).build();
 	let page = adw::PreferencesPage::new();
-	let search = search_group(ctx);
+	let (search, meaning) = search_group(ctx);
 	let rules = rule_editor::Rules::new(ctx, &dialog);
 	let group = adw::PreferencesGroup::builder()
 		.title("Offline Mail")
@@ -458,7 +506,22 @@ pub fn preferences_dialog(ctx: &Ctx) -> (adw::PreferencesDialog, Rc<rule_editor:
 	});
 	group.add(&forget);
 	group.add(&choice_row(ctx, "Offer Cleanup Past", Some("The sidebar offers to clean up once mail here takes more than this."), &view.cleanup_limits, |value| Action::SetCleanupLimit { value }));
-	group.add(&storage_row(ctx, &dialog));
+	let storage = storage_row(ctx, &view.storage_line);
+	group.add(&storage);
+	// The download's progress, the switch going back off if it fails, and the size as it changes.
+	let (meaning, storage) = (meaning.downgrade(), storage.downgrade());
+	ctx.connect_settings(move |view| {
+		if let Some(row) = meaning.upgrade() {
+			row.set_subtitle(&view.semantic_line);
+			if row.is_active() != view.semantic {
+				row.set_active(view.semantic);
+			}
+		}
+		if let Some(row) = storage.upgrade() {
+			row.set_subtitle(&view.storage_line);
+		}
+	});
+	*ctx.preferences.borrow_mut() = Some(dialog.downgrade());
 	page.add(&group);
 	page.add(&search);
 	page.add(&default_app::group());
@@ -492,55 +555,24 @@ fn choice_row(ctx: &Ctx, title: &str, subtitle: Option<&str>, choices: &[ChoiceV
 }
 
 /// How much Tern takes on disk, with Clean Up always to hand whatever the size.
-fn storage_row(ctx: &Ctx, dialog: &adw::PreferencesDialog) -> adw::ActionRow {
+fn storage_row(ctx: &Ctx, line: &str) -> adw::ActionRow {
 	let button = gtk::Button::builder().label("Clean Up…").valign(gtk::Align::Center).build();
-	let row = adw::ActionRow::builder().title("Storage").subtitle("Measuring…").build();
+	let row = adw::ActionRow::builder().title("Storage").subtitle(line).visible(ctx.cache().is_some()).build();
 	row.add_suffix(&button);
-	let measure = {
-		let (ctx, row) = (ctx.clone(), row.clone());
-		move || {
-			let (ctx, row) = (ctx.clone(), row.clone());
-			runtime::spawn_local(async move {
-				match cleanup::measure(&ctx).await {
-					Some(usage) => row.set_subtitle(&cleanup::storage_text(usage)),
-					None => row.set_visible(false),
-				}
-			});
-		}
-	};
-	measure();
-	let (ctx, dialog) = (ctx.clone(), dialog.clone());
-	button.connect_clicked(move |_| {
-		let (d, measure) = (dialog.clone(), measure.clone());
-		cleanup::open(&ctx, dialog.upcast_ref(), move |freed| {
-			d.add_toast(adw::Toast::new(&cleanup::freed_toast(freed)));
-			measure();
-		});
-	});
+	let engine = ctx.engine.clone();
+	button.connect_clicked(move |_| engine.send(Action::OpenCleanup));
 	row
 }
 
 /// Search by meaning is off until asked for, as it downloads a model once.
-fn search_group(ctx: &Ctx) -> adw::PreferencesGroup {
+fn search_group(ctx: &Ctx) -> (adw::PreferencesGroup, adw::SwitchRow) {
 	let group = adw::PreferencesGroup::builder().title("Search").description("Search looks through the mail kept on this computer.").build();
 	let view = ctx.settings_view().unwrap_or_else(|| panic!("the core publishes settings at once"));
 	let row = adw::SwitchRow::builder().title("Search by Meaning").subtitle(view.semantic_line).active(view.semantic).build();
-	row.connect_active_notify({
-		let ctx = ctx.clone();
-		move |row| ctx.engine.send(Action::SetSemantic { on: row.is_active() })
-	});
-	// The download's progress, and the switch going back off if it fails.
-	let shown = row.downgrade();
-	ctx.connect_settings(move |view| {
-		if let Some(row) = shown.upgrade() {
-			row.set_subtitle(&view.semantic_line);
-			if row.is_active() != view.semantic {
-				row.set_active(view.semantic);
-			}
-		}
-	});
+	let engine = ctx.engine.clone();
+	row.connect_active_notify(move |row| engine.send(Action::SetSemantic { on: row.is_active() }));
 	group.add(&row);
-	group
+	(group, row)
 }
 
 fn about_dialog() -> adw::AboutDialog {
