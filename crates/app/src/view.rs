@@ -493,6 +493,7 @@ pub struct CleanupChoice {
 	pub title: String,
 	pub detail: String,
 	pub size: String,
+	pub bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
