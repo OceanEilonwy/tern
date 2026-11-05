@@ -45,6 +45,8 @@ pub struct Composer {
 	reading: Cell<usize>,
 	/// Drawing what the core said, which is not the person doing anything.
 	drawing: Cell<bool>,
+	/// How many problems have been shown, for the screenshot scenes.
+	toasts_shown: Cell<u32>,
 	/// The core has finished with it, so it may close.
 	done: Cell<bool>,
 }
@@ -187,6 +189,7 @@ impl Composer {
 			shown: RefCell::default(),
 			reading: Cell::new(0),
 			drawing: Cell::new(false),
+			toasts_shown: Cell::new(0),
 			done: Cell::new(false),
 		});
 
@@ -245,8 +248,7 @@ impl Composer {
 		let weak = Rc::downgrade(&this);
 		discard.connect_clicked(move |_| {
 			if let Some(this) = weak.upgrade() {
-				this.ctx.ask_discard_from(this.id, &this.window);
-				this.act(Action::ComposeDiscard { text: this.text() });
+				this.discard();
 			}
 		});
 		this.connect_drop(&content);
@@ -333,10 +335,13 @@ impl Composer {
 				entry.grab_focus();
 			}
 		}
-		if let Some(error) = view.error.as_ref().filter(|e| before.as_ref().and_then(|b| b.error.as_ref()) != Some(*e)) {
+		// Trying again and getting the same answer is worth saying again.
+		let told = before.as_ref().is_some_and(|b| b.error == view.error && b.tries == view.tries);
+		if let Some(error) = view.error.as_ref().filter(|_| !told) {
 			let toast = adw::Toast::new(error);
 			toast.set_timeout(5);
 			self.toasts.add_toast(toast);
+			self.toasts_shown.set(self.toasts_shown.get() + 1);
 		}
 		for (field, suggest) in &self.suggestions {
 			suggest.show(if view.suggest_field == Some(*field) { &view.suggestions } else { &[] });
@@ -354,7 +359,8 @@ impl Composer {
 	/// The core has finished with this composer.
 	pub fn finish(&self) {
 		self.done.set(true);
-		self.window.close();
+		// Closing would only close a dialog open over it, such as the one asking to discard.
+		self.window.destroy();
 	}
 
 	fn show_cc(&self, show: bool) {
@@ -531,6 +537,11 @@ impl Composer {
 		}
 	}
 
+	/// For the screenshot scenes: how many problems have been shown.
+	pub fn toasts_shown(&self) -> u32 {
+		self.toasts_shown.get()
+	}
+
 	/// For the screenshot scenes: types into To.
 	pub fn type_to(&self, text: &str) {
 		self.to.grab_focus();
@@ -633,5 +644,16 @@ impl Composer {
 
 	pub fn send(&self) {
 		self.act(Action::ComposeSend { text: self.text() });
+	}
+
+	/// Throws the mail away, once the core has asked if it is worth asking.
+	pub fn discard(&self) {
+		self.ctx.ask_discard_from(self.id, &self.window);
+		self.act(Action::ComposeDiscard { text: self.text() });
+	}
+
+	/// For the screenshot scenes: adds files, as dragging them in does.
+	pub fn drop_files(self: &Rc<Self>, files: Vec<gio::File>) {
+		self.add_files(files);
 	}
 }

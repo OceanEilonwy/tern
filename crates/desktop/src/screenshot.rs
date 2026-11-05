@@ -562,7 +562,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			mailbox.type_search("zzqx")?;
 			wait_for(|| mailbox.status().is_some()).await;
-			if mailbox.status().as_deref() != Some("No Matches") {
+			if mailbox.status().as_deref() != Some("No matches") {
 				return Err(format!("searching nonsense shows {:?}", mailbox.status()));
 			}
 			mailbox.escape_search();
@@ -628,6 +628,185 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			Ok(())
 		}
+		// Labels: from a conversation's menu, on its row and in its heading; one made from the dialog;
+		// browsed from the sidebar across folders.
+		"labels" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			let i = mailbox.listed().iter().position(|r| r.subject.contains("invoice")).ok_or("no invoice")? as u32;
+			mailbox.open_row_menu(i, None).ok_or("no menu")?.popdown();
+			mailbox.row_action("labels")?;
+			wait_for(|| win.ctx.label_picker.borrow().as_ref().is_some_and(|p| !p.ticks().is_empty())).await;
+			let picker = win.ctx.label_picker.borrow().clone().ok_or("no labels dialog")?;
+			picker.toggle("Travel");
+			let chips = || mailbox.listed().iter().position(|r| r.subject.contains("invoice")).map_or(Vec::new(), |i| mailbox.row_chips(i as u32));
+			wait_for(|| chips() == ["Travel"]).await;
+			if chips() != ["Travel"] {
+				return Err(format!("the row shows {:?}", chips()));
+			}
+			picker.new_name.set_text("Bills");
+			picker.new_name.emit_activate();
+			wait_for(|| picker.ticks().iter().any(|(n, on)| n == "Bills" && *on)).await;
+			if !picker.ticks().iter().any(|(n, on)| n == "Bills" && *on) {
+				return Err(format!("a new label left {:?}", picker.ticks()));
+			}
+			picker.dialog.close();
+			wait_for(|| win.ctx.label_picker.borrow().is_none()).await;
+			drop(picker);
+			mailbox.select_by_subject("invoice");
+			wait_for(|| mailbox.reader.opened().is_some()).await;
+			gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.labels", None).map_err(|e| e.to_string())?;
+			wait_for(|| win.ctx.label_picker.borrow().is_some()).await;
+			if win.ctx.label_picker.borrow().is_none() {
+				return Err("the conversation's menu opened no labels".into());
+			}
+			let open = win.ctx.label_picker.borrow().clone();
+			if let Some(open) = open {
+				open.dialog.close();
+			}
+			wait_for(|| win.ctx.label_picker.borrow().is_none()).await;
+			wait_for(|| mailbox.select_label("Bills")).await;
+			wait_for(|| mailbox.shown().0 == "Bills" && mailbox.store.n_items() == 1).await;
+			if mailbox.shown() != ("Bills".to_string(), vec!["Your invoice for October".to_string()]) {
+				return Err(format!("browsing Bills shows {:?}", mailbox.shown()));
+			}
+			mailbox.select_folder(FolderKind::Inbox);
+			wait_for(|| mailbox.shown().0 == "Inbox" && mailbox.store.n_items() == 7).await;
+			if mailbox.shown().0 != "Inbox" {
+				return Err(format!("the Inbox shows {:?}", mailbox.shown()));
+			}
+			Ok(())
+		}
+		// Opening an attachment hands the file over, saving copies it, and files dragged in attach.
+		"attachments" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			mailbox.select_by_subject("invoice");
+			wait_for(|| mailbox.reader.opened().is_some_and(|c| !c.attachments.is_empty())).await;
+			let card = mailbox.reader.opened().ok_or("the mail did not open")?;
+			let att = card.attachments.first().ok_or("no attachment")?.clone();
+			win.ctx.engine.send(tern_app::view::Action::OpenAttachment { mail: card.id.clone(), attachment: att.id.clone() });
+			wait_for(|| !win.ctx.handed_over.borrow().is_empty()).await;
+			let path = win.ctx.handed_over.borrow().first().cloned().ok_or("nothing was handed over")?;
+			let opened = std::fs::read(&path).map_err(|e| e.to_string())?;
+			if opened.is_empty() || !path.ends_with(&att.name) {
+				return Err(format!("handed over {path}, {} bytes", opened.len()));
+			}
+			std::fs::create_dir_all(crate::paths().config_dir()).map_err(|e| e.to_string())?;
+			win.ctx.engine.send(tern_app::view::Action::SaveAttachment { mail: card.id, attachment: att.id });
+			let saved = crate::paths().config_dir().join(&att.name);
+			wait_for(|| std::fs::read(&saved).ok().as_deref() == Some(opened.as_slice())).await;
+			if std::fs::read(&saved).ok().as_deref() != Some(opened.as_slice()) {
+				return Err("the saved file is not the attachment".into());
+			}
+			let composer = composing(win, Fields::default()).await.ok_or("no composer")?;
+			let file = crate::paths().config_dir().join("dropped.txt");
+			std::fs::write(&file, "dropped").map_err(|e| e.to_string())?;
+			composer.drop_files(vec![gtk::gio::File::for_path(&file)]);
+			let attached = || composer.view().is_some_and(|v| v.attachments.iter().any(|a| a.name == "dropped.txt" && a.mime == "text/plain"));
+			wait_for(attached).await;
+			if !attached() {
+				return Err(format!("a dropped file left {:?}", composer.view().map(|v| v.attachments)));
+			}
+			Ok(())
+		}
+		// Discard asks first; Cancel keeps the mail, and Discard takes its saved draft with it.
+		"discard" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			let empty = composing(win, Fields::default()).await.ok_or("no composer")?;
+			empty.discard();
+			wait_for(|| !empty.window.is_visible()).await;
+			if win.ctx.discard_dialog().is_some() || empty.window.is_visible() {
+				return Err("an empty message asked before going".into());
+			}
+			let fields = Fields { to: "mia@tuta.com".into(), subject: "Second thoughts".into(), body: "On reflection".into(), ..Default::default() };
+			let composer = composing(win, fields).await.ok_or("no composer")?;
+			// Written since it opened, or closing has nothing to keep.
+			composer.type_body("On further reflection");
+			composer.window.close();
+			wait_for(|| !composer.window.is_visible()).await;
+			mailbox.select_folder(FolderKind::Drafts);
+			wait_for(|| mailbox.select_by_subject("Second thoughts")).await;
+			wait_for(|| mailbox.reader.opened().is_some_and(|c| c.draft)).await;
+			let again = edited(win, &mailbox).await.ok_or("the draft did not open")?;
+			again.discard();
+			wait_for(|| win.ctx.discard_dialog().is_some()).await;
+			let dialog = win.ctx.discard_dialog().ok_or("Discard did not ask")?;
+			dialog.emit_by_name::<()>("response", &[&"cancel"]);
+			wait_for(|| win.ctx.discard_dialog().is_none()).await;
+			if !again.window.is_visible() || again.view().is_none() {
+				return Err("Cancel threw the message away".into());
+			}
+			again.discard();
+			wait_for(|| win.ctx.discard_dialog().is_some()).await;
+			let dialog = win.ctx.discard_dialog().ok_or("Discard did not ask again")?;
+			dialog.emit_by_name::<()>("response", &[&"discard"]);
+			wait_for(|| !again.window.is_visible() && mailbox.store.n_items() == 0).await;
+			if again.window.is_visible() || mailbox.store.n_items() != 0 {
+				return Err(format!("after Discard the composer shows: {}, {} drafts", again.window.is_visible(), mailbox.store.n_items()));
+			}
+			Ok(())
+		}
+		// Closing the window with a composer open only hides it, on the same core; it comes back when
+		// asked for, and goes when the last composer does.
+		"reopen" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			let composer = composing(win, Fields::default()).await.ok_or("no composer")?;
+			win.ctx.window.close();
+			wait_for(|| !win.ctx.window.is_visible()).await;
+			if win.ctx.window.is_visible() || !composer.window.is_visible() {
+				return Err(format!("closing left the window {} and the composer {}", win.ctx.window.is_visible(), composer.window.is_visible()));
+			}
+			app.activate();
+			wait_for(|| win.ctx.window.is_visible()).await;
+			if !win.ctx.window.is_visible() {
+				return Err("asking for the window did not bring it back".into());
+			}
+			win.ctx.window.close();
+			wait_for(|| !win.ctx.window.is_visible()).await;
+			// The window goes with the last composer and the app with it, leaving no moment to take a
+			// picture: this stands for one, and is taken back if the app is still here.
+			let marker = self::scene().map(|(path, _)| path).ok_or("no scene")?;
+			std::fs::write(&marker, b"checked").map_err(|e| e.to_string())?;
+			composer.discard();
+			sleep(3000).await;
+			let _ = std::fs::remove_file(&marker);
+			Err("the app went on after its last window closed".into())
+		}
+		// A narrow window's content fits it: the buttons that do not fit give way to the menus, and a
+		// picture holds no pane wider than the window's least.
+		"narrow-fits" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| win.ctx.activity.word().is_none()).await;
+			if mailbox.narrowest_parts().0 > 360 {
+				return Err(format!("the list needs {} px, the window's least is 360", mailbox.narrowest_parts().0));
+			}
+			mailbox.select_by_subject("Lunch");
+			wait_for(|| mailbox.reader.opened().is_some()).await;
+			wait_for(|| mailbox.narrowest_parts().1 <= 360).await;
+			if mailbox.narrowest_parts().1 > 360 {
+				return Err(format!("the conversation needs {} px, the window's least is 360", mailbox.narrowest_parts().1));
+			}
+			mailbox.select_by_subject("Photos");
+			wait_for(|| mailbox.reader.opened().is_some_and(|c| c.subject.contains("Photos"))).await;
+			sleep(500).await;
+			if mailbox.narrowest_parts().1 > 360 {
+				return Err(format!("a picture holds the conversation at {} px", mailbox.narrowest_parts().1));
+			}
+			Ok(())
+		}
+		// Trying to send again with the same problem says so again.
+		"repeat-error" => {
+			wait_for(|| mailbox.store.n_items() > 0).await;
+			let fields = Fields { to: "not an address".into(), subject: "One".into(), body: "Hi".into(), ..Default::default() };
+			let composer = composing(win, fields).await.ok_or("no composer")?;
+			composer.send();
+			wait_for(|| composer.toasts_shown() == 1).await;
+			composer.send();
+			wait_for(|| composer.toasts_shown() == 2).await;
+			if composer.toasts_shown() != 2 {
+				return Err(format!("{} toasts for two tries", composer.toasts_shown()));
+			}
+			Ok(())
+		}
 		// A conversation shows newest first. Its menu pins it, marks it read and unread, and opens
 		// Move to Spam.
 		"menu" => {
@@ -684,7 +863,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 
 			let menu = mailbox.open_row_menu(find(&last.key)? as u32, None).ok_or("no menu")?;
-			if labels(&menu) != ["Un_pin", "Mark as _Unread", "Move to _Spam…", "Move to _Trash"] {
+			if labels(&menu) != ["Un_pin", "Mark as _Unread", "_Labels…", "Move to _Spam…", "Move to _Trash"] {
 				return Err(format!("the menu of a pinned read conversation: {:?}", labels(&menu)));
 			}
 
@@ -841,7 +1020,7 @@ pub fn drive(win: Rc<Window>) {
 	if scene == "sign-in" {
 		return sign_in(Rc::downgrade(&win), path);
 	}
-	if matches!(scene.as_str(), "mailto" | "default-app" | "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first" | "spam" | "rules" | "menu" | "from" | "rule-edit" | "quote" | "cleanup") {
+	if matches!(scene.as_str(), "labels" | "attachments" | "discard" | "reopen" | "narrow-fits" | "repeat-error" | "mailto" | "default-app" | "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first" | "spam" | "rules" | "menu" | "from" | "rule-edit" | "quote" | "cleanup") {
 		glib::spawn_future_local(async move {
 			if let Err(e) = check(&win, &scene).await {
 				// No picture, so the check fails.

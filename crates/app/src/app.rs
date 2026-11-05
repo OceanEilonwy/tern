@@ -33,7 +33,7 @@ use tokio::sync::Notify;
 
 use crate::doc::{block_text, flatten, Picture};
 use crate::view::*;
-use crate::{EngineListener, Host, CACHE_KEY_SECRET, SESSION_SECRET, Options, SecretError, SecretStore, SessionParts};
+use crate::{EngineListener, CACHE_KEY_SECRET, SESSION_SECRET, Options, SecretError, SecretStore, SessionParts};
 
 /// Conversations listed before scrolling asks for more.
 const ROWS: usize = 100;
@@ -330,6 +330,7 @@ struct Comp {
 	sending: bool,
 	saving: bool,
 	error: Option<String>,
+	tries: u32,
 	bad: (bool, bool, bool),
 	suggest: Option<(AddressField, Vec<Address>)>,
 }
@@ -344,6 +345,8 @@ struct SearchState {
 	revision: u64,
 	query: String,
 	rule: Option<String>,
+	/// Browsing a label instead of searching: its own id, and its name.
+	label: Option<(String, String)>,
 	searching: bool,
 	generation: u64,
 	rows: Vec<ThreadRow>,
@@ -458,7 +461,7 @@ pub struct App {
 	/// Clean Up was asked for before anything was measured.
 	cleanup_waiting: bool,
 	device: &'static str,
-	host: Option<Arc<dyn Host>>,
+	parts: Arc<Mutex<Option<SessionParts>>>,
 	retry_hint: &'static str,
 	follow_neighbour: bool,
 	lone_draft_composes: bool,
@@ -623,7 +626,7 @@ impl App {
 	pub fn new(tx: UnboundedSender<Msg>, listener: Arc<dyn EngineListener>, secrets: Arc<dyn SecretStore>, runtime: tokio::runtime::Handle, paths: Paths, options: Options) -> App {
 		App {
 			device: options.device,
-			host: options.host,
+			parts: Arc::default(),
 			retry_hint: options.retry_hint,
 			follow_neighbour: options.follow_neighbour,
 			lone_draft_composes: options.lone_draft_composes,
@@ -682,6 +685,10 @@ impl App {
 		}
 	}
 
+	pub fn parts_handle(&self) -> Arc<Mutex<Option<SessionParts>>> {
+		self.parts.clone()
+	}
+
 	pub fn settings_handle(&self) -> Arc<Mutex<Settings>> {
 		self.settings.clone()
 	}
@@ -729,11 +736,9 @@ impl App {
 		}
 	}
 
-	/// Tells a platform still using the session's parts directly that they changed.
-	fn tell_host_session(&self) {
-		if let Some(host) = &self.host {
-			host.session(self.session.as_ref().map(|s| SessionParts { backend: s.backend.clone(), cache: s.cache.clone(), fetcher: s.fetcher.clone() }));
-		}
+	/// Keeps what tests look behind the views at up to date.
+	fn share_session(&self) {
+		*self.parts.lock().unwrap_or_else(|p| p.into_inner()) = self.session.as_ref().map(|s| SessionParts { backend: s.backend.clone(), cache: s.cache.clone() });
 	}
 
 	fn settings(&self) -> Settings {
@@ -934,7 +939,7 @@ impl App {
 		session.fetcher = Fetcher::new(backend, session.cache.clone(), self.runtime.clone(), Tuning::DEFAULT);
 		session.connected = true;
 		self.note_fine();
-		self.tell_host_session();
+		self.share_session();
 		self.start_sync();
 		self.run_background();
 	}
@@ -964,7 +969,7 @@ impl App {
 		self.signin.busy = false;
 		self.signin.error = None;
 		self.rules = rules::load(&self.paths);
-		self.tell_host_session();
+		self.share_session();
 		match cache.folders() {
 			Ok(folders) => self.show_folders(folders),
 			Err(e) => log::warn!("could not read folders: {e}"),
@@ -1034,7 +1039,7 @@ impl App {
 		self.generation += 1;
 		if let Some(session) = self.session.take() {
 			session.fetcher.stop();
-			self.tell_host_session();
+			self.share_session();
 		}
 		self.folders.clear();
 		self.labels.clear();
@@ -1811,7 +1816,8 @@ impl App {
 		for (id, sets) in &changed {
 			let _ = cache.set_mail_sets(id, sets);
 		}
-		self.reload_list();
+		// The open conversation's cards, and a label's or a search's list, change with it.
+		self.folder_changed(None);
 		let ids: Vec<MailId> = changed.into_iter().map(|(id, _)| id).collect();
 		self.start_work(Word::Moving);
 		self.task(async move {
@@ -1934,7 +1940,7 @@ impl App {
 		let show_cc = !fields.cc.is_empty() || !fields.bcc.is_empty();
 		let saved = snapshot(&fields);
 		self.focus = Some(id);
-		self.comps.push(Comp { id, fields, saved, addresses, revision, show_cc, pending: Vec::new(), sending: false, saving: false, error: None, bad: (false, false, false), suggest: None });
+		self.comps.push(Comp { id, fields, saved, addresses, revision, show_cc, pending: Vec::new(), sending: false, saving: false, error: None, tries: 0, bad: (false, false, false), suggest: None });
 		self.push(Screen::Composer);
 	}
 
@@ -2034,6 +2040,7 @@ impl App {
 
 	fn compose_send(&mut self, text: ComposeText) {
 		let Some(comp) = self.comps.iter_mut().find(|c| Some(c.id) == self.focus) else { return };
+		comp.tries += 1;
 		if comp.sending || !comp.pending.is_empty() {
 			if !comp.pending.is_empty() {
 				comp.error = Some("Attachments are still downloading".into());
@@ -2242,8 +2249,9 @@ impl App {
 		search.generation += 1;
 		let generation = search.generation;
 		let rule = search.rule.as_deref().and_then(|line| parse(line).ok());
+		let label = search.label.as_ref().map(|(own, _)| own.clone());
 		let query = Query::parse(&search.query);
-		if query.is_empty() && rule.is_none() {
+		if query.is_empty() && rule.is_none() && label.is_none() {
 			search.rows.clear();
 			search.folders.clear();
 			search.searching = false;
@@ -2252,9 +2260,10 @@ impl App {
 		search.searching = true;
 		let model = self.meaning.clone();
 		self.task(async move {
-			let hits = match rule {
-				Some(rule) => cache.rule_hits(&rule, RESULTS).unwrap_or_default(),
-				None => {
+			let hits = match (rule, label) {
+				(_, Some(label)) => cache.label_hits(&label, RESULTS).unwrap_or_default(),
+				(Some(rule), None) => cache.rule_hits(&rule, RESULTS).unwrap_or_default(),
+				(None, None) => {
 					let model = if meaning { model.loaded() } else { None };
 					let vector = model.map(|m| m.embed(&query.text()));
 					cache.search(&query, vector.as_deref().map(|v| (semantic::NAME, v)), RESULTS).unwrap_or_default()
@@ -2500,6 +2509,16 @@ impl App {
 					self.snack = None;
 				}
 			},
+			Action::OpenLabel { id } => {
+				if let Some(label) = self.labels.iter().find(|l| l.id.0 == id).cloned() {
+					let revision = self.next_revision();
+					self.conv = None;
+					self.remove_screen(Screen::Conversation);
+					self.search = Some(SearchState { revision, query: String::new(), rule: None, label: Some((label.own_id().to_string(), label.name)), searching: false, generation: 0, rows: Vec::new(), folders: HashMap::new() });
+					self.push(Screen::Search);
+					self.run_search();
+				}
+			},
 			Action::OpenFolder { id } => {
 				if let Some(folder) = self.folders.iter().find(|f| f.id.0 == id).cloned() {
 					self.conv = None;
@@ -2533,6 +2552,11 @@ impl App {
 			Action::RowSpam { key, folder_id } => {
 				let own = self.thread_here(&key, &FolderId(folder_id)).into_iter().filter(|m| !m.outgoing).collect();
 				self.open_spam(own);
+			},
+			Action::RowLabels { key, folder_id } => {
+				let mails = self.thread_here(&key, &FolderId(folder_id));
+				let subject = mails.last().map(|m| subject_or_none(&m.subject)).unwrap_or_default();
+				self.open_labels(subject, mails);
 			},
 			Action::RowTrash { key, folder_id } => {
 				let ids: Vec<MailId> = self.thread_here(&key, &FolderId(folder_id)).into_iter().map(|m| m.id).collect();
@@ -2629,7 +2653,7 @@ impl App {
 			},
 			Action::OpenSearch => {
 				let revision = self.next_revision();
-				self.search = Some(SearchState { revision, query: String::new(), rule: None, searching: false, generation: 0, rows: Vec::new(), folders: HashMap::new() });
+				self.search = Some(SearchState { revision, query: String::new(), rule: None, label: None, searching: false, generation: 0, rows: Vec::new(), folders: HashMap::new() });
 				self.push(Screen::Search);
 			},
 			Action::CloseSearch => {
@@ -2656,7 +2680,7 @@ impl App {
 			Action::RuleInSearch => {
 				if let Some(line) = self.rule_ed.as_ref().map(|e| e.line.clone()).filter(|l| parse(l).is_ok()) {
 					let revision = self.next_revision();
-					self.search = Some(SearchState { revision, query: line.clone(), rule: Some(line), searching: false, generation: 0, rows: Vec::new(), folders: HashMap::new() });
+					self.search = Some(SearchState { revision, query: line.clone(), rule: Some(line), label: None, searching: false, generation: 0, rows: Vec::new(), folders: HashMap::new() });
 					self.push(Screen::Search);
 					self.run_search();
 				}
@@ -2966,6 +2990,7 @@ impl App {
 			let chosen = self.selected_rows();
 			SelectionView { count: self.selection.len() as u32, pin: chosen.iter().any(|r| !r.pinned), mark_read: chosen.iter().any(|r| r.unread) }
 		});
+		let browsing = self.search.as_ref().is_some_and(|s| s.label.is_some());
 		ListView {
 			folders: self
 				.folders
@@ -2983,7 +3008,18 @@ impl App {
 						FolderKind::Custom => FolderIcon::Folder,
 					},
 					unread: f.unread,
-					selected: f.id == id,
+					selected: f.id == id && !browsing,
+				})
+				.collect(),
+			labels: self
+				.labels
+				.iter()
+				.map(|l| FolderView {
+					id: l.id.0.clone(),
+					name: l.name.clone(),
+					icon: FolderIcon::Label,
+					unread: 0,
+					selected: self.search.as_ref().and_then(|s| s.label.as_ref()).is_some_and(|(own, _)| own == l.own_id()),
 				})
 				.collect(),
 			title: current.map_or_else(|| "Tern".to_string(), |f| f.name),
@@ -3051,9 +3087,11 @@ impl App {
 				}
 			})
 			.collect();
+		let labels = self.labels.iter().filter(|l| conv.cards.iter().any(|c| l.on(&c.summary))).map(|l| l.name.clone()).collect();
 		Some(ConversationView {
 			key: conv.key.clone(),
 			subject: conv.subject.clone(),
+			labels,
 			cards,
 			can_archive: has(FolderKind::Archive) && here != FolderKind::Archive,
 			can_spam: has(FolderKind::Spam) && here != FolderKind::Spam,
@@ -3097,6 +3135,7 @@ impl App {
 			sending: comp.sending,
 			saving: comp.saving,
 			error: comp.error.clone(),
+			tries: comp.tries,
 			bad_to: comp.bad.0,
 			bad_cc: comp.bad.1,
 			bad_bcc: comp.bad.2,
@@ -3108,7 +3147,7 @@ impl App {
 	fn search_view(&self) -> SearchView {
 		let now = format::now_ms();
 		let Some(search) = self.search.as_ref() else {
-			return SearchView { revision: 0, query: String::new(), searching: false, title: "Search".into(), note: String::new(), empty: false, rows: Vec::new() };
+			return SearchView { revision: 0, query: String::new(), searching: false, title: "Search".into(), note: String::new(), empty: false, empty_title: String::new(), empty_detail: String::new(), rows: Vec::new() };
 		};
 		let rows: Vec<RowView> = search
 			.rows
@@ -3123,9 +3162,15 @@ impl App {
 			revision: search.revision,
 			query: search.query.clone(),
 			searching: search.searching,
-			title: if search.rule.is_some() { "Mail the rule catches".into() } else { "Search".into() },
+			title: match (&search.label, &search.rule) {
+				(Some((_, name)), _) => name.clone(),
+				(None, Some(_)) => "Mail the rule catches".into(),
+				(None, None) => "Search".into(),
+			},
 			note: format!("Searching the mail kept on this {}", self.device),
-			empty: asked && !search.searching && rows.is_empty(),
+			empty: (asked || search.label.is_some()) && !search.searching && rows.is_empty(),
+			empty_title: if search.label.is_some() { "No mail with this label".into() } else { "No matches".into() },
+			empty_detail: format!("{} in mail on this {}", if search.label.is_some() { "None" } else { "No matches" }, self.device),
 			rows,
 		}
 	}

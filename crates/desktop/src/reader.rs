@@ -16,6 +16,10 @@ use crate::{attachments, render, runtime, window::Ctx};
 
 /// How much narrower a card's body is than the conversation column: its margins and border.
 const CARD_INSET: i32 = 2 * 12 + 2;
+/// How much narrower the conversation column is than its widest: its margins.
+const COLUMN_INSET: i32 = 2 * 18;
+/// The widest the conversation column goes.
+const MAX_COLUMN: i32 = 840;
 
 /// One mail of the conversation.
 struct Card {
@@ -45,6 +49,10 @@ pub struct Reader {
 	stack: gtk::Stack,
 	banner: adw::Banner,
 	subject: gtk::Label,
+	labels: gtk::Box,
+	/// What gives way to the menu on a narrow window.
+	wide_only: Vec<gtk::Widget>,
+	more_narrow: gtk::MenuButton,
 	cards_box: gtk::Box,
 	scroll: gtk::ScrolledWindow,
 	cards: RefCell<Vec<Rc<Card>>>,
@@ -75,19 +83,42 @@ fn without_paths(blocks: &[BlockView]) -> Vec<BlockView> {
 impl Reader {
 	pub fn new(ctx: Ctx) -> Rc<Reader> {
 		let header = adw::HeaderBar::builder().show_title(false).build();
+		let mut wide_only: Vec<gtk::Widget> = Vec::new();
 		for (icon, action, tip) in [
 			("tern-reply-symbolic", "win.reply", "Reply (Ctrl+R)"),
 			("tern-reply-all-symbolic", "win.reply-all", "Reply All (Ctrl+Shift+R)"),
 			("tern-forward-symbolic", "win.forward", "Forward (Ctrl+L)"),
 		] {
-			header.pack_start(&gtk::Button::builder().icon_name(icon).action_name(action).tooltip_text(tip).build());
+			let button = gtk::Button::builder().icon_name(icon).action_name(action).tooltip_text(tip).build();
+			header.pack_start(&button);
+			if action != "win.reply" {
+				wide_only.push(button.upcast());
+			}
 		}
 		let menu = gtk::gio::Menu::new();
+		menu.append(Some("_Labels…"), Some("win.labels"));
 		menu.append(Some("Mark as _Unread"), Some("win.mark-unread"));
 		menu.append(Some("_Open in Tuta"), Some("win.open-in-tuta"));
-		header.pack_end(&gtk::MenuButton::builder().icon_name("view-more-symbolic").menu_model(&menu).tooltip_text("More").build());
-		header.pack_end(&gtk::Button::builder().icon_name("user-trash-symbolic").action_name("win.trash").tooltip_text("Move Conversation to Trash (Delete)").build());
-		header.pack_end(&gtk::Button::builder().icon_name("mail-mark-junk-symbolic").action_name("win.spam").tooltip_text("Move to Spam (Ctrl+J)").build());
+		// On a narrow window what does not fit beside the window's own buttons goes in the menu.
+		let narrow_menu = gtk::gio::Menu::new();
+		let answers = gtk::gio::Menu::new();
+		answers.append(Some("Reply _All"), Some("win.reply-all"));
+		answers.append(Some("_Forward"), Some("win.forward"));
+		narrow_menu.append_section(None, &answers);
+		let moves = gtk::gio::Menu::new();
+		moves.append(Some("Move to _Spam…"), Some("win.spam"));
+		moves.append(Some("Move to _Trash"), Some("win.trash"));
+		narrow_menu.append_section(None, &moves);
+		narrow_menu.append_section(None, &menu);
+		let more = gtk::MenuButton::builder().icon_name("view-more-symbolic").menu_model(&menu).tooltip_text("More").build();
+		let more_narrow = gtk::MenuButton::builder().icon_name("view-more-symbolic").menu_model(&narrow_menu).tooltip_text("More").visible(false).build();
+		let trash = gtk::Button::builder().icon_name("user-trash-symbolic").action_name("win.trash").tooltip_text("Move Conversation to Trash (Delete)").build();
+		let spam = gtk::Button::builder().icon_name("mail-mark-junk-symbolic").action_name("win.spam").tooltip_text("Move to Spam (Ctrl+J)").build();
+		header.pack_end(&more);
+		header.pack_end(&more_narrow);
+		header.pack_end(&trash);
+		header.pack_end(&spam);
+		wide_only.extend([more.upcast::<gtk::Widget>(), trash.upcast(), spam.upcast()]);
 
 		let banner = adw::Banner::builder().title("This message has formatting Tern can’t show").button_label("Open in Tuta").build();
 		banner.set_action_name(Some("win.open-in-tuta"));
@@ -95,18 +126,24 @@ impl Reader {
 		let subject = gtk::Label::builder().xalign(0.0).wrap(true).wrap_mode(gtk::pango::WrapMode::WordChar).selectable(true).css_classes(["title-2"]).build();
 		let cards_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).build();
 		let column = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(18).margin_top(24).margin_bottom(32).margin_start(18).margin_end(18).build();
-		column.append(&subject);
+		let labels = gtk::Box::builder().spacing(6).visible(false).build();
+		let heading = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
+		heading.append(&subject);
+		heading.append(&labels);
+		column.append(&heading);
 		column.append(&cards_box);
-		// Zero-height, full-width: tells inline images how wide the text is.
-		let probe = gtk::DrawingArea::builder().hexpand(true).build();
-		column.append(&probe);
 		let clamp = adw::Clamp::builder().maximum_size(840).tightening_threshold(600).child(&column).build();
-		let scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&clamp).vexpand(true).build();
+		// A picture sized to fit must not hold the pane at that size, or the window could never narrow.
+		let scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::External).child(&clamp).vexpand(true).build();
 
 		let empty = adw::StatusPage::builder().icon_name("mail-read-symbolic").title("No Conversation Selected").css_classes(["compact"]).build();
 		let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).transition_duration(100).build();
 		stack.add_named(&empty, Some("empty"));
-		stack.add_named(&scroll, Some("thread"));
+		// Over the pane, drawing nothing: says how wide the pane is, and so how wide the text can be.
+		let probe = gtk::DrawingArea::builder().can_target(false).build();
+		let measured = gtk::Overlay::builder().child(&scroll).build();
+		measured.add_overlay(&probe);
+		stack.add_named(&measured, Some("thread"));
 
 		let toolbar = adw::ToolbarView::new();
 		toolbar.add_top_bar(&header);
@@ -114,10 +151,11 @@ impl Reader {
 		toolbar.set_content(Some(&stack));
 		let page = adw::NavigationPage::builder().title("Conversation").tag("reader").child(&toolbar).build();
 
-		let reader = Rc::new(Reader { ctx, page, stack, banner, subject, cards_box, scroll, cards: RefCell::default(), width: Cell::new(600), key: RefCell::default(), on_current: RefCell::default() });
+		let reader = Rc::new(Reader { ctx, page, stack, banner, subject, labels, wide_only, more_narrow, cards_box, scroll, cards: RefCell::default(), width: Cell::new(600), key: RefCell::default(), on_current: RefCell::default() });
 		let weak = Rc::downgrade(&reader);
-		probe.connect_resize(move |_, w, _| {
+		probe.connect_resize(move |_, pane, _| {
 			let Some(this) = weak.upgrade() else { return };
+			let w = pane.min(MAX_COLUMN) - COLUMN_INSET;
 			if w > 0 && w != this.width.get() {
 				this.width.set(w);
 				for card in this.cards.borrow().iter() {
@@ -141,6 +179,11 @@ impl Reader {
 		sm.connect_dark_notify(move |_| r2());
 		sm.connect_accent_color_notify(move |_| redraw());
 		reader
+	}
+
+	/// What to hide on a narrow window, and what to show there instead.
+	pub fn narrow_setters(&self) -> (Vec<gtk::Widget>, gtk::MenuButton) {
+		(self.wide_only.clone(), self.more_narrow.clone())
 	}
 
 	/// Called when the mail actions apply to changes, or finishes loading.
@@ -205,6 +248,13 @@ impl Reader {
 		}
 		self.page.set_title(&view.subject);
 		self.subject.set_label(&view.subject);
+		while let Some(child) = self.labels.first_child() {
+			self.labels.remove(&child);
+		}
+		for label in &view.labels {
+			self.labels.append(&gtk::Label::builder().label(label).css_classes(["caption", "row-label"]).build());
+		}
+		self.labels.set_visible(!view.labels.is_empty());
 		self.stack.set_visible_child_name("thread");
 		let cards = self.cards.borrow().clone();
 		for (card, new) in cards.iter().zip(&view.cards) {

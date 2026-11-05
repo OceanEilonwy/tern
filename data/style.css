@@ -198,3 +198,9 @@ button.cleanup {
 row.cleanup-all label.title {
   color: var(--error-color);
 }
+
+.row-label {
+  padding: 0 7px;
+  border-radius: 6px;
+  background: alpha(currentColor, 0.1);
+}

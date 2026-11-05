@@ -40,6 +40,9 @@ pub fn chip(ctx: &Ctx, mail: &MailRef, att: &AttachmentView) -> gtk::Widget {
 
 /// Opens a file the core has fetched in the app that handles it.
 pub fn open_file(ctx: &Ctx, path: &str) {
+	if crate::screenshot::scene().is_some() {
+		return ctx.handed_over.borrow_mut().push(path.to_string());
+	}
 	let (ctx, file) = (ctx.clone(), gio::File::for_path(path));
 	let name = file.basename().map(|n| n.display().to_string()).unwrap_or_default();
 	runtime::spawn_local(async move {
@@ -56,11 +59,17 @@ pub fn open_file(ctx: &Ctx, path: &str) {
 pub fn save_file(ctx: &Ctx, path: &str, name: &str) {
 	let (ctx, from, name) = (ctx.clone(), gio::File::for_path(path), name.to_string());
 	runtime::spawn_local(async move {
-		let dialog = gtk::FileDialog::builder().title("Save Attachment").initial_name(safe_file_name(&name)).modal(true).build();
-		if let Some(dir) = gtk::glib::user_special_dir(gtk::glib::UserDirectory::Downloads) {
-			dialog.set_initial_folder(Some(&gio::File::for_path(dir)));
-		}
-		let Ok(to) = dialog.save_future(Some(&ctx.window)).await else { return };
+		let to = if crate::screenshot::scene().is_some() {
+			// No one is there to answer a dialog.
+			gio::File::for_path(crate::paths().config_dir().join(safe_file_name(&name)))
+		} else {
+			let dialog = gtk::FileDialog::builder().title("Save Attachment").initial_name(safe_file_name(&name)).modal(true).build();
+			if let Some(dir) = gtk::glib::user_special_dir(gtk::glib::UserDirectory::Downloads) {
+				dialog.set_initial_folder(Some(&gio::File::for_path(dir)));
+			}
+			let Ok(to) = dialog.save_future(Some(&ctx.window)).await else { return };
+			to
+		};
 		match from.copy_future(&to, gio::FileCopyFlags::OVERWRITE, gtk::glib::Priority::DEFAULT).0.await {
 			Ok(()) => ctx.toast(&format!("Saved {name}")),
 			Err(e) => ctx.toast(&format!("Could not save {name}: {}", e.message())),
