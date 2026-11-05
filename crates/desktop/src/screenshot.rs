@@ -140,7 +140,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		"folders-fail" => {
 			wait_for(|| mailbox.status().is_some()).await;
 			match mailbox.status() {
-				Some(title) if title == "Could Not Load Folders" => {},
+				Some(title) if title == "Could not load folders" => {},
 				other => return Err(format!("expected the folder error, got {other:?}")),
 			}
 			wait_for(|| win.ctx.activity.problem().is_some()).await;
@@ -151,11 +151,14 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		}
 		// A refresh while the first page loads must not leave the list unable to load more.
 		"refresh-race" => {
-			wait_for(|| mailbox.is_loading()).await;
+			let loading = || win.ctx.activity.word().is_some();
+			wait_for(loading).await;
 			gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.refresh", None).map_err(|e| e.to_string())?;
-			wait_for(|| mailbox.store.n_items() > 0 && !mailbox.is_loading()).await;
+			for _ in 0..5 {
+				wait_for(|| mailbox.store.n_items() > 0 && !loading()).await;
+			}
 			sleep(1000).await;
-			if mailbox.is_loading() { Err("the list still counts a page as loading".into()) } else { Ok(()) }
+			if loading() { Err("the list still counts a page as loading".into()) } else { Ok(()) }
 		}
 		// Folders that arrive after signing out must not stop the next sign-in from opening the inbox.
 		"sign-out-race" => {
@@ -177,11 +180,11 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			drop(composer);
 			mailbox.select_folder(tern_mail::FolderKind::Drafts);
 			wait_for(|| mailbox.select_by_subject("Trip plan")).await;
-			wait_for(|| mailbox.reader.current.borrow().is_some() && mailbox.reader.mails().iter().any(|m| m.draft)).await;
+			wait_for(|| mailbox.reader.opened().is_some() && mailbox.reader.mails().iter().any(|m| m.draft)).await;
 			if !mailbox.reader.mails().iter().any(|m| m.draft) {
 				return Err(format!("the saved draft did not show as a draft: {:?}", mailbox.reader.mails().iter().map(|m| (&m.subject, m.draft)).collect::<Vec<_>>()));
 			}
-			let again = mailbox.reader.edit_current_draft().ok_or("the draft did not open for editing")?;
+			let again = mailbox.reader.edit_current_draft().await.ok_or("the draft did not open for editing")?;
 			if again.subject_and_to() != ("Trip plan".to_string(), "mia@tuta.com".to_string()) {
 				return Err(format!("the draft reopened as {:?}", again.subject_and_to()));
 			}
@@ -194,8 +197,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			mailbox.select_folder(tern_mail::FolderKind::Sent);
 			wait_for(|| mailbox.select_by_subject("Trip plan")).await;
-			wait_for(|| mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.attachments.len() == 1)).await;
-			if mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.attachments.len() == 1) { Ok(()) } else { Err("the sent mail lost its attachment".into()) }
+			wait_for(|| mailbox.reader.opened().is_some_and(|o| o.attachments.len() == 1)).await;
+			if mailbox.reader.opened().is_some_and(|o| o.attachments.len() == 1) { Ok(()) } else { Err("the sent mail lost its attachment".into()) }
 		}
 		// A reply carries only the lines picked in the mail until the whole mail is added; a forward
 		// carries the mail until it is left out.
@@ -212,12 +215,12 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				}
 			};
 			mailbox.select_by_subject("Lunch");
-			wait_for(|| mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.summary.subject.starts_with("Re:"))).await;
+			wait_for(|| mailbox.reader.opened().is_some_and(|o| o.subject.starts_with("Re:"))).await;
 			sleep(300).await;
 			if !mailbox.reader.select_in_current("12:30 at the usual place?") {
 				return Err("the reply's text is not in the open mail".into());
 			}
-			let reply = mailbox.reader.answer(tern_compose::Answer::Reply).ok_or("no reply")?;
+			let reply = mailbox.reader.answer(tern_compose::Answer::Reply).await.ok_or("no reply")?;
 			let quote = reply.quote();
 			if quote.picked != Some(("Sam Okafor".into(), "12:30 at the usual place?".into())) || quote.whole.as_ref().is_none_or(|w| w.included || w.forward) {
 				return Err(format!("the reply quotes {quote:?}"));
@@ -229,7 +232,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("a reply with a pick sent {html}"));
 			}
 			// Nothing picked, the pick left out, the whole mail added.
-			let reply = mailbox.reader.answer(tern_compose::Answer::Reply).ok_or("no reply")?;
+			let reply = mailbox.reader.answer(tern_compose::Answer::Reply).await.ok_or("no reply")?;
 			if reply.quote().picked.is_some() {
 				reply.drop_picked();
 			}
@@ -241,7 +244,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("a reply with the whole mail sent {html}"));
 			}
 			// A forward carries the mail; × leaves it out.
-			let forward = mailbox.reader.answer(tern_compose::Answer::Forward).ok_or("no forward")?;
+			let forward = mailbox.reader.answer(tern_compose::Answer::Forward).await.ok_or("no forward")?;
 			if !forward.quote().whole.is_some_and(|w| w.included && w.forward) {
 				return Err(format!("the forward carries {:?}", forward.quote()));
 			}
@@ -251,7 +254,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if !newest_sent().await?.contains("---------- Forwarded message ----------") {
 				return Err("the forward went without the mail".into());
 			}
-			let forward = mailbox.reader.answer(tern_compose::Answer::Forward).ok_or("no forward")?;
+			let forward = mailbox.reader.answer(tern_compose::Answer::Forward).await.ok_or("no forward")?;
 			forward.include_whole(false);
 			forward.type_to("mia@tuta.com");
 			forward.send();
@@ -262,10 +265,10 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			// A reply closed unsent reopens from Drafts with its quotes apart from the text: as kept
 			// here, the whole mail left out included; without that, as read back from the draft.
 			mailbox.select_by_subject("Lunch");
-			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
+			wait_for(|| mailbox.reader.opened().is_some()).await;
 			sleep(300).await;
 			mailbox.reader.select_in_current("12:30 at the usual place?");
-			let reply = mailbox.reader.answer(tern_compose::Answer::Reply).ok_or("no reply")?;
+			let reply = mailbox.reader.answer(tern_compose::Answer::Reply).await.ok_or("no reply")?;
 			let written = reply.quote();
 			reply.type_body("Yes, see you then.");
 			reply.window.close();
@@ -273,16 +276,16 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			drop(reply);
 			mailbox.select_folder(FolderKind::Drafts);
 			wait_for(|| mailbox.select_by_subject("Re: Lunch")).await;
-			wait_for(|| mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.summary.draft)).await;
-			let again = mailbox.reader.edit_current_draft().ok_or("the draft did not open")?;
+			wait_for(|| mailbox.reader.opened().is_some_and(|o| o.draft)).await;
+			let again = mailbox.reader.edit_current_draft().await.ok_or("the draft did not open")?;
 			if again.body_text() != "Yes, see you then." || again.quote() != written {
 				return Err(format!("the draft reopened as {:?} quoting {:?}, written {written:?}", again.body_text(), again.quote()));
 			}
 			again.window.set_visible(false);
 			drop(again);
-			let id = mailbox.reader.current.borrow().as_ref().map(|o| o.mail.summary.id.clone()).ok_or("no draft")?;
+			let id = mailbox.reader.current().map(|o| tern_mail::MailId { list: o.id.list, element: o.id.element }).ok_or("no draft")?;
 			win.ctx.cache().ok_or("no cache")?.set_draft_quote(&id, None).map_err(|e| e.to_string())?;
-			let again = mailbox.reader.edit_current_draft().ok_or("the draft did not open")?;
+			let again = mailbox.reader.edit_current_draft().await.ok_or("the draft did not open")?;
 			if again.quote().picked != written.picked || again.quote().whole.is_some() {
 				return Err(format!("read back from the draft: {:?}", again.quote()));
 			}
@@ -294,8 +297,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		"from" => {
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			mailbox.select_by_subject("five small things");
-			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
-			let reply = mailbox.reader.answer(tern_compose::Answer::Reply).ok_or("no reply")?;
+			wait_for(|| mailbox.reader.opened().is_some()).await;
+			let reply = mailbox.reader.answer(tern_compose::Answer::Reply).await.ok_or("no reply")?;
 			let picked = reply.from.selected_item().and_downcast::<gtk::StringObject>().map(|s| s.string().to_string());
 			if !reply.from.is_visible() || picked.as_deref() != Some("news@you.example") {
 				return Err(format!("the reply is from {picked:?}"));
@@ -312,8 +315,10 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			drop(fresh);
 			mailbox.select_folder(tern_mail::FolderKind::Sent);
 			wait_for(|| mailbox.select_by_subject("Re: This week")).await;
-			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
-			let senders: Vec<(String, String)> = mailbox.listed().iter().map(|r| (r.latest.subject.clone(), r.latest.from.address.clone())).collect();
+			wait_for(|| mailbox.reader.opened().is_some()).await;
+			let sent = win.ctx.cache().and_then(|c| c.folders().ok()?.into_iter().find(|f| f.kind == FolderKind::Sent)).ok_or("no Sent")?;
+			let backend = win.ctx.backend().ok_or("signed out")?;
+			let senders: Vec<(String, String)> = backend.list(&sent.id, None, 50).await.map_err(|e| e.to_string())?.mails.into_iter().map(|m| (m.subject, m.from.address)).collect();
 			let sent_from = |subject: &str| senders.iter().find(|(s, _)| s.contains(subject)).map(|(_, f)| f.as_str());
 			if sent_from("Re: This week") != Some("news@you.example") || sent_from("From the main address") != Some("you@tuta.com") {
 				return Err(format!("Sent holds {senders:?}"));
@@ -383,14 +388,14 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			let act = |name: &str| gtk::prelude::WidgetExt::activate_action(&window, name, None).map_err(|e| e.to_string());
 			act("win.next")?;
 			act("win.next")?;
-			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
+			wait_for(|| mailbox.reader.opened().is_some()).await;
 			let second = mailbox.reader.mails().first().map(|m| m.subject.clone()).unwrap_or_default();
 			if second != "Your invoice for October" {
 				return Err(format!("Alt+Down twice opened {second:?}"));
 			}
 			act("win.trash")?;
 			wait_for(|| mailbox.store.n_items() == 6).await;
-			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
+			wait_for(|| mailbox.reader.opened().is_some()).await;
 			let next = mailbox.reader.mails().first().map(|m| m.subject.clone()).unwrap_or_default();
 			if mailbox.store.n_items() != 6 || !next.contains("Lunch") {
 				return Err(format!("after Delete: {} conversations, showing {next:?}", mailbox.store.n_items()));
@@ -459,8 +464,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			sleep(500).await;
 			let started = std::time::Instant::now();
 			mailbox.select_by_subject("Lunch");
-			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
-			let shown = mailbox.reader.current.borrow().as_ref().map(|o| o.mail.summary.subject.clone());
+			wait_for(|| mailbox.reader.opened().is_some()).await;
+			let shown = mailbox.reader.opened().map(|o| o.subject);
 			let batched = tern_mail::MailId { list: "demo".into(), element: "m001".into() };
 			let batch_done = win.ctx.cache().is_some_and(|c| c.has_mail(&batched).unwrap_or(false));
 			if shown.as_deref() != Some("Re: Lunch on Friday?") || started.elapsed() > Duration::from_secs(2) || batch_done {
@@ -471,7 +476,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// Arrowing onto an unread conversation marks it read without moving the focus off it.
 		"arrows" => {
 			wait_for(|| mailbox.store.n_items() > 0).await;
-			let unread = (1..mailbox.store.n_items()).find(|&i| mailbox.store.item(i).is_some_and(|o| o.downcast_ref::<glib::BoxedAnyObject>().unwrap().borrow::<tern_cache::ThreadRow>().unread));
+			let unread = (1..mailbox.store.n_items()).find(|&i| mailbox.store.item(i).is_some_and(|o| o.downcast_ref::<glib::BoxedAnyObject>().unwrap().borrow::<tern_app::view::RowView>().unread));
 			let at = unread.ok_or("no unread conversation below the first")?;
 			mailbox.arrow_to(0);
 			sleep(200).await;
@@ -503,7 +508,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				}
 			}
 			mailbox.select_by_subject("invoice");
-			let opened = || mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.summary.subject == "Your invoice for October");
+			let opened = || mailbox.reader.opened().is_some_and(|o| o.subject == "Your invoice for October");
 			wait_for(opened).await;
 			if !opened() {
 				return Err("the result did not open".into());
@@ -516,7 +521,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			mailbox.append_search(" lunch");
 			wait_for(|| shows(&["Re: Lunch on Friday?"])).await;
 			sleep(300).await;
-			if mailbox.reader.current.borrow().is_some() || !shows(&["Re: Lunch on Friday?"]) {
+			if mailbox.reader.current().is_some() || !shows(&["Re: Lunch on Friday?"]) {
 				return Err(format!("typing on opened {:?}", mailbox.reader.mails().first().map(|m| m.subject.clone())));
 			}
 			mailbox.type_search("zzqx")?;
@@ -547,8 +552,10 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			rules::save(crate::paths(), &[]);
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			mailbox.select_by_subject("coupon");
-			wait_for(|| mailbox.reader.thread().is_some()).await;
-			let picker = mailbox.spam_conversation().ok_or("Move to Spam did not open")?;
+			wait_for(|| mailbox.reader.opened().is_some()).await;
+			gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.spam", None).map_err(|e| e.to_string())?;
+			wait_for(|| win.ctx.picker.borrow().as_ref().is_some_and(|p| p.listed().len() == 3)).await;
+			let picker = win.ctx.picker.borrow().clone().ok_or("Move to Spam did not open")?;
 			let ticked = |p: &spam::Picker| p.listed().iter().filter(|(_, t)| *t).count();
 			if picker.listed().len() != 3 || ticked(&picker) != 1 || picker.listed()[0].0 != "Your exclusive coupon inside" {
 				return Err(format!("the sender's mail listed as {:?}", picker.listed()));
@@ -556,17 +563,19 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			picker.entry.set_text("(from:@deals.example");
 			wait_for(|| picker.listed().len() == 1).await;
 			if picker.listed().len() != 1 || picker.confirm.label().as_deref() != Some("Move to Spam") {
-				return Err(format!("a broken line listed {:?}", picker.listed()));
+				return Err(format!("a broken line listed {:?} and says {:?}", picker.listed(), picker.confirm.label()));
 			}
 			picker.entry.set_text("from:@deals.example");
 			wait_for(|| picker.listed().len() == 3).await;
 			picker.all.set_active(true);
 			picker.keep.set_active(true);
+			wait_for(|| ticked(&picker) == 3 && picker.confirm.label().as_deref() == Some("Move 3 to Spam")).await;
 			if ticked(&picker) != 3 || picker.confirm.label().as_deref() != Some("Move 3 to Spam") {
 				return Err(format!("Select All ticked {:?}", picker.listed()));
 			}
 			picker.confirm.emit_clicked();
 			let in_spam = || win.ctx.cache().and_then(|c| c.folders().ok()?.into_iter().find(|f| f.kind == FolderKind::Spam).and_then(|f| c.count(&f.id).ok()));
+			wait_for(|| in_spam() == Some(3)).await;
 			if in_spam() != Some(3) {
 				return Err(format!("{:?} in Spam after moving", in_spam()));
 			}
@@ -589,9 +598,11 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			wait_for(|| mailbox.store.n_items() == 7).await;
 			mailbox.select_by_subject("Lunch");
 			wait_for(|| mailbox.reader.mails().len() == 2).await;
-			let mails = mailbox.reader.mails();
-			if mails.windows(2).any(|w| w[0].received_ms < w[1].received_ms) {
-				return Err(format!("the conversation shows {:?}", mails.iter().map(|m| &m.subject).collect::<Vec<_>>()));
+			let open = mailbox.listed().into_iter().find(|r| r.open).ok_or("nothing marked open")?;
+			let oldest_first = win.ctx.cache().ok_or("no cache")?.thread(&open.key, &tern_mail::FolderId(open.folder_id)).map_err(|e| e.to_string())?;
+			let shown: Vec<String> = mailbox.reader.mails().into_iter().map(|m| m.id.element).collect();
+			if shown != oldest_first.iter().rev().map(|m| m.summary.id.element.clone()).collect::<Vec<_>>() {
+				return Err(format!("the conversation shows {shown:?}"));
 			}
 			let labels = |popover: &gtk::PopoverMenu| {
 				let mut labels = Vec::new();
@@ -631,7 +642,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			wait_for(|| win.ctx.activity.word().is_none()).await;
 			let backend = win.ctx.backend().ok_or("signed out")?;
 			let inbox = win.ctx.cache().and_then(|c| c.folders().ok()?.into_iter().find(|f| f.kind == FolderKind::Inbox)).ok_or("no Inbox")?;
-			let on_server = backend.list(&inbox.id, None, 50).await.map_err(|e| e.to_string())?.mails.into_iter().find(|m| m.id == unread.latest.id).map(|m| m.unread);
+			let on_server = backend.list(&inbox.id, None, 50).await.map_err(|e| e.to_string())?.mails.into_iter().find(|m| m.subject == unread.subject).map(|m| m.unread);
 			if on_server != Some(true) {
 				return Err(format!("read then unread left the server at {on_server:?}"));
 			}
@@ -641,7 +652,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("the menu of a pinned read conversation: {:?}", labels(&menu)));
 			}
 
-			let deals = mailbox.listed().into_iter().find(|r| r.latest.subject.contains("coupon")).ok_or("no coupon")?;
+			let deals = mailbox.listed().into_iter().find(|r| r.subject.contains("coupon")).ok_or("no coupon")?;
 			mailbox.open_row_menu(find(&deals.key)? as u32, None).ok_or("no menu")?.popdown();
 			mailbox.row_action("spam")?;
 			wait_for(|| win.ctx.window.visible_dialog().is_some()).await;
@@ -705,8 +716,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			// Show All lists them in the main window, in place of the folder.
 			edit.show_all();
-			wait_for(|| mailbox.shown().0 == "Mail the Rule Catches" && mailbox.store.n_items() == 7).await;
-			if mailbox.shown().0 != "Mail the Rule Catches" || mailbox.store.n_items() != 7 || dialog.is_mapped() {
+			wait_for(|| mailbox.shown().0 == "Mail the rule catches" && mailbox.store.n_items() == 7).await;
+			if mailbox.shown().0 != "Mail the rule catches" || mailbox.store.n_items() != 7 || dialog.is_mapped() {
 				return Err(format!("Show All shows {:?}, dialog open {}", mailbox.shown(), dialog.is_mapped()));
 			}
 			gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.search", None).map_err(|e| e.to_string())?;
@@ -821,7 +832,7 @@ pub fn drive(win: Rc<Window>) {
 		};
 		if let Some(s) = subject {
 			mailbox.select_by_subject(s);
-			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
+			wait_for(|| mailbox.reader.opened().is_some()).await;
 		}
 		let answer = match scene.as_str() {
 			"reply" => Some(tern_compose::Answer::ReplyAll),
@@ -833,7 +844,11 @@ pub fn drive(win: Rc<Window>) {
 			sleep(300).await;
 			mailbox.reader.select_in_current("12:30 at the usual place?");
 		}
-		let target: gtk::Widget = if let Some(composer) = answer.and_then(|a| mailbox.reader.answer(a)) {
+		let answered = match answer {
+			Some(a) => mailbox.reader.answer(a).await,
+			None => None,
+		};
+		let target: gtk::Widget = if let Some(composer) = answered {
 			composer.window.clone().upcast()
 		} else if scene == "sent" {
 			// The whole send path: compose with an attachment, send, find it in Sent.
@@ -846,7 +861,7 @@ pub fn drive(win: Rc<Window>) {
 			drop(composer);
 			mailbox.select_folder(tern_mail::FolderKind::Sent);
 			wait_for(|| mailbox.select_by_subject("Route for Sunday")).await;
-			wait_for(|| mailbox.reader.current.borrow().as_ref().is_some_and(|o| o.mail.attachments.len() == 1)).await;
+			wait_for(|| mailbox.reader.opened().is_some_and(|o| o.attachments.len() == 1)).await;
 			win.ctx.window.clone().upcast()
 		} else if scene == "rail" {
 			// The window's icon on the folders' header, as KDE puts it.
@@ -857,7 +872,7 @@ pub fn drive(win: Rc<Window>) {
 			sleep(300).await;
 			win.ctx.window.clone().upcast()
 		} else if scene == "pinned" {
-			let coupon = mailbox.listed().iter().position(|r| r.latest.subject.contains("coupon")).unwrap_or(0) as u32;
+			let coupon = mailbox.listed().iter().position(|r| r.subject.contains("coupon")).unwrap_or(0) as u32;
 			if let Some(menu) = mailbox.open_row_menu(coupon, None) {
 				menu.popdown();
 			}
@@ -866,11 +881,13 @@ pub fn drive(win: Rc<Window>) {
 			win.ctx.window.clone().upcast()
 		} else if scene == "spam-dialog" {
 			mailbox.select_by_subject("coupon");
-			wait_for(|| mailbox.reader.thread().is_some()).await;
-			if let Some(picker) = mailbox.spam_conversation() {
-				picker.entry.set_text("from:@deals.example");
-				wait_for(|| picker.listed().len() == 3).await;
+			wait_for(|| mailbox.reader.opened().is_some()).await;
+			let _ = gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.spam", None);
+			wait_for(|| win.ctx.picker.borrow().as_ref().is_some_and(|p| p.listed().len() == 3)).await;
+			let picker = win.ctx.picker.borrow().clone();
+			if let Some(picker) = picker {
 				picker.all.set_active(true);
+				sleep(200).await;
 			}
 			win.ctx.window.clone().upcast()
 

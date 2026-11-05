@@ -8,7 +8,6 @@ mod attachments;
 mod cleanup;
 mod composer;
 mod default_app;
-mod format;
 mod grip;
 mod keyring;
 mod layout;
@@ -32,7 +31,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use tern_app::paths::Paths;
 use tern_app::semantic::Meaning;
-use tern_app::{rules, semantic};
+use tern_app::rules;
 
 pub const APP_ID: &str = "xyz.hollingworth.Tern";
 
@@ -67,7 +66,6 @@ fn main_window(app: &adw::Application, slot: &RefCell<Weak<window::Window>>) -> 
 	}
 	let win = window::Window::new(app);
 	*slot.borrow_mut() = Rc::downgrade(&win);
-	attachments::clean_old_files();
 	win
 }
 

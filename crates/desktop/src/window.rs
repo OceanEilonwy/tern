@@ -6,13 +6,12 @@ use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use tern_app::settings::Settings;
 use tern_app::view::{Action, ChoiceView, ConnectionKind, Effect, RuleEditorView, RulesView, Screen, SettingsView, SheetView, ShellView, SnackView, Update};
 use tern_app::{Engine, EngineListener, Host, Options, SecretStore, SessionParts};
 use tern_cache::Cache;
 use tern_compose::Fields;
 use tern_demo::DemoBackend;
-use tern_mail::{Backend, Error, FolderId, FolderKind};
+use tern_mail::{Backend, Error, FolderKind};
 use tern_sync::fetcher::Fetcher;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
@@ -20,10 +19,8 @@ use crate::activity::{Activity, Busy, Word};
 use crate::composer::Composer;
 use crate::keyring::{InMemory, Keyring};
 use crate::layout::Layout;
-use crate::{cleanup, default_app, format, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot};
+use crate::{attachments, cleanup, default_app, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot, spam};
 
-type ChangedHook = Box<dyn Fn(&[FolderKind])>;
-type RuleHook = Box<dyn Fn(&str)>;
 type OfferHook = Box<dyn Fn(Option<&str>)>;
 type SettingsHook = Box<dyn Fn(&SettingsView)>;
 type RulesHook = Box<dyn Fn(&RulesView)>;
@@ -52,10 +49,8 @@ pub struct Ctx {
 	rules_view: Rc<RefCell<Option<RulesView>>>,
 	rule_editor_view: Rc<RefCell<Option<RuleEditorView>>>,
 	layout: Rc<Cell<Layout>>,
-	/// The folder on screen, for the sync, which runs off this thread.
-	pub on_screen: Arc<std::sync::Mutex<Option<tern_mail::FolderId>>>,
-	changed: Rc<RefCell<Option<ChangedHook>>>,
-	show_rule: Rc<RefCell<Option<RuleHook>>>,
+	/// Move to Spam, while open.
+	pub picker: Rc<RefCell<Option<Rc<spam::Picker>>>>,
 	offer: Rc<RefCell<Option<OfferHook>>>,
 	/// What Tern is doing now, in a word.
 	pub activity: Activity,
@@ -73,10 +68,6 @@ impl Ctx {
 	/// Fetches mail bodies for the account signed in now.
 	pub fn fetcher(&self) -> Option<Fetcher> {
 		self.fetcher.borrow().clone()
-	}
-
-	pub fn settings(&self) -> Settings {
-		self.engine.settings()
 	}
 
 	pub fn settings_view(&self) -> Option<SettingsView> {
@@ -134,6 +125,11 @@ impl Ctx {
 	/// Clean Up opens when the core offers it, and goes when the core has finished with it.
 	fn show_sheet(&self, view: Option<SheetView>) {
 		match view {
+			Some(SheetView::Spam { revision, line, problem, rows, count, keep_rule, confirm, choices }) => {
+				let picker = self.picker.borrow().clone().unwrap_or_else(|| spam::open(self));
+				picker.show(spam::Offer { revision, line, problem, rows, count, keep_rule, confirm, choices });
+				*self.picker.borrow_mut() = Some(picker);
+			},
 			Some(SheetView::Cleanup { total, choices }) => {
 				let (dialog, all) = cleanup::dialog(self, &total, &choices);
 				match self.open_preferences() {
@@ -145,6 +141,9 @@ impl Ctx {
 			_ => {
 				if let Some((dialog, _)) = self.cleanup.borrow_mut().take() {
 					dialog.force_close();
+				}
+				if let Some(picker) = self.picker.borrow_mut().take() {
+					picker.dialog.force_close();
 				}
 			},
 		}
@@ -169,11 +168,6 @@ impl Ctx {
 		}
 	}
 
-	/// Starts the background sync's next round now.
-	pub fn sync_now(&self) {
-		self.engine.sync_now();
-	}
-
 	pub fn toast(&self, text: &str) {
 		let toast = adw::Toast::new(text);
 		toast.set_timeout(4);
@@ -186,30 +180,13 @@ impl Ctx {
 
 	/// Called by a composer once its mail is sent.
 	pub fn sent(&self, subject: &str) {
-		self.toast(&format::sent_toast(subject));
+		self.toast(&tern_app::format::sent_toast(subject));
 		self.changed(&[FolderKind::Sent, FolderKind::Drafts]);
 	}
 
 	/// Mail in folders of these kinds changed on the server, as after saving a draft.
 	pub fn changed(&self, kinds: &[FolderKind]) {
-		if let Some(f) = self.changed.borrow().as_ref() {
-			f(kinds);
-		}
-	}
-
-	pub fn connect_changed(&self, f: impl Fn(&[FolderKind]) + 'static) {
-		*self.changed.borrow_mut() = Some(Box::new(f));
-	}
-
-	/// Lists, in the main window, the mail a rule's line catches.
-	pub fn show_rule(&self, line: &str) {
-		if let Some(f) = self.show_rule.borrow().as_ref() {
-			f(line);
-		}
-	}
-
-	pub fn connect_show_rule(&self, f: impl Fn(&str) + 'static) {
-		*self.show_rule.borrow_mut() = Some(Box::new(f));
+		self.engine.sync_kinds(kinds);
 	}
 
 	/// Offers, in the sidebar, to clean up the size Tern takes on disk; None takes the offer back.
@@ -232,21 +209,20 @@ pub struct Window {
 	pub mailbox: Rc<Mailbox>,
 	/// Mail asked for before there was an account to send it from, to write once signed in.
 	waiting: RefCell<Vec<Fields>>,
-	/// Held while the core's sync is working, for the activity word.
-	fetching: RefCell<Option<Busy>>,
+	/// What the core is doing, for the activity word.
+	working: RefCell<Option<(Word, Busy)>>,
 	/// The sign-in page has just come up, and takes the focus once it knows what to show.
 	focus_login: Cell<bool>,
 }
 
 impl Window {
 	pub fn new(app: &adw::Application) -> Rc<Window> {
-		let on_screen = Arc::default();
 		let window = adw::ApplicationWindow::builder().application(app).title("Tern").default_width(1280).default_height(800).build();
 		window.set_size_request(360, 294);
 		let toasts = adw::ToastOverlay::new();
 		// Before the core can start, and rewrite the settings' file it may still be in.
 		let layout = Layout::load(crate::paths().config_dir());
-		let (engine, incoming) = start_engine(&on_screen);
+		let (engine, incoming) = start_engine();
 		let ctx = Ctx {
 			window: window.clone(),
 			toasts: toasts.clone(),
@@ -264,9 +240,7 @@ impl Window {
 			cache: Rc::default(),
 			fetcher: Rc::default(),
 			layout: Rc::new(Cell::new(layout)),
-			on_screen,
-			changed: Rc::default(),
-			show_rule: Rc::default(),
+			picker: Rc::default(),
 			offer: Rc::default(),
 			activity: Activity::default(),
 		};
@@ -288,7 +262,7 @@ impl Window {
 			window.add_breakpoint(bp);
 		}
 
-		let this = Rc::new(Window { ctx, stack, login, mailbox, waiting: RefCell::default(), fetching: RefCell::default(), focus_login: Cell::new(false) });
+		let this = Rc::new(Window { ctx, stack, login, mailbox, waiting: RefCell::default(), working: RefCell::default(), focus_login: Cell::new(false) });
 		// The GTK window owns this struct until it is destroyed; callbacks and actions hold only weak references.
 		let owner = RefCell::new(Some(this.clone()));
 		window.connect_destroy(move |_| drop(owner.take()));
@@ -370,17 +344,25 @@ impl Window {
 				},
 				Update::Settings { view } => self.ctx.show_settings(view),
 				Update::Sheet { view } => self.ctx.show_sheet(view),
+				Update::List { view } => self.mailbox.show_list(view),
+				Update::Search { view } => self.mailbox.show_search(view),
+				Update::Conversation { view } => self.mailbox.reader.show(view.as_ref()),
 				Update::Rules { view } => self.ctx.show_rules(view),
 				Update::RuleEditor { view } => self.ctx.show_rule_editor(view),
 				_ => {},
 			},
 			Incoming::Session(parts) => self.session_changed(parts),
-			Incoming::MailChanged(folder) => self.mailbox.cache_changed(folder.as_ref()),
-			Incoming::FoldersFailed(e) => self.mailbox.sync_failed(&e),
+			Incoming::Effect(effect) => match effect {
+				Effect::OpenFile { path, .. } => attachments::open_file(&self.ctx, &path),
+				Effect::SaveFile { path, name, .. } => attachments::save_file(&self.ctx, &path, &name),
+				Effect::OpenUrl { url } => crate::render::open_uri(&self.ctx.window, &url),
+				Effect::ClearNotifications => {},
+			},
 		}
 	}
 
-	fn show_shell(&self, view: ShellView) {
+	fn show_shell(self: &Rc<Self>, view: ShellView) {
+		self.mailbox.set_searching(view.stack.contains(&Screen::Search));
 		match view.stack.last() {
 			Some(Screen::Starting) | None => {},
 			Some(Screen::SignIn) => {
@@ -402,13 +384,16 @@ impl Window {
 				}
 			},
 		}
-		let mut fetching = self.fetching.borrow_mut();
+		let mut working = self.working.borrow_mut();
 		match view.status.kind {
 			ConnectionKind::Working => {
-				fetching.get_or_insert_with(|| self.ctx.activity.start(Word::Fetching));
+				let word = Word::from_label(&view.status.line).unwrap_or(Word::Fetching);
+				if working.as_ref().map(|(w, _)| *w) != Some(word) {
+					*working = Some((word, self.ctx.activity.start(word)));
+				}
 			},
 			kind => {
-				fetching.take();
+				working.take();
 				self.ctx.activity.set_problem(matches!(kind, ConnectionKind::Offline | ConnectionKind::Busy).then_some(view.status.line));
 			},
 		}
@@ -444,9 +429,8 @@ impl Window {
 /// What comes from the core, in order, for the GTK thread.
 enum Incoming {
 	Update(Box<Update>),
+	Effect(Effect),
 	Session(Option<SessionParts>),
-	MailChanged(Option<FolderId>),
-	FoldersFailed(Error),
 }
 
 struct Bridge(UnboundedSender<Incoming>);
@@ -455,7 +439,9 @@ impl EngineListener for Bridge {
 	fn on_update(&self, update: Update) {
 		let _ = self.0.send(Incoming::Update(Box::new(update)));
 	}
-	fn on_effect(&self, _: Effect) {}
+	fn on_effect(&self, effect: Effect) {
+		let _ = self.0.send(Incoming::Effect(effect));
+	}
 	fn on_log(&self, _: String) {}
 }
 
@@ -463,23 +449,18 @@ impl Host for Bridge {
 	fn session(&self, parts: Option<SessionParts>) {
 		let _ = self.0.send(Incoming::Session(parts));
 	}
-	fn mail_changed(&self, folder: Option<FolderId>) {
-		let _ = self.0.send(Incoming::MailChanged(folder));
-	}
-	fn folders_failed(&self, error: Error) {
-		let _ = self.0.send(Incoming::FoldersFailed(error));
-	}
 }
 
 /// The core, for this desktop. The scenes keep to themselves, with no real keyring.
-fn start_engine(on_screen: &Arc<std::sync::Mutex<Option<FolderId>>>) -> (Arc<Engine>, UnboundedReceiver<Incoming>) {
+fn start_engine() -> (Arc<Engine>, UnboundedReceiver<Incoming>) {
 	let (tx, incoming) = unbounded_channel();
 	let bridge = Arc::new(Bridge(tx));
+	let listener = bridge.clone();
 	let in_scene = screenshot::scene().is_some();
 	let signed_in: Option<Arc<dyn Backend>> = std::env::var_os("TERN_DEMO").map(|_| if in_scene { screenshot::backend() } else { Arc::new(DemoBackend::new()) });
 	let secrets: Arc<dyn SecretStore> = if in_scene { Arc::new(InMemory::default()) } else { Arc::new(Keyring) };
-	let options = Options { device: "computer", meaning: Some(crate::meaning().clone()), signed_in, host: Some(bridge.clone()), on_screen: Some(on_screen.clone()) };
-	(Engine::open_with(crate::paths().clone(), options, secrets, bridge), incoming)
+	let options = Options { device: "computer", meaning: Some(crate::meaning().clone()), signed_in, host: Some(bridge), retry_hint: "Press F5 to try again.", follow_neighbour: true, lone_draft_composes: false };
+	(Engine::open_with(crate::paths().clone(), options, secrets, listener), incoming)
 }
 
 /// Preferences, with its Rules section.

@@ -593,10 +593,12 @@ Built to the "Cache cleanup" boards on the design canvas.
 
 - **`tern-app` is the one core.** It holds the state, navigation and what each action does, and publishes
   views. Platforms draw them. Android does this entirely. The desktop runs the engine in its own process,
-  and sign-in, the session, the sync, settings, rules and Clean Up go through it. The mailbox, reader, search,
-  Move to Spam and composer still hold their own behaviour and reach the session's parts through the Rust-only
-  `Host` trait, which goes once they have moved. The mailbox, reader, search and spam have to move
-  together, as they share what is selected; the composer needs the core to hold several at once.
+  and everything but the composer goes through it. The composer still holds its own behaviour and reaches the
+  session's parts through the Rust-only `Host` trait, which goes once it has moved; it needs the core to hold
+  several at once.
+- **Beside the list, the next conversation follows.** `follow_neighbour` has the core open a conversation's
+  neighbour when it leaves the list, where the two are on screen together; on a phone it goes back to the list.
+  A lone draft opens as a conversation on the desktop too, and in a composer on a phone.
 - **The desktop takes on the core's start-up.** A saved account opens at once from its cache, even offline. It
   used to show the sign-in page unless the server answered. An expired session still goes to the sign-in page.
 - **"Core" names nothing else.** `tern-mail` is only mail's types and the `Backend` trait. `tern-html`,

@@ -231,14 +231,18 @@ pub struct AttachmentView {
 	pub name: String,
 	pub size: String,
 	pub image: bool,
+	pub mime: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct CardView {
 	pub id: MailRef,
+	pub subject: String,
 	pub from: String,
 	pub address: String,
+	/// This account's own, in Sent.
+	pub sent: bool,
 	pub initials: String,
 	pub recipients: Option<String>,
 	pub date: String,
@@ -253,6 +257,8 @@ pub struct CardView {
 	/// Set when the mail leans on things Tern does not draw: where Tuta's web app shows it whole.
 	pub web_url: Option<String>,
 	pub notice: Option<String>,
+	/// Where Tuta's web app shows this mail, once it has opened, for anyone who asks.
+	pub open_url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -562,6 +568,12 @@ pub enum Action {
 	LoadMore,
 	OpenThread { key: String, folder_id: String },
 
+	/// What a conversation's own menu does, whatever is open or selected.
+	RowPin { key: String },
+	RowRead { key: String, folder_id: String, read: bool },
+	RowSpam { key: String, folder_id: String },
+	RowTrash { key: String, folder_id: String },
+
 	ToggleSelect { key: String },
 	SelectAll,
 	ClearSelection,
@@ -585,6 +597,7 @@ pub enum Action {
 
 	Answer { mail: MailRef, kind: AnswerKind },
 	EditDraft { mail: MailRef },
+	DiscardDraft { mail: MailRef },
 	ComposeNew,
 	ComposeSend { text: ComposeText },
 	ComposeClose { text: ComposeText },
@@ -601,6 +614,8 @@ pub enum Action {
 	ComposeEdited,
 
 	OpenSearch,
+	/// Back to the folder, with nothing open.
+	CloseSearch,
 	SearchText { text: String },
 	RuleInSearch,
 

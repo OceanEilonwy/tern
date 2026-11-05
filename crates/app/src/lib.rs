@@ -26,7 +26,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use app::{App, Msg};
 use semantic::Meaning;
 use tern_cache::Cache;
-use tern_mail::{Backend, Error, FolderId};
+use tern_mail::{Backend, FolderKind};
 use tern_sync::fetcher::Fetcher;
 use paths::Paths;
 pub use view::*;
@@ -112,10 +112,6 @@ pub struct SessionParts {
 pub trait Host: Send + Sync {
 	/// The session changed: a new account, its backend swapped once connected, or `None` at sign-out.
 	fn session(&self, parts: Option<SessionParts>);
-	/// The sync changed mail in this folder, or in any if `None`.
-	fn mail_changed(&self, folder: Option<FolderId>);
-	/// The sync could not even fetch the folder list.
-	fn folders_failed(&self, error: Error);
 }
 
 /// How a platform differs. What Android needs is the default.
@@ -127,13 +123,18 @@ pub struct Options {
 	/// An account already open, with no saved session: the demo at start-up.
 	pub signed_in: Option<Arc<dyn Backend>>,
 	pub host: Option<Arc<dyn Host>>,
-	/// The folder on screen when it is the platform's to say, for keeping its older mail.
-	pub on_screen: Option<Arc<std::sync::Mutex<Option<FolderId>>>>,
+	/// How a failed list says to try again.
+	pub retry_hint: &'static str,
+	/// The list and the conversation are on screen together, so when the open conversation leaves
+	/// the list its neighbour opens. On a phone it just goes back to the list.
+	pub follow_neighbour: bool,
+	/// A lone draft goes straight to a composer, instead of opening as a conversation first.
+	pub lone_draft_composes: bool,
 }
 
 impl Default for Options {
 	fn default() -> Options {
-		Options { device: "phone", meaning: None, signed_in: None, host: None, on_screen: None }
+		Options { device: "phone", meaning: None, signed_in: None, host: None, retry_hint: "Pull down to try again.", follow_neighbour: false, lone_draft_composes: true }
 	}
 }
 
@@ -198,6 +199,7 @@ fn step(app: &mut App, msg: Msg) {
 		},
 		Msg::Background(reply) => app.background_check(reply),
 		Msg::SyncNow => app.sync_now(),
+		Msg::SyncKinds(kinds) => app.sync_kinds(&kinds),
 		Msg::Stop => {},
 	}));
 }
@@ -235,6 +237,11 @@ impl Engine {
 	/// Starts the sync's next round now.
 	pub fn sync_now(&self) {
 		let _ = self.tx.send(Msg::SyncNow);
+	}
+
+	/// Mail in folders of these kinds changed behind the core's back, so it brings them up to date.
+	pub fn sync_kinds(&self, kinds: &[FolderKind]) {
+		let _ = self.tx.send(Msg::SyncKinds(kinds.to_vec()));
 	}
 }
 
