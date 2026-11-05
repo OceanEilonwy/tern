@@ -21,6 +21,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync",
 oo7 = { version = "0.6", default-features = false, features = ["tokio", "native_crypto"] }
 async-trait = "0.1.77"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+relm4-macros = { version = "0.11.0", default-features = false }
 
 [build-dependencies]
 glib-build-tools = "0.22"

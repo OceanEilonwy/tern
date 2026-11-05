@@ -1094,6 +1094,18 @@ pub fn drive(win: Rc<Window>) {
 			let _ = mailbox.row_action("pin");
 			sleep(300).await;
 			win.ctx.window.clone().upcast()
+		} else if scene == "labels-dialog" {
+			mailbox.select_by_subject("invoice");
+			wait_for(|| mailbox.reader.opened().is_some()).await;
+			let _ = gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.labels", None);
+			wait_for(|| win.ctx.label_picker.borrow().as_ref().is_some_and(|p| !p.ticks().is_empty())).await;
+			let picker = win.ctx.label_picker.borrow().clone();
+			if let Some(picker) = picker {
+				picker.toggle("Travel");
+				picker.new_name.set_text("Bills");
+				sleep(300).await;
+			}
+			win.ctx.window.clone().upcast()
 		} else if scene == "spam-dialog" {
 			mailbox.select_by_subject("coupon");
 			wait_for(|| mailbox.reader.opened().is_some()).await;
