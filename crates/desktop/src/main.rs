@@ -16,6 +16,7 @@ mod login;
 mod mailbox;
 mod reader;
 mod render;
+mod preferences;
 mod rule_editor;
 mod runtime;
 mod screenshot;

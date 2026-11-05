@@ -119,8 +119,9 @@ impl Component for Suggest {
 		});
 		entry.add_controller(keys);
 		let focus = gtk::EventControllerFocus::new();
-		let leaving = sender.clone();
-		focus.connect_leave(move |_| leaving.input(Input::Dismiss));
+		// Also as the window goes.
+		let leaving = sender.input_sender().clone();
+		focus.connect_leave(move |_| leaving.emit(Input::Dismiss));
 		entry.add_controller(focus);
 		// The popover is the entry's child; it must go before the entry does.
 		let popover = root.clone();
