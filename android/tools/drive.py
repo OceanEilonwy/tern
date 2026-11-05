@@ -189,6 +189,16 @@ def pull():
     adb('shell', 'input', 'motionevent', 'UP', '540', '980')
     time.sleep(0.1); shot('42-released')
 
+def past_schedule():
+    """Moves this emulator's clock past the checks' schedule, which WorkManager otherwise holds to even
+    for a forced job. Needs root, which a fresh boot does not have, and says so rather than going on."""
+    adb('root', check=False)
+    time.sleep(3)
+    before = int(adb('shell', 'date', '+%s').strip())
+    adb('shell', 'date', '@%d' % (before + 1960), check=False)
+    if int(adb('shell', 'date', '+%s').strip()) - before < 1900:
+        raise SystemExit('the clock did not move, so the check would be put off')
+
 def job():
     """Runs the system's job now, as if its time had come."""
     out = adb('shell', 'dumpsys', 'jobscheduler')
@@ -210,7 +220,8 @@ def notify():
     print('settings:', [t for t in texts() if 'Every' in t or 'new mail' in t.lower()][:4])
     back(); time.sleep(0.5)
     adb('shell', 'input', 'keyevent', 'KEYCODE_HOME'); time.sleep(2)
-    job(); time.sleep(5)
+    past_schedule()
+    job(); time.sleep(8)
     adb('shell', 'cmd', 'statusbar', 'expand-notifications'); time.sleep(1.5); shot('53-shade')
     print('shade:', [t for t in texts() if 'Sam' in t or 'Table' in t][:4])
     tap('Table booked for 12:30', exact=False); time.sleep(2.5); shot('54-opened')
