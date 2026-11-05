@@ -645,33 +645,21 @@ fn a_conversation_asked_for_before_the_account_opens_waits_for_it() {
 	assert_eq!(h.top(), Some(Screen::SignIn));
 }
 
-#[derive(Default)]
-struct Told {
-	sessions: Mutex<Vec<Option<String>>>,
-}
-
-impl Host for Told {
-	fn session(&self, parts: Option<SessionParts>) {
-		self.sessions.lock().unwrap().push(parts.map(|p| p.backend.account().address));
-	}
-}
-
 #[test]
-fn a_host_hears_of_the_session() {
+fn the_wording_says_which_device_this_is_and_parts_follow_the_session() {
 	let dir = std::env::temp_dir().join(format!("tern-host-test-{}", std::process::id()));
-	let told: Arc<Told> = Arc::default();
 	let seen: Arc<Mutex<Seen>> = Arc::default();
-	let options = Options { device: "computer", host: Some(told.clone()), ..Options::default() };
+	let options = Options { device: "computer", ..Options::default() };
 	let engine = Engine::open_with(Paths::new(&dir, &dir), options, Arc::<Secrets>::default(), Arc::new(Screen_(seen.clone())));
 	let h = Harness { engine, seen, paths: Paths::new(&dir, &dir), dir };
+	assert!(h.engine.session_parts().is_none());
 	h.demo();
+	assert_eq!(h.engine.session_parts().map(|p| p.backend.account().address).as_deref(), Some("you@tuta.com"));
 	h.send(Action::OpenSettings);
 	h.until("the wording for this device", |s| s.settings.as_ref().is_some_and(|v| v.semantic_line.contains("this computer")));
 	h.send(Action::SignOut);
 	h.until_screen(Screen::SignIn);
-	let sessions = told.sessions.lock().unwrap().clone();
-	assert_eq!(sessions.first().unwrap().as_deref(), Some("you@tuta.com"));
-	assert_eq!(sessions.last().unwrap(), &None, "told it has gone");
+	h.until("the parts gone", |_| h.engine.session_parts().is_none());
 }
 
 #[test]
@@ -690,18 +678,17 @@ fn an_account_given_at_the_start_opens_at_once_and_is_kept_nowhere() {
 #[test]
 fn dropping_the_engine_ends_its_account_and_keeps_it_signed_in() {
 	let dir = std::env::temp_dir().join(format!("tern-drop-test-{}", std::process::id()));
-	let told: Arc<Told> = Arc::default();
 	let secrets: Arc<Secrets> = Arc::default();
 	secrets.put(SESSION_SECRET.into(), serde_json::to_vec(&("me@tuta.com", "not a session the server knows")).unwrap()).unwrap();
-	let options = Options { host: Some(told.clone()), ..Options::default() };
-	let engine = Engine::open_with(Paths::new(&dir, &dir), options, secrets.clone(), Arc::new(Screen_(Arc::default())));
+	let engine = Engine::open_with(Paths::new(&dir, &dir), Options::default(), secrets.clone(), Arc::new(Screen_(Arc::default())));
 	let start = Instant::now();
-	while told.sessions.lock().unwrap().is_empty() {
+	while engine.session_parts().is_none() {
 		assert!(start.elapsed() < Duration::from_secs(10), "no session opened");
 		std::thread::sleep(Duration::from_millis(5));
 	}
+	let parts = engine.parts.clone();
 	drop(engine);
-	while told.sessions.lock().unwrap().last().unwrap().is_some() {
+	while parts.lock().unwrap().is_some() {
 		assert!(start.elapsed() < Duration::from_secs(10), "the account went on after the engine");
 		std::thread::sleep(Duration::from_millis(5));
 	}
@@ -878,4 +865,55 @@ fn a_mail_link_from_outside_waits_for_an_account() {
 	assert!(h.with(|s| s.composers.is_empty()));
 	h.demo();
 	h.until("the composer", |s| s.composers.len() == 1 && s.composers[0].text.subject == "Hello");
+}
+
+#[test]
+fn labels_go_on_a_row_and_its_conversation_and_can_be_browsed_across_folders() {
+	let h = side_by_side();
+	h.demo();
+	let row = h.row("Your invoice for October");
+	h.until("the labels", |s| !s.list.as_ref().unwrap().labels.is_empty());
+	let label = h.with(|s| s.list.as_ref().unwrap().labels.iter().find(|l| l.name == "Travel").unwrap().clone());
+	assert_eq!(label.icon, FolderIcon::Label);
+
+	h.send(Action::RowLabels { key: row.key.clone(), folder_id: row.folder_id.clone() });
+	h.until("the sheet", |s| matches!(&s.sheet, Some(SheetView::Labels { choices, .. }) if choices.iter().all(|c| !c.on)));
+	h.send(Action::ToggleLabel { id: label.id.clone() });
+	h.until("ticked", |s| matches!(&s.sheet, Some(SheetView::Labels { choices, .. }) if choices.iter().any(|c| c.on)));
+	h.until("on the row", |s| s.list.as_ref().unwrap().rows.iter().any(|r| r.key == row.key && r.labels == ["Travel"]));
+	h.send(Action::CreateLabel { name: "Bills".into() });
+	h.until("a new label on the row too", |s| s.list.as_ref().unwrap().rows.iter().any(|r| r.key == row.key && r.labels.iter().any(|l| l == "Bills")));
+	h.send(Action::CloseSheet);
+
+	h.send(Action::OpenThread { key: row.key.clone(), folder_id: row.folder_id.clone() });
+	h.until("on the conversation", |s| s.conversation.as_ref().is_some_and(|c| c.labels.iter().any(|l| l == "Travel")));
+
+	h.send(Action::OpenLabel { id: label.id.clone() });
+	h.until("only what carries it", |s| s.search.as_ref().is_some_and(|v| v.title == "Travel" && v.rows.len() == 1 && v.rows[0].key == row.key));
+	h.until("the label marked on show", |s| s.list.as_ref().unwrap().labels.iter().any(|l| l.id == label.id && l.selected) && s.list.as_ref().unwrap().folders.iter().all(|f| !f.selected));
+
+	// Taking it off empties the list it is on.
+	h.send(Action::RowLabels { key: row.key.clone(), folder_id: row.folder_id.clone() });
+	h.until("the sheet", |s| matches!(s.sheet, Some(SheetView::Labels { .. })));
+	h.send(Action::ToggleLabel { id: label.id.clone() });
+	h.until("nothing carries it", |s| s.search.as_ref().is_some_and(|v| v.rows.is_empty() && v.empty && v.empty_title == "No mail with this label"));
+	h.send(Action::CloseSheet);
+
+	let inbox = h.with(|s| s.list.as_ref().unwrap().folders[0].id.clone());
+	h.send(Action::OpenFolder { id: inbox });
+	h.until("back in the folder", |s| s.shell.as_ref().unwrap().stack == [Screen::Inbox] && s.list.as_ref().unwrap().folders[0].selected);
+}
+
+#[test]
+fn each_try_at_sending_is_told_even_with_the_same_problem() {
+	let h = side_by_side();
+	h.demo();
+	h.send(Action::ComposeNew);
+	h.until("a composer", |s| s.composers.len() == 1);
+	h.send(Action::ComposeSend { text: text("not an address", "One", "Hi") });
+	h.until("the problem", |s| s.composers[0].tries == 1 && s.composers[0].error.is_some());
+	let said = h.with(|s| s.composers[0].error.clone());
+	h.send(Action::ComposeSend { text: text("not an address", "One", "Hi") });
+	h.until("told again", |s| s.composers[0].tries == 2);
+	assert_eq!(h.with(|s| s.composers[0].error.clone()), said);
 }

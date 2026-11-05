@@ -180,5 +180,6 @@ val com.tern.engine.FolderIcon.glyph: ImageVector
         com.tern.engine.FolderIcon.ARCHIVE -> Icons.Archive
         com.tern.engine.FolderIcon.SPAM -> Icons.Spam
         com.tern.engine.FolderIcon.TRASH -> Icons.Trash
+        com.tern.engine.FolderIcon.LABEL -> Icons.Label
         com.tern.engine.FolderIcon.FOLDER -> Icons.Archive
     }

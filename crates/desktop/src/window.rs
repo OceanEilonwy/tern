@@ -8,7 +8,7 @@ use std::sync::Arc;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use tern_app::view::{Action, ChoiceView, ConnectionKind, ComposerView, Effect, RuleEditorView, RulesView, Screen, SettingsView, SheetView, ShellView, SnackView, Update};
-use tern_app::{Engine, EngineListener, Host, Options, SecretStore, SessionParts};
+use tern_app::{Engine, EngineListener, Options, SecretStore};
 use tern_cache::Cache;
 use tern_compose::Fields;
 use tern_demo::DemoBackend;
@@ -19,7 +19,7 @@ use crate::activity::{Activity, Busy, Word};
 use crate::composer::Composer;
 use crate::keyring::{InMemory, Keyring};
 use crate::layout::Layout;
-use crate::{attachments, cleanup, default_app, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot, spam};
+use crate::{attachments, cleanup, default_app, labels, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot, spam};
 
 type OfferHook = Box<dyn Fn(Option<&str>)>;
 /// The composer last asked to throw its mail away, and the dialog asking.
@@ -33,8 +33,6 @@ type RuleEditorHook = Box<dyn Fn(Option<&RuleEditorView>)>;
 pub struct Ctx {
 	pub window: adw::ApplicationWindow,
 	pub toasts: adw::ToastOverlay,
-	backend: Rc<RefCell<Option<Arc<dyn Backend>>>>,
-	cache: Rc<RefCell<Option<Arc<Cache>>>>,
 	pub engine: Arc<Engine>,
 	/// Preferences, when open: what Clean Up opens over, and where it says it is done.
 	preferences: Rc<RefCell<Option<glib::WeakRef<adw::PreferencesDialog>>>>,
@@ -50,6 +48,10 @@ pub struct Ctx {
 	rules_view: Rc<RefCell<Option<RulesView>>>,
 	rule_editor_view: Rc<RefCell<Option<RuleEditorView>>>,
 	layout: Rc<Cell<Layout>>,
+	/// For the screenshot scenes: files that would have gone to another app.
+	pub handed_over: Rc<RefCell<Vec<String>>>,
+	/// The labels dialog, while open.
+	pub label_picker: Rc<RefCell<Option<Rc<labels::Picker>>>>,
 	/// Move to Spam, while open.
 	pub picker: Rc<RefCell<Option<Rc<spam::Picker>>>>,
 	/// The composers on screen, by the core's id.
@@ -62,12 +64,14 @@ pub struct Ctx {
 }
 
 impl Ctx {
+	/// For the screenshot scenes, which look behind the views.
 	pub fn backend(&self) -> Option<Arc<dyn Backend>> {
-		self.backend.borrow().clone()
+		self.engine.session_parts().map(|p| p.backend)
 	}
 
+	/// For the screenshot scenes, which look behind the views.
 	pub fn cache(&self) -> Option<Arc<Cache>> {
-		self.cache.borrow().clone()
+		self.engine.session_parts().map(|p| p.cache)
 	}
 
 	pub fn settings_view(&self) -> Option<SettingsView> {
@@ -131,6 +135,11 @@ impl Ctx {
 				*self.picker.borrow_mut() = Some(picker);
 			},
 			Some(SheetView::Discard) => self.ask_discard(),
+			Some(SheetView::Labels { subject, choices }) => {
+				let picker = self.label_picker.borrow().clone().unwrap_or_else(|| labels::open(self));
+				picker.show(&subject, &choices);
+				*self.label_picker.borrow_mut() = Some(picker);
+			},
 			Some(SheetView::Cleanup { total, choices }) => {
 				let (dialog, all) = cleanup::dialog(self, &total, &choices);
 				match self.open_preferences() {
@@ -148,6 +157,9 @@ impl Ctx {
 				}
 				if let Some(dialog) = self.discarding.borrow_mut().1.take() {
 					dialog.force_close();
+				}
+				if let Some(picker) = self.label_picker.borrow_mut().take() {
+					picker.dialog.force_close();
 				}
 			},
 		}
@@ -185,6 +197,10 @@ impl Ctx {
 			self.composers.borrow_mut().remove(&composer.id);
 			composer.finish();
 		}
+		// Closed earlier and kept for these: there is nothing left to keep it for.
+		if views.is_empty() && !self.window.is_visible() {
+			self.window.close();
+		}
 		for view in &views {
 			let known = self.composers.borrow().get(&view.id).cloned();
 			match known {
@@ -200,6 +216,11 @@ impl Ctx {
 	/// The composer whose mail may be about to be thrown away, if the core asks.
 	pub fn ask_discard_from(&self, id: u64, window: &adw::Window) {
 		self.discarding.borrow_mut().0 = Some((id, window.clone()));
+	}
+
+	/// For the screenshot scenes: the dialog asking whether to throw a mail away.
+	pub fn discard_dialog(&self) -> Option<adw::AlertDialog> {
+		self.discarding.borrow().1.clone()
 	}
 
 	/// Asks before throwing a composer's mail away, and its saved draft with it.
@@ -241,6 +262,8 @@ pub struct Window {
 	pub login: Login,
 	pub mailbox: Rc<Mailbox>,
 	/// Mail asked for before there was an account to send it from, to write once signed in.
+	/// The account open now, if any.
+	address: RefCell<String>,
 	/// What the core is doing, for the activity word.
 	working: RefCell<Option<(Word, Busy)>>,
 	/// The sign-in page has just come up, and takes the focus once it knows what to show.
@@ -268,8 +291,8 @@ impl Window {
 			on_rule_editor: Rc::default(),
 			rules_view: Rc::default(),
 			rule_editor_view: Rc::default(),
-			backend: Rc::default(),
-			cache: Rc::default(),
+			handed_over: Rc::default(),
+			label_picker: Rc::default(),
 			layout: Rc::new(Cell::new(layout)),
 			picker: Rc::default(),
 			composers: Rc::default(),
@@ -295,7 +318,17 @@ impl Window {
 			window.add_breakpoint(bp);
 		}
 
-		let this = Rc::new(Window { ctx, stack, login, mailbox, working: RefCell::default(), focus_login: Cell::new(false) });
+		// Closing the window while composers are open only hides it: they go on with this core, and
+		// asking for the window again brings it back.
+		let hide_for = ctx.clone();
+		window.connect_close_request(move |window| {
+			if hide_for.composers.borrow().is_empty() {
+				return glib::Propagation::Proceed;
+			}
+			window.set_visible(false);
+			glib::Propagation::Stop
+		});
+		let this = Rc::new(Window { ctx, stack, login, mailbox, address: RefCell::default(), working: RefCell::default(), focus_login: Cell::new(false) });
 		// The GTK window owns this struct until it is destroyed; callbacks and actions hold only weak references.
 		let owner = RefCell::new(Some(this.clone()));
 		window.connect_destroy(move |_| drop(owner.take()));
@@ -381,7 +414,6 @@ impl Window {
 				Update::RuleEditor { view } => self.ctx.show_rule_editor(view),
 				_ => {},
 			},
-			Incoming::Session(parts) => self.session_changed(parts),
 			Incoming::Effect(effect) => match effect {
 				Effect::OpenFile { path, .. } => attachments::open_file(&self.ctx, &path),
 				Effect::SaveFile { path, name, .. } => attachments::save_file(&self.ctx, &path, &name),
@@ -392,6 +424,7 @@ impl Window {
 	}
 
 	fn show_shell(self: &Rc<Self>, view: ShellView) {
+		self.account_changed(&view.address);
 		self.mailbox.set_searching(view.stack.contains(&Screen::Search));
 		match view.stack.last() {
 			Some(Screen::Starting) | None => {},
@@ -433,19 +466,16 @@ impl Window {
 		}
 	}
 
-	fn session_changed(self: &Rc<Self>, parts: Option<SessionParts>) {
-		let Some(parts) = parts else {
-			*self.ctx.backend.borrow_mut() = None;
-			*self.ctx.cache.borrow_mut() = None;
-			self.mailbox.clear();
+	/// An account opened or closed.
+	fn account_changed(self: &Rc<Self>, address: &str) {
+		if *self.address.borrow() == address {
 			return;
-		};
-		// The same account again once it has connected, with the same cache and a real backend.
-		let opening = self.ctx.cache.borrow().is_none();
-		*self.ctx.backend.borrow_mut() = Some(parts.backend);
-		*self.ctx.cache.borrow_mut() = Some(parts.cache);
-		if opening {
-			self.mailbox.start();
+		}
+		*self.address.borrow_mut() = address.to_string();
+		if address.is_empty() {
+			self.mailbox.clear();
+		} else {
+			self.mailbox.start(address);
 			log::debug!("mailbox shown");
 		}
 	}
@@ -455,7 +485,6 @@ impl Window {
 enum Incoming {
 	Update(Box<Update>),
 	Effect(Effect),
-	Session(Option<SessionParts>),
 }
 
 struct Bridge(UnboundedSender<Incoming>);
@@ -470,22 +499,15 @@ impl EngineListener for Bridge {
 	fn on_log(&self, _: String) {}
 }
 
-impl Host for Bridge {
-	fn session(&self, parts: Option<SessionParts>) {
-		let _ = self.0.send(Incoming::Session(parts));
-	}
-}
-
 /// The core, for this desktop. The scenes keep to themselves, with no real keyring.
 fn start_engine() -> (Arc<Engine>, UnboundedReceiver<Incoming>) {
 	let (tx, incoming) = unbounded_channel();
 	let bridge = Arc::new(Bridge(tx));
-	let listener = bridge.clone();
 	let in_scene = screenshot::scene().is_some();
 	let signed_in: Option<Arc<dyn Backend>> = std::env::var_os("TERN_DEMO").map(|_| if in_scene { screenshot::backend() } else { Arc::new(DemoBackend::new()) });
 	let secrets: Arc<dyn SecretStore> = if in_scene { Arc::new(InMemory::default()) } else { Arc::new(Keyring) };
-	let options = Options { device: "computer", meaning: Some(crate::meaning().clone()), signed_in, host: Some(bridge), retry_hint: "Press F5 to try again.", follow_neighbour: true, lone_draft_composes: false };
-	(Engine::open_with(crate::paths().clone(), options, secrets, listener), incoming)
+	let options = Options { device: "computer", meaning: Some(crate::meaning().clone()), signed_in, retry_hint: "Press F5 to try again.", follow_neighbour: true, lone_draft_composes: false };
+	(Engine::open_with(crate::paths().clone(), options, secrets, bridge), incoming)
 }
 
 /// Preferences, with its Rules section.
@@ -563,7 +585,8 @@ fn choice_row(ctx: &Ctx, title: &str, subtitle: Option<&str>, choices: &[ChoiceV
 /// How much Tern takes on disk, with Clean Up always to hand whatever the size.
 fn storage_row(ctx: &Ctx, line: &str) -> adw::ActionRow {
 	let button = gtk::Button::builder().label("Clean Up…").valign(gtk::Align::Center).build();
-	let row = adw::ActionRow::builder().title("Storage").subtitle(line).visible(ctx.cache().is_some()).build();
+	let signed_in = ctx.settings_view().is_some_and(|v| !v.address.is_empty());
+	let row = adw::ActionRow::builder().title("Storage").subtitle(line).visible(signed_in).build();
 	row.add_suffix(&button);
 	let engine = ctx.engine.clone();
 	button.connect_clicked(move |_| engine.send(Action::OpenCleanup));
@@ -617,6 +640,7 @@ fn shortcuts_dialog() -> adw::ShortcutsDialog {
 				("Mark as Unread", "<Control>u"),
 				("Move Conversation to Trash", "Delete"),
 				("Move to Spam", "<Control>j"),
+				("Labels", "<Control><Shift>l"),
 				("Conversation Menu", "<Shift>F10"),
 				("Check for New Mail", "F5"),
 				("Search", "<Control>f"),

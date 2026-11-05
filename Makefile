@@ -20,7 +20,7 @@ test: test-ui
 # (it draws real frames, so layout settles as on screen), else GNOME's mutter, headless (as in CI;
 # it needs a D-Bus session, and with no GPU set GSK_RENDERER=cairo), else GTK's broadway. Each scene saves a
 # picture only if its check passed.
-UI_SCENES = sign-in mailto default-app folders-fail refresh-race sign-out-race draft suggest keys arrows busy panes search focus-first spam rules rule-edit menu from quote cleanup
+UI_SCENES = sign-in mailto default-app folders-fail refresh-race sign-out-race draft suggest keys arrows busy panes search focus-first spam rules rule-edit menu from quote cleanup labels attachments discard reopen narrow-fits repeat-error
 test-ui:
 	cargo build -p tern
 	@dir=$$(mktemp -d); \

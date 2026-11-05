@@ -594,11 +594,16 @@ Built to the "Cache cleanup" boards on the design canvas.
 - **`tern-app` is the one core.** It holds the state, navigation and what each action does, and publishes
   views. Platforms draw them. Android does this entirely. The desktop runs the engine in its own process,
   and every screen goes through it. All the desktop keeps is drawing and what only it can do: windows, keyboard
-  handling, pane widths, file dialogs and the keyring. The Rust-only `Host` trait remains to say when an account
-  opens and closes, and so that the desktop's scenes can look behind the views; no mail goes through it.
+  handling, pane widths, file dialogs and the keyring. `Engine::session_parts` is there only so that the desktop's
+  scenes can look behind the views; the app itself uses nothing but actions and views.
+- **Closing the window with a composer open only hides it.** The composers go on with the same core, asking for
+  the window brings it back, and it goes when the last of them does. Two windows on two cores would mean two syncs.
 - **Several composers.** The core holds any number and says which one actions are for with `ComposeFocus`. A
   phone only ever has one, and goes on hearing about just that one in `Update::Composer`; the desktop draws a
   window for each in `Update::Composers`.
+- **Labels are browsed like folders, on the desktop for now.** Under the folders in the sidebar, each lists the
+  mail here carrying it, across folders, through the same machinery as a search. It only knows mail kept here, as a
+  search does. Android has what it needs in `ListView.labels` and `Action::OpenLabel`, but no place for them yet.
 - **Attachments stop at 25 MB.** The desktop used to warn past that and try anyway, which Tuta may refuse. It now
   says so and does not add the file, as on Android.
 - **Beside the list, the next conversation follows.** `follow_neighbour` has the core open a conversation's

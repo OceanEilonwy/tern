@@ -10,6 +10,7 @@ mod composer;
 mod default_app;
 mod grip;
 mod keyring;
+mod labels;
 mod layout;
 mod login;
 mod mailbox;
@@ -62,6 +63,8 @@ fn quiet_old_dark_setting() {
 /// The main window, opened now if it is not open.
 fn main_window(app: &adw::Application, slot: &RefCell<Weak<window::Window>>) -> Rc<window::Window> {
 	if let Some(win) = slot.borrow().upgrade() {
+		// It may only be hidden, closed while composers stayed open.
+		win.ctx.window.present();
 		return win;
 	}
 	let win = window::Window::new(app);
@@ -97,6 +100,7 @@ fn main() -> glib::ExitCode {
 		app.set_accels_for_action("win.forward", &["<Control>l"]);
 		app.set_accels_for_action("win.trash", &["Delete"]);
 		app.set_accels_for_action("win.spam", &["<Control>j"]);
+		app.set_accels_for_action("win.labels", &["<Control><Shift>l"]);
 		app.set_accels_for_action("win.refresh", &["F5"]);
 		app.set_accels_for_action("win.mark-unread", &["<Control>u"]);
 		app.set_accels_for_action("win.next", &["<Alt>Down"]);
@@ -110,15 +114,17 @@ fn main() -> glib::ExitCode {
 		let quit = gio::ActionEntry::builder("quit").activate(|app: &adw::Application, _, _| app.quit()).build();
 		app.add_action_entries([quit]);
 	});
-	let main = Rc::new(RefCell::new(Weak::new()));
+	let main: Rc<RefCell<Weak<window::Window>>> = Rc::new(RefCell::new(Weak::new()));
 	app.connect_activate({
 		let main = main.clone();
 		move |app| {
-			if let Some(w) = app.active_window() {
-				w.present();
-				return;
+			let hidden = main.borrow().upgrade().is_some_and(|win| !win.ctx.window.is_visible());
+			match app.active_window().filter(|_| !hidden) {
+				Some(w) => w.present(),
+				None => {
+					main_window(app, &main);
+				},
 			}
-			main_window(app, &main);
 		}
 	});
 	// A mailto link, from another program or from a second `tern` passing it on to this one.

@@ -27,7 +27,6 @@ use app::{App, Msg};
 use semantic::Meaning;
 use tern_cache::Cache;
 use tern_mail::Backend;
-use tern_sync::fetcher::Fetcher;
 use paths::Paths;
 pub use view::*;
 
@@ -98,20 +97,14 @@ fn first_dir(dirs: &str) -> Option<&str> {
 pub struct Engine {
 	tx: UnboundedSender<Msg>,
 	settings: Arc<std::sync::Mutex<settings::Settings>>,
+	parts: Arc<std::sync::Mutex<Option<SessionParts>>>,
 }
 
-/// The parts of a session, for tests that look behind the views.
+/// The parts of a session, for tests that look behind the views. Nothing in the apps uses them.
 #[derive(Clone)]
 pub struct SessionParts {
 	pub backend: Arc<dyn Backend>,
 	pub cache: Arc<Cache>,
-	pub fetcher: Fetcher,
-}
-
-/// For tests that look behind the views. Comes from any thread.
-pub trait Host: Send + Sync {
-	/// The session changed: a new account, its backend swapped once connected, or `None` at sign-out.
-	fn session(&self, parts: Option<SessionParts>);
 }
 
 /// How a platform differs. What Android needs is the default.
@@ -122,7 +115,6 @@ pub struct Options {
 	pub meaning: Option<Arc<Meaning>>,
 	/// An account already open, with no saved session: the demo at start-up.
 	pub signed_in: Option<Arc<dyn Backend>>,
-	pub host: Option<Arc<dyn Host>>,
 	/// How a failed list says to try again.
 	pub retry_hint: &'static str,
 	/// The list and the conversation are on screen together, so when the open conversation leaves
@@ -134,7 +126,7 @@ pub struct Options {
 
 impl Default for Options {
 	fn default() -> Options {
-		Options { device: "phone", meaning: None, signed_in: None, host: None, retry_hint: "Pull down to try again.", follow_neighbour: false, lone_draft_composes: true }
+		Options { device: "phone", meaning: None, signed_in: None, retry_hint: "Pull down to try again.", follow_neighbour: false, lone_draft_composes: true }
 	}
 }
 
@@ -208,7 +200,7 @@ impl Engine {
 	pub fn open_with(paths: Paths, options: Options, secrets: Arc<dyn SecretStore>, listener: Arc<dyn EngineListener>) -> Arc<Engine> {
 		let (tx, mut rx) = unbounded_channel();
 		let mut app = App::new(tx.clone(), listener, secrets, runtime().handle().clone(), paths, options);
-		let settings = app.settings_handle();
+		let (settings, parts) = (app.settings_handle(), app.parts_handle());
 		runtime().spawn(async move {
 			app.start();
 			while let Some(msg) = rx.recv().await {
@@ -226,7 +218,12 @@ impl Engine {
 				app.publish();
 			}
 		});
-		Arc::new(Engine { tx, settings })
+		Arc::new(Engine { tx, settings, parts })
+	}
+
+	/// The account's parts, for tests that look behind the views.
+	pub fn session_parts(&self) -> Option<SessionParts> {
+		self.parts.lock().unwrap_or_else(|p| p.into_inner()).clone()
 	}
 
 	/// The settings as they are now.

@@ -687,6 +687,29 @@ impl Cache {
 		found.into_iter().map(|(key, mail)| hit(&conn, key, mail)).collect()
 	}
 
+	/// The conversations with mail carrying the label with this own id, newest first, as for a search.
+	pub fn label_hits(&self, label: &str, limit: usize) -> Result<Vec<SearchHit>> {
+		let conn = self.conn();
+		let mut stmt = conn.prepare(
+			"SELECT m.id, m.thread, m.summary FROM mails m LEFT JOIN folders f ON f.id = m.folder
+			 WHERE coalesce(f.kind, '') NOT IN ('Trash', 'Spam') ORDER BY m.received DESC",
+		)?;
+		let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+		let mut found: Vec<(String, i64)> = Vec::new();
+		for row in rows {
+			let (mail, key, json) = row?;
+			if found.len() == limit {
+				break;
+			}
+			let summary: MailSummary = serde_json::from_str(&json)?;
+			if !found.iter().any(|(k, _)| k == &key) && summary.sets.iter().any(|set| set == label) {
+				found.push((key, mail));
+			}
+		}
+		drop(stmt);
+		found.into_iter().map(|(key, mail)| hit(&conn, key, mail)).collect()
+	}
+
 	/// Up to `limit` mails, newest first, whose meaning `model` has not worked out yet, with the
 	/// text to work it out from.
 	pub fn unembedded(&self, model: &str, limit: usize) -> Result<Vec<(i64, String)>> {

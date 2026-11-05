@@ -110,6 +110,7 @@ pub enum FolderIcon {
 	Spam,
 	Trash,
 	Folder,
+	Label,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,6 +165,8 @@ pub struct SelectionView {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ListView {
 	pub folders: Vec<FolderView>,
+	/// The account's labels, to browse by.
+	pub labels: Vec<FolderView>,
 	pub title: String,
 	pub state: ListState,
 	pub empty_title: String,
@@ -266,6 +269,8 @@ pub struct CardView {
 pub struct ConversationView {
 	pub key: String,
 	pub subject: String,
+	/// The labels on any of its mails here.
+	pub labels: Vec<String>,
 	pub cards: Vec<CardView>,
 	pub can_archive: bool,
 	pub can_spam: bool,
@@ -337,6 +342,8 @@ pub struct ComposerView {
 	pub sending: bool,
 	pub saving: bool,
 	pub error: Option<String>,
+	/// Counts tries at sending, so saying the same thing again can be told from having said it.
+	pub tries: u32,
 	pub bad_to: bool,
 	pub bad_cc: bool,
 	pub bad_bcc: bool,
@@ -361,6 +368,8 @@ pub struct SearchView {
 	pub title: String,
 	pub note: String,
 	pub empty: bool,
+	pub empty_title: String,
+	pub empty_detail: String,
 	pub rows: Vec<RowView>,
 }
 
@@ -576,6 +585,8 @@ pub enum Action {
 	SnackGone { id: u64 },
 
 	OpenFolder { id: String },
+	/// Lists the mail here carrying this label, across folders, in place of the folder.
+	OpenLabel { id: String },
 	Refresh,
 	LoadMore,
 	OpenThread { key: String, folder_id: String },
@@ -585,6 +596,7 @@ pub enum Action {
 	RowRead { key: String, folder_id: String, read: bool },
 	RowSpam { key: String, folder_id: String },
 	RowTrash { key: String, folder_id: String },
+	RowLabels { key: String, folder_id: String },
 
 	ToggleSelect { key: String },
 	SelectAll,

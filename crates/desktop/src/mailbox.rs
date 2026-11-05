@@ -43,6 +43,8 @@ pub struct Mailbox {
 	/// The offer to clean up, at the foot of the folders: shown once Tern takes more room than set.
 	broom: Broom,
 	folders: RefCell<Vec<FolderRow>>,
+	/// What gives way on a narrow window: New's word, and Refresh, which the main menu also has.
+	list_wide_only: Vec<gtk::Widget>,
 	list_title: adw::WindowTitle,
 	list_stack: gtk::Stack,
 	empty: adw::StatusPage,
@@ -186,6 +188,7 @@ fn folder_icon(icon: FolderIcon) -> &'static str {
 		FolderIcon::Spam => "mail-mark-junk-symbolic",
 		FolderIcon::Trash => "user-trash-symbolic",
 		FolderIcon::Folder => "folder-symbolic",
+		FolderIcon::Label => "tern-label-symbolic",
 	}
 }
 
@@ -214,6 +217,7 @@ fn row_widget() -> gtk::Box {
 	let row = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(3).margin_top(9).margin_bottom(9).margin_start(6).margin_end(6).build();
 	row.append(&top);
 	row.append(&subject);
+	row.append(&gtk::Box::builder().spacing(4).margin_top(3).visible(false).build());
 	row
 }
 
@@ -244,6 +248,17 @@ fn bind_row(row: &gtk::Box, t: &RowView) {
 	clip.set_visible(t.has_attachments);
 	date.set_label(&t.date);
 	subject.set_label(&t.subject);
+	let labels = subject.next_sibling().and_downcast::<gtk::Box>().unwrap();
+	while let Some(child) = labels.first_child() {
+		labels.remove(&child);
+	}
+	for name in t.labels.iter().take(3) {
+		labels.append(&gtk::Label::builder().label(name).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["caption", "row-label"]).build());
+	}
+	if t.labels.len() > 3 {
+		labels.append(&gtk::Label::builder().label(format!("+{}", t.labels.len() - 3)).css_classes(["caption", "dim-label"]).build());
+	}
+	labels.set_visible(!t.labels.is_empty());
 	if t.unread {
 		subject.remove_css_class("dim-label");
 	} else {
@@ -257,6 +272,7 @@ impl Mailbox {
 		let account = adw::WindowTitle::new("Tern", "");
 		let menu = gio::Menu::new();
 		let section = gio::Menu::new();
+		section.append(Some("_Check for New Mail"), Some("win.refresh"));
 		section.append(Some("_Preferences"), Some("app.preferences"));
 		section.append(Some("_Keyboard Shortcuts"), Some("app.shortcuts"));
 		section.append(Some("_About Tern"), Some("app.about"));
@@ -312,10 +328,14 @@ impl Mailbox {
 		let list_title = adw::WindowTitle::new("Inbox", "");
 		let list_header = adw::HeaderBar::builder().title_widget(&list_title).build();
 		let sidebar_toggle = gtk::ToggleButton::builder().icon_name("sidebar-show-symbolic").tooltip_text("Show Folders").build();
-		let compose_content = adw::ButtonContent::builder().icon_name("mail-message-new-symbolic").label("_New").use_underline(true).build();
+		let compose_word = gtk::Label::builder().label("_New").use_underline(true).build();
+		let compose_content = gtk::Box::builder().spacing(6).build();
+		compose_content.append(&gtk::Image::from_icon_name("mail-message-new-symbolic"));
+		compose_content.append(&compose_word);
 		let compose = gtk::Button::builder().child(&compose_content).action_name("win.compose").tooltip_text("New Message (Ctrl+N)").css_classes(["suggested-action"]).build();
 		let activity = ctx.activity.indicator();
 		let refresh = gtk::Button::builder().icon_name("view-refresh-symbolic").action_name("win.refresh").tooltip_text("Check for New Mail (F5)").build();
+		let list_wide_only: Vec<gtk::Widget> = vec![compose_word.upcast(), refresh.clone().upcast()];
 		list_header.pack_start(&sidebar_toggle);
 		list_header.pack_start(&compose);
 		list_header.pack_end(&menus.1);
@@ -365,6 +385,7 @@ impl Mailbox {
 			folder_list,
 			broom,
 			folders: RefCell::default(),
+			list_wide_only,
 			list_title,
 			list_stack,
 			empty,
@@ -413,6 +434,11 @@ impl Mailbox {
 		let narrow = adw::Breakpoint::new(adw::BreakpointCondition::new_length(adw::BreakpointConditionLengthType::MaxWidth, 600.0, adw::LengthUnit::Sp));
 		narrow.add_setter(&self.outer, "collapsed", Some(&true.to_value()));
 		narrow.add_setter(&self.inner, "collapsed", Some(&true.to_value()));
+		let (wide_only, more) = self.reader.narrow_setters();
+		for widget in wide_only.iter().chain(&self.list_wide_only) {
+			narrow.add_setter(widget, "visible", Some(&false.to_value()));
+		}
+		narrow.add_setter(&more, "visible", Some(&true.to_value()));
 		vec![medium, narrow]
 	}
 
@@ -585,11 +611,25 @@ impl Mailbox {
 					this.store.remove_all();
 					this.hold.set(false);
 					this.inner.set_show_content(false);
-					this.ctx.engine.send(Action::OpenFolder { id: folder.id });
+					let label = folder.icon == FolderIcon::Label;
+					this.ctx.engine.send(if label { Action::OpenLabel { id: folder.id } } else { Action::OpenFolder { id: folder.id } });
 				}
 				if !this.hold.get() && this.outer.is_collapsed() {
 					this.outer.set_show_sidebar(false);
 				}
+			}
+		});
+		// A heading over the first label, which goes when the folders are a rail.
+		let weak = Rc::downgrade(self);
+		self.folder_list.set_header_func(move |row, before| {
+			let Some(this) = weak.upgrade() else { return };
+			let folders = this.folders.borrow();
+			let label = |i: i32| folders.get(i as usize).is_some_and(|r| r.folder.icon == FolderIcon::Label);
+			let first = label(row.index()) && !before.is_some_and(|b| label(b.index()));
+			if first && !this.is_rail() {
+				row.set_header(Some(&gtk::Label::builder().label("Labels").xalign(0.0).css_classes(["caption-heading", "dim-label"]).margin_top(12).margin_bottom(4).margin_start(12).build()));
+			} else {
+				row.set_header(None::<&gtk::Widget>);
 			}
 		});
 		// Enter on a folder moves on to its conversations.
@@ -706,7 +746,7 @@ impl Mailbox {
 	}
 
 	fn add_actions(self: &Rc<Self>) {
-		let entries: [(&str, MailAction); 15] = [
+		let entries: [(&str, MailAction); 16] = [
 			("compose", |m| m.ctx.engine.send(Action::ComposeNew)),
 			("reply", |m| m.answer(AnswerKind::Reply)),
 			("reply-all", |m| m.answer(AnswerKind::ReplyAll)),
@@ -716,6 +756,7 @@ impl Mailbox {
 				m.focus_list();
 			}),
 			("spam", |m| m.ctx.engine.send(Action::ConversationSpam)),
+			("labels", |m| m.ctx.engine.send(Action::ConversationLabels)),
 			("refresh", |m| m.ctx.engine.send(Action::Refresh)),
 			("mark-unread", |m| {
 				m.ctx.engine.send(Action::ConversationUnread);
@@ -755,12 +796,13 @@ impl Mailbox {
 		});
 		self.ctx.window.add_action(&folder);
 		// What a conversation's menu does, to the conversation it was opened on.
-		let row_actions: [(&str, RowAction); 5] = [
+		let row_actions: [(&str, RowAction); 6] = [
 			("pin", |m, row| m.ctx.engine.send(Action::RowPin { key: row.key.clone() })),
 			("read", |m, row| m.ctx.engine.send(Action::RowRead { key: row.key.clone(), folder_id: row.folder_id.clone(), read: true })),
 			("unread", |m, row| m.ctx.engine.send(Action::RowRead { key: row.key.clone(), folder_id: row.folder_id.clone(), read: false })),
 			("spam", |m, row| m.ctx.engine.send(Action::RowSpam { key: row.key.clone(), folder_id: row.folder_id.clone() })),
 			("trash", |m, row| m.ctx.engine.send(Action::RowTrash { key: row.key.clone(), folder_id: row.folder_id.clone() })),
+			("labels", |m, row| m.ctx.engine.send(Action::RowLabels { key: row.key.clone(), folder_id: row.folder_id.clone() })),
 		];
 		let group = gio::SimpleActionGroup::new();
 		for (name, f) in row_actions {
@@ -821,6 +863,7 @@ impl Mailbox {
 		} else {
 			section.append(Some("Mark as _Unread"), Some("row.unread"));
 		}
+		section.append(Some("_Labels…"), Some("row.labels"));
 		menu.append_section(None, &section);
 		let section = gio::Menu::new();
 		if kind != Some(FolderIcon::Spam) {
@@ -863,17 +906,15 @@ impl Mailbox {
 		for name in ["reply", "reply-all", "forward"] {
 			self.action(name).set_enabled(answerable);
 		}
-		for name in ["trash", "spam", "mark-unread", "open-in-tuta"] {
+		for name in ["trash", "spam", "labels", "mark-unread", "open-in-tuta"] {
 			self.action(name).set_enabled(open || self.reader.thread().is_some());
 		}
 	}
 
 	/// An account has opened.
-	pub fn start(self: &Rc<Self>) {
-		let Some(backend) = self.ctx.backend() else { return };
-		let account = backend.account();
-		self.account.set_subtitle(&account.address);
-		self.ctx.window.set_title(Some(&format!("Tern — {}", account.address)));
+	pub fn start(self: &Rc<Self>, address: &str) {
+		self.account.set_subtitle(address);
+		self.ctx.window.set_title(Some(&format!("Tern — {address}")));
 		self.set_enabled(true);
 	}
 
@@ -916,7 +957,7 @@ impl Mailbox {
 
 	/// Draws what the core says about the folder on show.
 	pub fn show_list(self: &Rc<Self>, view: ListView) {
-		self.show_folders(&view.folders);
+		self.show_folders(&view.folders, &view.labels);
 		*self.list.borrow_mut() = Some(view);
 		if !self.searching.get() {
 			self.show_current();
@@ -951,7 +992,7 @@ impl Mailbox {
 			if !view.rows.is_empty() {
 				self.list_stack.set_visible_child_name("list");
 			} else if view.empty {
-				self.show_status("No Matches", Some("No matches in mail on this computer"));
+				self.show_status(&view.empty_title, Some(&view.empty_detail));
 			}
 		} else {
 			let Some(view) = self.list.borrow().clone() else { return };
@@ -968,15 +1009,17 @@ impl Mailbox {
 		self.update_actions();
 	}
 
-	fn show_folders(self: &Rc<Self>, folders: &[FolderView]) {
+	/// The folders in the sidebar, then the labels under their own heading.
+	fn show_folders(self: &Rc<Self>, folders: &[FolderView], labels: &[FolderView]) {
+		let all: Vec<&FolderView> = folders.iter().chain(labels).collect();
 		let unchanged = {
 			let old = self.folders.borrow();
-			old.len() == folders.len() && old.iter().zip(folders).all(|(a, b)| a.folder.id == b.id && a.folder.name == b.name)
+			old.len() == all.len() && old.iter().zip(&all).all(|(a, b)| a.folder.id == b.id && a.folder.name == b.name)
 		};
 		if unchanged {
 			// Only counts changed: update labels in place.
-			for (row, new) in self.folders.borrow_mut().iter_mut().zip(folders) {
-				row.folder = new.clone();
+			for (row, new) in self.folders.borrow_mut().iter_mut().zip(&all) {
+				row.folder = (*new).clone();
 				row.set_unread(new.unread);
 			}
 		} else {
@@ -984,14 +1027,15 @@ impl Mailbox {
 			self.folder_list.remove_all();
 			self.hold.set(false);
 			let mut rows = Vec::new();
-			for (i, folder) in folders.iter().enumerate() {
-				let row = FolderRow::new(folder.clone(), (i < 9).then_some(i + 1), self.is_rail());
+			for (i, folder) in all.iter().enumerate() {
+				let row = FolderRow::new((*folder).clone(), (i < 9 && i < folders.len()).then_some(i + 1), self.is_rail());
 				self.folder_list.append(&row.row);
 				rows.push(row);
 			}
 			*self.folders.borrow_mut() = rows;
+			self.folder_list.invalidate_headers();
 		}
-		let on_show = folders.iter().position(|f| f.selected).and_then(|i| self.folder_list.row_at_index(i as i32));
+		let on_show = all.iter().position(|f| f.selected).and_then(|i| self.folder_list.row_at_index(i as i32));
 		if self.folder_list.selected_row() != on_show {
 			self.hold.set(true);
 			self.folder_list.select_row(on_show.as_ref());
@@ -1158,6 +1202,29 @@ impl Mailbox {
 		if let Some(row) = index.and_then(|i| self.folder_list.row_at_index(i as i32)) {
 			self.folder_list.select_row(Some(&row));
 		}
+	}
+
+	/// For the screenshot scenes: opens a label by name.
+	pub fn select_label(&self, name: &str) -> bool {
+		let index = self.folders.borrow().iter().position(|r| r.folder.icon == FolderIcon::Label && r.folder.name == name);
+		let row = index.and_then(|i| self.folder_list.row_at_index(i as i32));
+		if let Some(row) = &row {
+			self.folder_list.select_row(Some(row));
+		}
+		row.is_some()
+	}
+
+	/// For the screenshot scenes: the labels the row widget of conversation `i` shows.
+	pub fn row_chips(&self, i: u32) -> Vec<String> {
+		let Some(row) = self.store.item(i).and_then(|o| self.bound.borrow().get(&o).cloned()) else { return Vec::new() };
+		let chips = row.last_child().and_downcast::<gtk::Box>();
+		std::iter::successors(chips.and_then(|b| b.first_child()), |w| w.next_sibling()).filter_map(|w| w.downcast::<gtk::Label>().ok()).map(|l| l.label().to_string()).collect()
+	}
+
+	/// For the screenshot scenes: how narrow the list and the reader can go, apart.
+	pub fn narrowest_parts(&self) -> (i32, i32) {
+		let least = |w: Option<adw::NavigationPage>| w.map_or(0, |w| w.measure(gtk::Orientation::Horizontal, -1).0);
+		(least(self.inner.sidebar()), least(self.inner.content()))
 	}
 
 	/// For the screenshot scenes: selects the first conversation whose subject contains `text`.
