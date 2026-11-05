@@ -7,7 +7,7 @@ use std::sync::Arc;
 use adw::prelude::*;
 use gtk::gio;
 use tern_app::settings::Settings;
-use tern_app::view::{Action, ChoiceView, ConnectionKind, Effect, Screen, SettingsView, ShellView, Update};
+use tern_app::view::{Action, ChoiceView, ConnectionKind, Effect, RuleEditorView, RulesView, Screen, SettingsView, ShellView, Update};
 use tern_app::{Engine, EngineListener, Host, Options, SecretStore, SessionParts};
 use tern_cache::Cache;
 use tern_compose::Fields;
@@ -26,6 +26,8 @@ type ChangedHook = Box<dyn Fn(&[FolderKind])>;
 type RuleHook = Box<dyn Fn(&str)>;
 type OfferHook = Box<dyn Fn(Option<&str>)>;
 type SettingsHook = Box<dyn Fn(&SettingsView)>;
+type RulesHook = Box<dyn Fn(&RulesView)>;
+type RuleEditorHook = Box<dyn Fn(Option<&RuleEditorView>)>;
 
 /// What every part of the window shares: the window, its toasts, the signed-in account and its cache.
 #[derive(Clone)]
@@ -39,6 +41,10 @@ pub struct Ctx {
 	/// What the core last said about the settings.
 	settings_view: Rc<RefCell<Option<SettingsView>>>,
 	on_settings: Rc<RefCell<Option<SettingsHook>>>,
+	on_rules: Rc<RefCell<Option<RulesHook>>>,
+	on_rule_editor: Rc<RefCell<Option<RuleEditorHook>>>,
+	rules_view: Rc<RefCell<Option<RulesView>>>,
+	rule_editor_view: Rc<RefCell<Option<RuleEditorView>>>,
 	layout: Rc<Cell<Layout>>,
 	/// The folder on screen, for the sync, which runs off this thread.
 	pub on_screen: Arc<std::sync::Mutex<Option<tern_mail::FolderId>>>,
@@ -74,6 +80,33 @@ impl Ctx {
 	/// Calls `f` whenever the settings on show change, instead of whoever asked last.
 	pub fn connect_settings(&self, f: impl Fn(&SettingsView) + 'static) {
 		*self.on_settings.borrow_mut() = Some(Box::new(f));
+	}
+
+	/// Calls `f` with the rules, now and whenever they change, instead of whoever asked last.
+	pub fn connect_rules(&self, f: impl Fn(&RulesView) + 'static) {
+		if let Some(view) = self.rules_view.borrow().as_ref() {
+			f(view);
+		}
+		*self.on_rules.borrow_mut() = Some(Box::new(f));
+	}
+
+	/// Calls `f` whenever the rule being edited changes, instead of whoever asked last.
+	pub fn connect_rule_editor(&self, f: impl Fn(Option<&RuleEditorView>) + 'static) {
+		*self.on_rule_editor.borrow_mut() = Some(Box::new(f));
+	}
+
+	fn show_rules(&self, view: RulesView) {
+		if let Some(f) = self.on_rules.borrow().as_ref() {
+			f(&view);
+		}
+		*self.rules_view.borrow_mut() = Some(view);
+	}
+
+	fn show_rule_editor(&self, view: Option<RuleEditorView>) {
+		if let Some(f) = self.on_rule_editor.borrow().as_ref() {
+			f(view.as_ref());
+		}
+		*self.rule_editor_view.borrow_mut() = view;
 	}
 
 	fn show_settings(&self, view: SettingsView) {
@@ -179,6 +212,10 @@ impl Window {
 			engine: engine.clone(),
 			settings_view: Rc::default(),
 			on_settings: Rc::default(),
+			on_rules: Rc::default(),
+			on_rule_editor: Rc::default(),
+			rules_view: Rc::default(),
+			rule_editor_view: Rc::default(),
 			backend: Rc::default(),
 			cache: Rc::default(),
 			fetcher: Rc::default(),
@@ -288,6 +325,8 @@ impl Window {
 					}
 				},
 				Update::Settings { view } => self.ctx.show_settings(view),
+				Update::Rules { view } => self.ctx.show_rules(view),
+				Update::RuleEditor { view } => self.ctx.show_rule_editor(view),
 				_ => {},
 			},
 			Incoming::Session(parts) => self.session_changed(parts),
@@ -427,8 +466,10 @@ pub fn preferences_dialog(ctx: &Ctx) -> (adw::PreferencesDialog, Rc<rule_editor:
 	dialog.add(&page);
 	// The dialog keeps its rules section alive while open.
 	let keep = RefCell::new(Some(rules.clone()));
+	let engine = ctx.engine.clone();
 	dialog.connect_closed(move |_| {
 		keep.borrow_mut().take();
+		engine.send(Action::CloseSettings);
 	});
 	(dialog, rules)
 }

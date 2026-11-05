@@ -675,11 +675,14 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		"rules" => {
 			rules::save(crate::paths(), &[]);
 			wait_for(|| mailbox.store.n_items() > 0).await;
+			let saved = |want: &[Rule]| rules::load(crate::paths()) == want;
 			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
 			dialog.present(Some(&win.ctx.window));
 			// What a line catches shows as typed: nothing, one mail, or the newest few and a count.
 			let edit = section.edit(None);
-			edit.put(crate::rule_editor::Piece::Field("from"));
+			wait_for(|| edit.is_ready()).await;
+			edit.put(tern_app::view::RulePiece::From);
+			wait_for(|| edit.line() == "from:").await;
 			edit.set_line(&format!("{}@nowhere.example", edit.line()));
 			sleep(300).await;
 			let (message, mails, more) = edit.preview();
@@ -706,57 +709,73 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
 			dialog.present(Some(&win.ctx.window));
 			let edit = section.edit(None);
+			wait_for(|| edit.is_ready()).await;
 			edit.set_line("subject:invoice or from:@example.org");
 			edit.set_does(2);
 			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 3)).await;
 			edit.label.set_selected(0);
+			wait_for(|| edit.save.is_sensitive()).await;
 			if !edit.save.is_sensitive() {
 				return Err("a whole rule cannot be saved".into());
 			}
 			edit.save.emit_clicked();
 			let labelled = Rule { when: "subject:invoice or from:@example.org".into(), action: Action::Label("Receipts".into()) };
-			if rules::load(crate::paths()) != [labelled.clone()] {
+			wait_for(|| saved(std::slice::from_ref(&labelled))).await;
+			if !saved(std::slice::from_ref(&labelled)) {
 				return Err(format!("saved {:?}", rules::load(crate::paths())));
 			}
 			let edit = section.edit(Some(0));
-			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 3)).await;
+			wait_for(|| edit.is_ready() && edit.label.model().is_some_and(|m| m.n_items() == 3)).await;
 			if edit.does() != 2 || edit.label.selected() != 0 || edit.line() != labelled.when {
-				return Err("the rule did not open as saved".into());
+				return Err(format!("the rule did not open as saved: {} {} {:?}", edit.does(), edit.label.selected(), edit.line()));
 			}
 			edit.set_line("subject:(invoice");
+			sleep(200).await;
 			if edit.save.is_sensitive() {
 				return Err("a broken line can be saved".into());
 			}
 			edit.set_line("subject:invoice");
 			edit.set_does(1);
 			edit.folder.set_selected(1);
+			wait_for(|| edit.save.is_sensitive()).await;
 			edit.save.emit_clicked();
 			let moved = Rule { when: "subject:invoice".into(), action: Action::Move("Archive".into()) };
-			if rules::load(crate::paths()) != [moved.clone()] {
+			wait_for(|| saved(std::slice::from_ref(&moved))).await;
+			if !saved(std::slice::from_ref(&moved)) {
 				return Err(format!("changed to {:?}", rules::load(crate::paths())));
 			}
 			let edit = section.edit(None);
+			wait_for(|| edit.is_ready()).await;
 			edit.set_line("from:news@example.org");
 			edit.set_does(2);
 			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 3)).await;
 			edit.label.set_selected(2);
+			sleep(200).await;
 			if !edit.new_label.is_visible() || edit.save.is_sensitive() {
 				return Err("New Label asks for no name, or saves without one".into());
 			}
 			edit.new_label.set_text("Newsletters");
+			wait_for(|| edit.save.is_sensitive()).await;
 			edit.save.emit_clicked();
 			wait_for(|| rules::load(crate::paths()).len() == 2).await;
 			let made = Rule { when: "from:news@example.org".into(), action: Action::Label("Newsletters".into()) };
 			let labels = win.ctx.backend().ok_or("signed out")?.labels().await.map_err(|e| e.to_string())?;
-			if rules::load(crate::paths()) != [moved.clone(), made.clone()] || !labels.iter().any(|l| l.name == "Newsletters") {
+			if !saved(&[moved.clone(), made.clone()]) || !labels.iter().any(|l| l.name == "Newsletters") {
 				return Err(format!("a new label left {:?} with labels {labels:?}", rules::load(crate::paths())));
 			}
 			// A third rule, then the first deleted; the shot shows what is left.
 			let edit = section.edit(None);
+			wait_for(|| edit.is_ready()).await;
 			edit.set_line("from:@deals.example");
+			wait_for(|| edit.save.is_sensitive()).await;
 			edit.save.emit_clicked();
-			section.delete(0);
-			if rules::load(crate::paths()) != [made, Rule { when: "from:@deals.example".into(), action: Action::Spam }] {
+			wait_for(|| rules::load(crate::paths()).len() == 3).await;
+			let edit = section.edit(Some(0));
+			wait_for(|| edit.is_ready()).await;
+			edit.delete();
+			let left = [made, Rule { when: "from:@deals.example".into(), action: Action::Spam }];
+			wait_for(|| saved(&left)).await;
+			if !saved(&left) {
 				return Err(format!("after deleting, {:?}", rules::load(crate::paths())));
 			}
 			section.expander.set_expanded(true);

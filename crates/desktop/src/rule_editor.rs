@@ -1,22 +1,19 @@
-//! The Rules section of Preferences: the rules in a row that opens up, each edited on a page of its
-//! own with the mail it would catch counted when typing pauses.
+//! The Rules section of Preferences, drawn from what the core publishes: the rules in a row that opens
+//! up, each edited on a page of its own with the mail it would catch.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::time::Duration;
+use std::cell::{Cell, RefCell};
+use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
 use gtk::glib;
-use tern_rules::{parse, parts, Action, Field, Part, Rule};
-use tern_mail::{Folder, FolderKind};
+use tern_app::view::{Action, LinePart, PreviewTone, RuleDoes, RuleEditorView, RulePiece, RulesView};
 
 use crate::window::Ctx;
-use crate::{rules, runtime};
 
 const HELP: &str = "from:, to: and subject: look at the sender, the first recipient and the subject; a word on its own looks at the subject and the sender. @example.com is a whole domain. Join terms with and, or and not, and group them in brackets: (from:@example.com or subject:\"offer\") and not to:me@tuta.com";
 
 /// What a rule can do, in the order offered.
-const DOES: [&str; 3] = ["Move to Spam", "Move to Folder", "Add Label"];
+const DOES: [(&str, RuleDoes); 3] = [("Move to Spam", RuleDoes::Spam), ("Move to Folder", RuleDoes::Folder), ("Add Label", RuleDoes::Label)];
 /// The last choice of label, which makes one.
 const NEW_LABEL: &str = "New Label…";
 
@@ -26,7 +23,8 @@ pub struct Rules {
 	pub group: adw::PreferencesGroup,
 	pub expander: adw::ExpanderRow,
 	rows: RefCell<Vec<gtk::Widget>>,
-	rules: RefCell<Vec<Rule>>,
+	/// The rule open on a page, if any.
+	page: RefCell<Option<Rc<Page>>>,
 }
 
 impl Rules {
@@ -34,47 +32,43 @@ impl Rules {
 		let group = adw::PreferencesGroup::builder().title("Rules").description("Rules sort new mail in the Inbox as it arrives.").build();
 		let expander = adw::ExpanderRow::builder().title("Mail Rules").build();
 		group.add(&expander);
-		let this = Rc::new(Rules {
-			ctx: ctx.clone(),
-			dialog: dialog.clone(),
-			group,
-			expander,
-			rows: RefCell::default(),
-			rules: RefCell::new(rules::load(crate::paths())),
+		let this = Rc::new(Rules { ctx: ctx.clone(), dialog: dialog.clone(), group, expander, rows: RefCell::default(), page: RefCell::default() });
+		let weak = Rc::downgrade(&this);
+		ctx.connect_rules(move |view| {
+			if let Some(this) = weak.upgrade() {
+				this.fill(view);
+			}
 		});
-		this.fill();
+		let weak = Rc::downgrade(&this);
+		ctx.connect_rule_editor(move |view| {
+			if let Some(this) = weak.upgrade() {
+				this.show_editor(view);
+			}
+		});
+		ctx.engine.send(Action::OpenSettings);
+		ctx.engine.send(Action::OpenRules);
 		this
 	}
 
 	/// One row per rule, then Add Rule.
-	fn fill(self: &Rc<Self>) {
+	fn fill(self: &Rc<Self>, view: &RulesView) {
 		for row in self.rows.borrow_mut().drain(..) {
 			self.expander.remove(&row);
 		}
-		let rules = self.rules.borrow().clone();
-		self.expander.set_subtitle(&match rules.len() {
-			0 => "None yet".to_string(),
-			1 => "1 rule".to_string(),
-			n => format!("{n} rules"),
-		});
+		if let Some(settings) = self.ctx.settings_view() {
+			self.expander.set_subtitle(&settings.rules_line);
+		}
 		let mut rows = Vec::new();
-		for (i, rule) in rules.iter().enumerate() {
-			let broken = parse(&rule.when).is_err();
-			let row = adw::ActionRow::builder()
-				.title(glib::markup_escape_text(&rule.when))
-				.title_lines(2)
-				.subtitle(if broken { "Does nothing until fixed".to_string() } else { tern_rules::describe(&rule.action) })
-				.activatable(true)
-				.css_classes(["rule"])
-				.build();
+		for rule in &view.rows {
+			let row = adw::ActionRow::builder().title(glib::markup_escape_text(&rule.when)).title_lines(2).subtitle(&rule.does).activatable(true).css_classes(["rule"]).build();
 			row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-			if broken {
+			if rule.broken {
 				row.add_prefix(&gtk::Image::builder().icon_name("dialog-warning-symbolic").css_classes(["warning"]).build());
 			}
-			let weak = Rc::downgrade(self);
+			let (weak, index) = (Rc::downgrade(self), rule.index);
 			row.connect_activated(move |_| {
 				if let Some(this) = weak.upgrade() {
-					this.edit(Some(i));
+					this.edit(Some(index));
 				}
 			});
 			self.expander.add_row(&row);
@@ -92,37 +86,41 @@ impl Rules {
 		*self.rows.borrow_mut() = rows;
 	}
 
-	fn store(self: &Rc<Self>, rules: Vec<Rule>) {
-		rules::save(crate::paths(), &rules);
-		*self.rules.borrow_mut() = rules;
-		self.fill();
-	}
-
-	/// Deletes rule `i`, from its page.
-	pub fn delete(self: &Rc<Self>, i: usize) {
-		let mut all = self.rules.borrow().clone();
-		if i < all.len() {
-			all.remove(i);
-			self.store(all);
+	fn show_editor(&self, view: Option<&RuleEditorView>) {
+		match view {
+			Some(view) => {
+				if let Some(page) = self.page.borrow().as_ref() {
+					page.show(view);
+				}
+			},
+			// Saved or deleted, so the core has finished with it.
+			None => {
+				if self.page.borrow_mut().take().is_some() {
+					self.dialog.pop_subpage();
+				}
+			},
 		}
-		self.dialog.pop_subpage();
 	}
 
-	/// Opens rule `i`, or a new one, on a page of its own.
-	pub fn edit(self: &Rc<Self>, i: Option<usize>) -> Rc<Page> {
-		let rule = i.and_then(|i| self.rules.borrow().get(i).cloned());
-		let page = Page::new(self, i, rule);
+	/// Opens rule `index`, or a new one, on a page of its own.
+	pub fn edit(self: &Rc<Self>, index: Option<u32>) -> Rc<Page> {
+		let page = Page::new(self, index);
+		*self.page.borrow_mut() = Some(page.clone());
 		self.dialog.push_subpage(&page.page);
 		page.line.grab_focus();
+		self.ctx.engine.send(Action::OpenRule { index });
 		page
 	}
+
+	/// The back button left the page without saving.
+	fn left(&self, page: &Rc<Page>) {
+		let open = self.page.borrow().as_ref().is_some_and(|p| Rc::ptr_eq(p, page));
+		if open {
+			self.page.borrow_mut().take();
+			self.ctx.engine.send(Action::Back);
+		}
+	}
 }
-
-/// Mails the page lists from those a rule catches; the rest are counted.
-const PREVIEW: usize = 4;
-
-pub use tern_rules::Piece;
-use tern_rules::insert;
 
 /// The page editing one rule.
 pub struct Page {
@@ -130,7 +128,7 @@ pub struct Page {
 	dialog: adw::PreferencesDialog,
 	page: adw::NavigationPage,
 	line: gtk::TextView,
-	/// What the line catches: a message, then up to [`PREVIEW`] mails and how many more.
+	/// What the line catches: a message, then the first few mails and how many more.
 	preview: gtk::ListBox,
 	does: [gtk::ToggleButton; 3],
 	pub folder: adw::ComboRow,
@@ -138,25 +136,22 @@ pub struct Page {
 	/// The name of the label to make, when the label chosen is New Label.
 	pub new_label: adw::EntryRow,
 	pub save: gtk::Button,
-	folders: Vec<Folder>,
-	/// The account's labels, as the label choices list them before New Label.
+	delete: gtk::Button,
+	delete_group: adw::PreferencesGroup,
+	/// What the core last said.
+	shown: RefCell<Option<RuleEditorView>>,
+	/// The choices as listed, New Label not counted, to see which is which.
+	folders: RefCell<Vec<String>>,
 	labels: RefCell<Vec<String>>,
-	/// The count of mail caught, waiting for typing to pause.
-	pending: RefCell<Option<glib::SourceId>>,
+	/// New Label is chosen: the label named is the one being typed.
+	naming: Cell<bool>,
+	/// Drawing what the core said, which is not the person doing anything.
+	drawing: Cell<bool>,
 }
 
 impl Page {
-	fn new(rules: &Rc<Rules>, i: Option<usize>, rule: Option<Rule>) -> Rc<Page> {
+	fn new(rules: &Rc<Rules>, index: Option<u32>) -> Rc<Page> {
 		let ctx = rules.ctx.clone();
-		// Mail can move to any folder but the ones it only gets into by being written.
-		let folders: Vec<Folder> = ctx
-			.cache()
-			.and_then(|c| c.folders().ok())
-			.unwrap_or_default()
-			.into_iter()
-			.filter(|f| !matches!(f.kind, FolderKind::Drafts | FolderKind::Sent | FolderKind::Spam))
-			.collect();
-
 		let line = gtk::TextView::builder()
 			.wrap_mode(gtk::WrapMode::WordChar)
 			.accepts_tab(false)
@@ -185,7 +180,7 @@ impl Page {
 		which.add(&chips);
 		which.add(&preview);
 
-		let does = DOES.map(|label| gtk::ToggleButton::builder().label(label).hexpand(true).build());
+		let does = DOES.map(|(label, _)| gtk::ToggleButton::builder().label(label).hexpand(true).build());
 		for b in &does[1..] {
 			b.set_group(Some(&does[0]));
 		}
@@ -193,8 +188,7 @@ impl Page {
 		for b in &does {
 			switcher.append(b);
 		}
-		let names: Vec<&str> = folders.iter().map(|f| f.name.as_str()).collect();
-		let folder = adw::ComboRow::builder().title("Folder").model(&gtk::StringList::new(&names)).build();
+		let folder = adw::ComboRow::builder().title("Folder").model(&gtk::StringList::new(&[])).build();
 		let label = adw::ComboRow::builder().title("Label").model(&gtk::StringList::new(&[NEW_LABEL])).build();
 		let new_label = adw::EntryRow::builder().title("New Label Name").build();
 		let then = adw::PreferencesGroup::builder().title("What Happens").build();
@@ -204,32 +198,21 @@ impl Page {
 		target.add(&label);
 		target.add(&new_label);
 
-		let save = gtk::Button::builder().label("Save").css_classes(["suggested-action"]).build();
+		let save = gtk::Button::builder().label("Save").css_classes(["suggested-action"]).sensitive(false).build();
 		let header = adw::HeaderBar::new();
 		header.pack_end(&save);
 		let content = adw::PreferencesPage::new();
 		content.add(&which);
 		content.add(&then);
 		content.add(&target);
-		if let Some(i) = i {
-			let delete = gtk::Button::builder()
-				.child(&adw::ButtonContent::builder().icon_name("user-trash-symbolic").label("Delete Rule").build())
-				.css_classes(["delete-rule"])
-				.build();
-			let group = adw::PreferencesGroup::new();
-			group.add(&delete);
-			content.add(&group);
-			let weak = Rc::downgrade(rules);
-			delete.connect_clicked(move |_| {
-				if let Some(rules) = weak.upgrade() {
-					rules.delete(i);
-				}
-			});
-		}
+		let delete = gtk::Button::builder().child(&adw::ButtonContent::builder().icon_name("user-trash-symbolic").label("Delete Rule").build()).css_classes(["delete-rule"]).build();
+		let delete_group = adw::PreferencesGroup::builder().visible(index.is_some()).build();
+		delete_group.add(&delete);
+		content.add(&delete_group);
 		let view = adw::ToolbarView::new();
 		view.add_top_bar(&header);
 		view.set_content(Some(&content));
-		let page = adw::NavigationPage::builder().title(if i.is_some() { "Edit Rule" } else { "New Rule" }).child(&view).build();
+		let page = adw::NavigationPage::builder().title(if index.is_some() { "Edit Rule" } else { "New Rule" }).child(&view).build();
 
 		let this = Rc::new(Page {
 			ctx,
@@ -242,18 +225,22 @@ impl Page {
 			label,
 			new_label,
 			save,
-			folders,
+			delete,
+			delete_group,
+			shown: RefCell::default(),
+			folders: RefCell::default(),
 			labels: RefCell::default(),
-			pending: RefCell::default(),
+			naming: Cell::new(false),
+			drawing: Cell::new(false),
 		});
 		for (text, piece, class) in [
-			("+ From", Piece::Field("from"), "rule-from"),
-			("+ To", Piece::Field("to"), "rule-to"),
-			("+ Subject", Piece::Field("subject"), "rule-subject"),
-			("and", Piece::Word("and"), ""),
-			("or", Piece::Word("or"), ""),
-			("not", Piece::Word("not"), ""),
-			("( … )", Piece::Brackets, ""),
+			("+ From", RulePiece::From, "rule-from"),
+			("+ To", RulePiece::To, "rule-to"),
+			("+ Subject", RulePiece::Subject, "rule-subject"),
+			("and", RulePiece::And, ""),
+			("or", RulePiece::Or, ""),
+			("not", RulePiece::Not, ""),
+			("( … )", RulePiece::Brackets, ""),
 		] {
 			let chip = gtk::Button::builder().label(text).css_classes(["pill", "rule-chip"]).build();
 			if !class.is_empty() {
@@ -267,37 +254,36 @@ impl Page {
 			});
 			chips.append(&chip);
 		}
-		this.set_line(rule.as_ref().map_or("", |r| r.when.as_str()));
-		match rule.as_ref().map(|r| &r.action) {
-			None | Some(Action::Spam) => this.set_does(0),
-			Some(Action::Move(name)) => {
-				this.set_does(1);
-				if let Some(at) = this.folders.iter().position(|f| f.name.eq_ignore_ascii_case(name)) {
-					this.folder.set_selected(at as u32);
-				}
-			},
-			Some(Action::Label(_)) => this.set_does(2),
-		}
-		this.load_labels(rule.and_then(|r| match r.action {
-			Action::Label(name) => Some(name),
-			_ => None,
-		}));
-		for b in &this.does {
+		for (b, (_, does)) in this.does.iter().zip(DOES) {
 			let weak = Rc::downgrade(&this);
-			b.connect_toggled(move |_| {
-				if let Some(this) = weak.upgrade() {
-					this.update();
+			b.connect_toggled(move |b| {
+				let Some(this) = weak.upgrade() else { return };
+				if b.is_active() && !this.drawing.get() {
+					this.ctx.engine.send(Action::RuleSetDoes { does });
 				}
 			});
 		}
-		for row in [&this.folder, &this.label] {
-			let weak = Rc::downgrade(&this);
-			row.connect_selected_notify(move |_| {
-				if let Some(this) = weak.upgrade() {
-					this.update();
+		let weak = Rc::downgrade(&this);
+		this.folder.connect_selected_notify(move |row| {
+			let Some(this) = weak.upgrade() else { return };
+			if !this.drawing.get() {
+				if let Some(name) = this.folders.borrow().get(row.selected() as usize) {
+					this.ctx.engine.send(Action::RuleSetFolder { name: name.clone() });
 				}
-			});
-		}
+			}
+		});
+		let weak = Rc::downgrade(&this);
+		this.label.connect_selected_notify(move |_| {
+			if let Some(this) = weak.upgrade().filter(|this| !this.drawing.get()) {
+				this.label_chosen();
+			}
+		});
+		let weak = Rc::downgrade(&this);
+		this.new_label.connect_changed(move |_| {
+			if let Some(this) = weak.upgrade().filter(|this| !this.drawing.get() && this.naming.get()) {
+				this.ctx.engine.send(Action::RuleSetLabel { name: this.new_label.text().to_string() });
+			}
+		});
 		// One line: Enter saves instead of breaking it.
 		let keys = gtk::EventControllerKey::new();
 		let weak = Rc::downgrade(&this);
@@ -316,15 +302,16 @@ impl Page {
 		let weak = Rc::downgrade(&this);
 		this.line.buffer().connect_changed(move |buffer| {
 			let Some(this) = weak.upgrade() else { return };
+			if this.drawing.get() {
+				return;
+			}
 			let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
 			if text.contains(['\n', '\r']) {
 				// Pasted lines join into one.
 				buffer.set_text(&text.replace(['\n', '\r'], " "));
 				return;
 			}
-			this.colour();
-			this.update();
-			this.count_soon();
+			this.ctx.engine.send(Action::RuleLine { line: text.to_string() });
 		});
 		let weak = Rc::downgrade(&this);
 		adw::StyleManager::default().connect_dark_notify(move |_| {
@@ -332,21 +319,88 @@ impl Page {
 				this.colour();
 			}
 		});
-		let weak = Rc::downgrade(&this);
-		this.new_label.connect_changed(move |_| {
-			if let Some(this) = weak.upgrade() {
-				this.update();
+		let engine = this.ctx.engine.clone();
+		this.save.connect_clicked(move |_| engine.send(Action::RuleSave));
+		let engine = this.ctx.engine.clone();
+		this.delete.connect_clicked(move |_| engine.send(Action::RuleDelete));
+		let (rules, weak) = (Rc::downgrade(rules), Rc::downgrade(&this));
+		this.page.connect_hiding(move |_| {
+			if let (Some(rules), Some(this)) = (Weak::upgrade(&rules), weak.upgrade()) {
+				rules.left(&this);
 			}
 		});
-		let (weak, rules) = (Rc::downgrade(&this), Rc::downgrade(rules));
-		this.save.connect_clicked(move |_| {
-			let (Some(this), Some(rules)) = (weak.upgrade(), rules.upgrade()) else { return };
-			this.save(&rules, i);
-		});
-		this.colour();
-		this.update();
-		this.count();
 		this
+	}
+
+	/// Draws what the core says about this rule.
+	fn show(&self, view: &RuleEditorView) {
+		self.drawing.set(true);
+		let before = self.shown.borrow_mut().replace(view.clone());
+		// The line is the person's while they type; the core only sets it when it changes it itself.
+		if before.as_ref().map(|b| b.revision) != Some(view.revision) {
+			let buffer = self.line.buffer();
+			buffer.set_text(&view.line);
+			buffer.place_cursor(&buffer.iter_at_offset(view.cursor as i32));
+		}
+		self.colour();
+		self.delete_group.set_visible(view.editing);
+		self.page.set_title(if view.editing { "Edit Rule" } else { "New Rule" });
+		self.draw_preview(view);
+		for (b, (_, does)) in self.does.iter().zip(DOES) {
+			if does == view.does {
+				b.set_active(true);
+			}
+		}
+		self.draw_choices(view);
+		self.folder.set_visible(view.does == RuleDoes::Folder);
+		self.label.set_visible(view.does == RuleDoes::Label);
+		self.new_label.set_visible(view.does == RuleDoes::Label && self.naming.get());
+		self.save.set_sensitive(view.can_save);
+		self.drawing.set(false);
+	}
+
+	fn draw_choices(&self, view: &RuleEditorView) {
+		// A choice the rule names that has gone stays offered, so saving does not change it.
+		let with = |names: &[String], named: &str| {
+			let mut all = names.to_vec();
+			if !named.is_empty() && !all.iter().any(|n| n.eq_ignore_ascii_case(named)) {
+				all.push(named.to_string());
+			}
+			all
+		};
+		let folders = with(&view.folders, &view.folder);
+		if *self.folders.borrow() != folders {
+			let names: Vec<&str> = folders.iter().map(String::as_str).collect();
+			self.folder.set_model(Some(&gtk::StringList::new(&names)));
+			*self.folders.borrow_mut() = folders;
+		}
+		if let Some(at) = self.folders.borrow().iter().position(|n| n.eq_ignore_ascii_case(&view.folder)) {
+			self.folder.set_selected(at as u32);
+		}
+		let labels = if self.naming.get() { view.labels.clone() } else { with(&view.labels, &view.label) };
+		if *self.labels.borrow() != labels {
+			let names: Vec<&str> = labels.iter().map(String::as_str).chain([NEW_LABEL]).collect();
+			self.label.set_model(Some(&gtk::StringList::new(&names)));
+			*self.labels.borrow_mut() = labels;
+		}
+		let chosen = if self.naming.get() { None } else { self.labels.borrow().iter().position(|n| n.eq_ignore_ascii_case(&view.label)) };
+		self.label.set_selected(chosen.unwrap_or(self.labels.borrow().len()) as u32);
+		if chosen.is_none() && !self.naming.get() {
+			self.naming.set(true);
+		}
+	}
+
+	/// A label, or New Label, was chosen from the list.
+	fn label_chosen(&self) {
+		let name = self.labels.borrow().get(self.label.selected() as usize).cloned();
+		self.naming.set(name.is_none());
+		self.new_label.set_visible(name.is_none());
+		self.ctx.engine.send(Action::RuleSetLabel { name: name.unwrap_or_else(|| self.new_label.text().to_string()) });
+	}
+
+	/// The core has drawn this rule at least once, so the line and its choices are what it says.
+	pub fn is_ready(&self) -> bool {
+		self.shown.borrow().is_some()
 	}
 
 	/// The rule's line as typed.
@@ -376,17 +430,15 @@ impl Page {
 	}
 
 	/// Puts what a button under the line stands for in it, at the cursor.
-	pub fn put(&self, piece: Piece) {
+	pub fn put(&self, piece: RulePiece) {
 		let buffer = self.line.buffer();
-		let cursor = buffer.iter_at_mark(&buffer.get_insert()).offset() as usize;
-		let selected = buffer.selection_bounds().map(|(a, b)| (a.offset() as usize, b.offset() as usize));
-		let (text, at) = insert(&self.line(), cursor, selected, piece);
-		buffer.set_text(&text);
-		buffer.place_cursor(&buffer.iter_at_offset(at as i32));
+		let cursor = buffer.iter_at_mark(&buffer.get_insert()).offset() as u32;
+		let (from, to) = buffer.selection_bounds().map_or((cursor, cursor), |(a, b)| (a.offset() as u32, b.offset() as u32));
+		self.ctx.engine.send(Action::RulePut { piece, cursor: from, selection_end: to });
 		self.line.grab_focus();
 	}
 
-	/// Colours the line's fields, operators and brackets.
+	/// Colours the line's fields, operators and brackets, as the core has read them.
 	fn colour(&self) {
 		let buffer = self.line.buffer();
 		let dark = adw::StyleManager::default().is_dark();
@@ -404,79 +456,51 @@ impl Page {
 		set("rule-operator", if dark { "#9a9a9e" } else { "#77767b" }, true);
 		set("rule-bracket", if dark { "#9a9a9e" } else { "#77767b" }, false);
 		buffer.remove_all_tags(&buffer.start_iter(), &buffer.end_iter());
-		for (range, part) in parts(&self.line()) {
-			let tag = match part {
-				Part::Field(Field::From) => "rule-from",
-				Part::Field(Field::To) => "rule-to",
-				Part::Field(Field::Subject | Field::Any) => "rule-subject",
-				Part::Operator => "rule-operator",
-				Part::Bracket => "rule-bracket",
-				Part::Value => continue,
+		let shown = self.shown.borrow();
+		// What it read is of the line as it was: colours wait for the core to catch up with typing.
+		let Some(view) = shown.as_ref().filter(|v| v.line == self.line()) else { return };
+		for span in &view.spans {
+			let tag = match span.part {
+				LinePart::From => "rule-from",
+				LinePart::To => "rule-to",
+				LinePart::Subject => "rule-subject",
+				LinePart::Operator => "rule-operator",
+				LinePart::Bracket => "rule-bracket",
+				LinePart::Value => continue,
 			};
-			buffer.apply_tag_by_name(tag, &buffer.iter_at_offset(range.start as i32), &buffer.iter_at_offset(range.end as i32));
+			buffer.apply_tag_by_name(tag, &buffer.iter_at_offset(span.start as i32), &buffer.iter_at_offset(span.end as i32));
 		}
 	}
 
-	fn count_soon(self: &Rc<Self>) {
-		if let Some(id) = self.pending.borrow_mut().take() {
-			id.remove();
-		}
-		let weak = Rc::downgrade(self);
-		let id = glib::timeout_add_local_once(Duration::from_millis(150), move || {
-			if let Some(this) = weak.upgrade() {
-				this.pending.borrow_mut().take();
-				this.count();
-			}
-		});
-		*self.pending.borrow_mut() = Some(id);
-	}
-
-	/// Shows what the line catches among the mail here (the newest few, and how many in all), or
-	/// why it does not read.
-	fn count(self: &Rc<Self>) {
+	/// Shows what the line catches among the mail here, or why it does not read.
+	fn draw_preview(&self, view: &RuleEditorView) {
 		self.preview.remove_all();
-		let line = self.line();
-		if line.trim().is_empty() {
-			self.preview.set_visible(false);
-			return;
-		}
-		self.preview.set_visible(true);
-		let (icon, class, message, found, total) = match parse(&line) {
-			Ok(expr) => {
-				let skip = [FolderKind::Spam, FolderKind::Trash, FolderKind::Sent, FolderKind::Drafts];
-				let (found, total) = self.ctx.cache().and_then(|c| c.matching(&expr, &skip, PREVIEW).ok()).unwrap_or_default();
-				match total {
-					0 => ("dialog-information-symbolic", "dim-label", "No mail here matches yet. The rule will sort new mail that does.".to_string(), found, total),
-					1 => ("object-select-symbolic", "success", "Catches 1 mail here already. Rules only sort new mail.".to_string(), found, total),
-					n => ("object-select-symbolic", "success", format!("Catches {n} mails here already. Rules only sort new mail."), found, total),
-				}
-			},
-			Err(e) => ("dialog-warning-symbolic", "error", e.message, Vec::new(), 0),
+		let (icon, class) = match view.tone {
+			PreviewTone::Neutral => ("dialog-information-symbolic", "dim-label"),
+			PreviewTone::Good => ("object-select-symbolic", "success"),
+			PreviewTone::Bad => ("dialog-warning-symbolic", "error"),
 		};
 		let head = gtk::Box::builder().spacing(8).margin_top(10).margin_bottom(10).margin_start(12).margin_end(12).css_classes([class]).build();
 		head.append(&gtk::Image::from_icon_name(icon));
-		head.append(&gtk::Label::builder().label(&message).wrap(true).xalign(0.0).hexpand(true).css_classes(["caption"]).build());
+		head.append(&gtk::Label::builder().label(&view.message).wrap(true).xalign(0.0).hexpand(true).css_classes(["caption"]).build());
 		self.preview.append(&gtk::ListBoxRow::builder().child(&head).activatable(false).build());
-		for (mail, _) in &found {
+		for mail in &view.preview {
 			let row = gtk::Box::builder().spacing(12).margin_top(8).margin_bottom(8).margin_start(12).margin_end(12).build();
-			let sender = if mail.from.display().is_empty() { "(Unknown Sender)" } else { mail.from.display() };
-			row.append(&gtk::Label::builder().label(sender).xalign(0.0).width_chars(16).max_width_chars(16).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["caption"]).build());
-			let subject = if mail.subject.trim().is_empty() { "(No Subject)" } else { mail.subject.as_str() };
-			row.append(&gtk::Label::builder().label(subject).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["caption", "dim-label"]).build());
+			row.append(&gtk::Label::builder().label(&mail.who).xalign(0.0).width_chars(16).max_width_chars(16).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["caption"]).build());
+			row.append(&gtk::Label::builder().label(&mail.subject).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["caption", "dim-label"]).build());
 			self.preview.append(&gtk::ListBoxRow::builder().child(&row).activatable(false).build());
 		}
-		if total > found.len() {
-			let more = gtk::Box::builder().spacing(12).margin_top(4).margin_bottom(4).margin_start(12).margin_end(6).build();
-			more.append(&gtk::Label::builder().label(format!("and {} more, older", total - found.len())).xalign(0.0).hexpand(true).css_classes(["caption", "dim-label"]).build());
+		if let Some(more) = &view.more {
+			let row = gtk::Box::builder().spacing(12).margin_top(4).margin_bottom(4).margin_start(12).margin_end(6).build();
+			row.append(&gtk::Label::builder().label(more).xalign(0.0).hexpand(true).css_classes(["caption", "dim-label"]).build());
 			let show = gtk::Button::builder().label("Show All in Search").css_classes(["flat", "caption", "accent"]).build();
-			let weak = Rc::downgrade(self);
+			let (ctx, dialog, line) = (self.ctx.clone(), self.dialog.clone(), view.line.clone());
 			show.connect_clicked(move |_| {
-				if let Some(this) = weak.upgrade() {
-					this.show_all();
-				}
+				dialog.close();
+				ctx.show_rule(line.trim());
 			});
-			more.append(&show);
-			self.preview.append(&gtk::ListBoxRow::builder().child(&more).activatable(false).build());
+			row.append(&show);
+			self.preview.append(&gtk::ListBoxRow::builder().child(&row).activatable(false).build());
 		}
 	}
 
@@ -485,6 +509,11 @@ impl Page {
 		let line = self.line();
 		self.dialog.close();
 		self.ctx.show_rule(line.trim());
+	}
+
+	/// Deletes this rule.
+	pub fn delete(&self) {
+		self.delete.emit_clicked();
 	}
 
 	/// For the screenshot scenes: the preview's message, the mails it lists, and the line under them.
@@ -497,106 +526,5 @@ impl Page {
 		let more = texts.last().filter(|t| texts.len() > 1 && t.first().is_some_and(|l| l.starts_with("and "))).and_then(|t| t.first().cloned());
 		let mails = texts.len().saturating_sub(1) - usize::from(more.is_some());
 		(message, mails, more)
-	}
-
-	/// Keeps the rule as rule `i`, or a new one, after making its label if it is a new one.
-	fn save(self: &Rc<Self>, rules: &Rc<Rules>, i: Option<usize>) {
-		let Some(rule) = self.rule() else { return };
-		let store = {
-			let (rules, rule) = (rules.clone(), rule.clone());
-			move || {
-				let mut all = rules.rules.borrow().clone();
-				match i {
-					Some(i) if i < all.len() => all[i] = rule,
-					_ => all.push(rule),
-				}
-				rules.store(all);
-				rules.dialog.pop_subpage();
-			}
-		};
-		let make = match &rule.action {
-			Action::Label(name) if !self.labels.borrow().iter().any(|l| l.eq_ignore_ascii_case(name)) => name.clone(),
-			_ => return store(),
-		};
-		let Some(backend) = self.ctx.backend() else { return };
-		self.save.set_sensitive(false);
-		let (weak, ctx) = (Rc::downgrade(self), self.ctx.clone());
-		runtime::spawn_local(async move {
-			let made = runtime::run(async move { backend.create_label(&make).await }).await;
-			let Some(this) = weak.upgrade() else { return };
-			match made {
-				Ok(label) => {
-					this.labels.borrow_mut().push(label.name);
-					store();
-				},
-				Err(e) => {
-					ctx.error(&e);
-					this.update();
-				},
-			}
-		});
-	}
-
-	/// The account's labels, fetched as the page opens; `keep` is selected once they are in.
-	fn load_labels(self: &Rc<Self>, keep: Option<String>) {
-		let Some(backend) = self.ctx.backend() else { return };
-		let weak = Rc::downgrade(self);
-		runtime::spawn_local(async move {
-			let labels = runtime::run(async move { backend.labels().await }).await;
-			let Some(this) = weak.upgrade() else { return };
-			let mut names: Vec<String> = labels.unwrap_or_default().into_iter().map(|l| l.name).collect();
-			// A label the rule names that is gone stays offered, so saving does not change it.
-			if let Some(keep) = keep.as_ref().filter(|k| !names.iter().any(|n| n.eq_ignore_ascii_case(k))) {
-				names.push(keep.clone());
-			}
-			let choices: Vec<&str> = names.iter().map(String::as_str).chain([NEW_LABEL]).collect();
-			this.label.set_model(Some(&gtk::StringList::new(&choices)));
-			if let Some(at) = keep.and_then(|k| names.iter().position(|n| n.eq_ignore_ascii_case(&k))) {
-				this.label.set_selected(at as u32);
-			}
-			*this.labels.borrow_mut() = names;
-			this.update();
-		});
-	}
-
-	/// The rule as the page has it, if it is whole.
-	fn rule(&self) -> Option<Rule> {
-		let when = self.line().trim().to_string();
-		parse(&when).ok()?;
-		let action = match self.does() {
-			0 => Action::Spam,
-			1 => Action::Move(self.folders.get(self.folder.selected() as usize)?.name.clone()),
-			_ => Action::Label(match self.labels.borrow().get(self.label.selected() as usize) {
-				Some(name) => name.clone(),
-				None => Some(self.new_label.text().trim().to_string()).filter(|n| !n.is_empty())?,
-			}),
-		};
-		Some(Rule { when, action })
-	}
-
-	/// Shows which choices apply, and whether the rule can be saved.
-	fn update(&self) {
-		let does = self.does();
-		self.folder.set_visible(does == 1);
-		self.label.set_visible(does == 2);
-		self.new_label.set_visible(does == 2 && self.label.selected() as usize >= self.labels.borrow().len());
-		self.save.set_sensitive(self.rule().is_some());
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn pieces_go_in_at_the_cursor_with_spaces_around() {
-		assert_eq!(insert("", 0, None, Piece::Field("from")), ("from:".into(), 5));
-		assert_eq!(insert("from:@a.org", 11, None, Piece::Word("or")), ("from:@a.org or ".into(), 15));
-		assert_eq!(insert("from:@a.org or ", 15, None, Piece::Field("subject")), ("from:@a.org or subject:".into(), 23));
-		assert_eq!(insert("lunch", 0, None, Piece::Word("not")), ("not lunch".into(), 4));
-		assert_eq!(insert("a", 1, None, Piece::Brackets), ("a ()".into(), 3), "empty brackets put the cursor inside");
-		assert_eq!(insert("a or b c", 0, Some((0, 6)), Piece::Brackets), ("(a or b) c".into(), 8), "a selection is wrapped");
-		assert_eq!(insert("x", 0, Some((0, 1)), Piece::Brackets), ("(x)".into(), 3));
-		assert_eq!(insert("é", 1, None, Piece::Field("to")), ("é to:".into(), 5), "counted in chars");
 	}
 }
