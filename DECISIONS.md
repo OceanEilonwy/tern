@@ -592,10 +592,13 @@ Built to the "Cache cleanup" boards on the design canvas.
 ## One core (2026-11-05)
 
 - **`tern-app` is the one core.** It holds the state, navigation and what each action does, and publishes
-  views. Platforms draw them. Android already does this entirely. The desktop shares the sync, settings,
-  rules, writing mail and the mail document, but its own screens still hold their behaviour, so it
-  does not yet send actions to `Engine`. Moving them over is the rest of this work: settings and rules,
-  then search and Clean Up, then the composer, the reader and finally the mailbox.
+  views. Platforms draw them. Android does this entirely. The desktop runs the engine in its own process,
+  and sign-in, the session, the sync, settings, rules and Clean Up go through it. The mailbox, reader, search,
+  Move to Spam and composer still hold their own behaviour and reach the session's parts through the Rust-only
+  `Host` trait, which goes once they have moved. The mailbox, reader, search and spam have to move
+  together, as they share what is selected; the composer needs the core to hold several at once.
+- **The desktop takes on the core's start-up.** A saved account opens at once from its cache, even offline. It
+  used to show the sign-in page unless the server answered. An expired session still goes to the sign-in page.
 - **"Core" names nothing else.** `tern-mail` is only mail's types and the `Backend` trait. `tern-html`,
   `tern-compose` and `tern-rules` are pure and do no I/O. `tern-demo` is a backend beside `tern-tuta`.
   `tern-cache` only stores; `tern-sync` decides what to fetch and when in a round.
@@ -608,7 +611,7 @@ Built to the "Cache cleanup" boards on the design canvas.
 - **Paths are handed down**, not read from the environment wherever needed. Android used to rewrite its own
   `HOME` and `XDG_*` to steer the crates beneath it. Only `SSL_CERT_DIR` remains, set once before anything
   reads it, as the TLS library has no other way in. The desktop's `paths()` and `meaning()` are process-wide
-  because its environment never changes; they go when the desktop runs on `Engine`.
+  because its environment never changes; they go once its remaining screens have moved.
 - **One log**, through the `log` crate. Tern's warnings only by default, so that the SDK cannot put anything
   about mail in the system's log on Android; `TERN_LOG` asks for more. The SDK used to install its own Android
   logger and panic if one was there, so it is patched not to. Only a real sign-in on a device goes that way:
@@ -619,5 +622,4 @@ Built to the "Cache cleanup" boards on the design canvas.
   brings UniFFI in through the SDK, so CI can only check that the core does not ask for it itself.
 - **A secret store's failure is an error, never "none".** `get` answers `Result<Option<_>>`, because taking a
   failed decrypt for "no key yet" would replace the key the cache needs. Secrets are also read off the core's
-  task, as a keyring may wait on an unlock prompt. The desktop keeps its own `keyring.rs` until it runs on `Engine`;
-  its adapter must keep today's oo7 attributes so existing sign-ins survive.
+  task, as a keyring may wait on an unlock prompt. The desktop's store keeps its oo7 attributes, so existing sign-ins survive.
