@@ -646,21 +646,16 @@ fn a_conversation_asked_for_before_the_account_opens_waits_for_it() {
 #[derive(Default)]
 struct Told {
 	sessions: Mutex<Vec<Option<String>>>,
-	changed: AtomicU32,
 }
 
 impl Host for Told {
 	fn session(&self, parts: Option<SessionParts>) {
 		self.sessions.lock().unwrap().push(parts.map(|p| p.backend.account().address));
 	}
-	fn mail_changed(&self, _: Option<tern_mail::FolderId>) {
-		self.changed.fetch_add(1, Ordering::Relaxed);
-	}
-	fn folders_failed(&self, _: tern_mail::Error) {}
 }
 
 #[test]
-fn a_host_hears_of_the_session_and_of_changed_mail() {
+fn a_host_hears_of_the_session() {
 	let dir = std::env::temp_dir().join(format!("tern-host-test-{}", std::process::id()));
 	let told: Arc<Told> = Arc::default();
 	let seen: Arc<Mutex<Seen>> = Arc::default();
@@ -668,7 +663,6 @@ fn a_host_hears_of_the_session_and_of_changed_mail() {
 	let engine = Engine::open_with(Paths::new(&dir, &dir), options, Arc::<Secrets>::default(), Arc::new(Screen_(seen.clone())));
 	let h = Harness { engine, seen, paths: Paths::new(&dir, &dir), dir };
 	h.demo();
-	h.until("mail to be told of", |_| told.changed.load(Ordering::Relaxed) > 0);
 	h.send(Action::OpenSettings);
 	h.until("the wording for this device", |s| s.settings.as_ref().is_some_and(|v| v.semantic_line.contains("this computer")));
 	h.send(Action::SignOut);
@@ -711,4 +705,115 @@ fn dropping_the_engine_ends_its_account_and_keeps_it_signed_in() {
 	}
 	assert!(secrets.get(SESSION_SECRET.into()).unwrap().is_some(), "still signed in for next time");
 	let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A list and a conversation on screen together, as on the desktop.
+fn side_by_side() -> Harness {
+	static NEXT: AtomicU32 = AtomicU32::new(0);
+	let dir = std::env::temp_dir().join(format!("tern-beside-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+	let seen: Arc<Mutex<Seen>> = Arc::default();
+	let options = Options { follow_neighbour: true, lone_draft_composes: false, retry_hint: "Press F5 to try again.", device: "computer", ..Options::default() };
+	let engine = Engine::open_with(Paths::new(&dir, &dir), options, Arc::<Secrets>::default(), Arc::new(Screen_(seen.clone())));
+	Harness { engine, seen, paths: Paths::new(&dir, &dir), dir }
+}
+
+#[test]
+fn beside_the_list_the_next_conversation_opens_when_one_leaves() {
+	let h = side_by_side();
+	h.demo();
+	h.open("Your invoice for October");
+	let keys = |h: &Harness| h.with(|s| s.list.as_ref().unwrap().rows.iter().map(|r| r.key.clone()).collect::<Vec<_>>());
+	let before = keys(&h);
+	let at = h.with(|s| s.list.as_ref().unwrap().rows.iter().position(|r| r.subject == "Your invoice for October")).unwrap();
+	h.send(Action::ConversationTrash);
+	h.until("the row gone", |s| s.list.as_ref().unwrap().rows.iter().all(|r| r.subject != "Your invoice for October"));
+	let next = h.with(|s| s.list.as_ref().unwrap().rows[at].subject.clone());
+	assert_ne!(before.len(), keys(&h).len());
+	h.until("the neighbour open", |s| s.conversation.as_ref().is_some_and(|c| c.subject == next));
+	h.until("its row marked open", |s| s.list.as_ref().unwrap().rows[at].open);
+	assert_eq!(h.top(), Some(Screen::Conversation));
+}
+
+#[test]
+fn on_a_phone_a_conversation_that_leaves_goes_back_to_the_list() {
+	let h = harness();
+	h.demo();
+	h.open("Your invoice for October");
+	h.send(Action::ConversationTrash);
+	h.until_screen(Screen::Inbox);
+	h.until("nothing open", |s| s.conversation.is_none());
+}
+
+#[test]
+fn a_row_menu_acts_without_a_selection_or_the_conversation_open() {
+	let h = side_by_side();
+	h.demo();
+	let row = h.row("Your invoice for October");
+	h.send(Action::RowPin { key: row.key.clone() });
+	h.until("pinned on top", |s| s.list.as_ref().unwrap().rows[0].key == row.key && s.list.as_ref().unwrap().rows[0].pinned);
+	h.send(Action::RowRead { key: row.key.clone(), folder_id: row.folder_id.clone(), read: true });
+	h.until("read", |s| !s.list.as_ref().unwrap().rows[0].unread);
+	h.send(Action::RowRead { key: row.key.clone(), folder_id: row.folder_id.clone(), read: false });
+	h.until("unread", |s| s.list.as_ref().unwrap().rows[0].unread);
+	h.send(Action::RowSpam { key: row.key.clone(), folder_id: row.folder_id.clone() });
+	h.until("the spam sheet", |s| matches!(s.sheet, Some(SheetView::Spam { .. })));
+	h.send(Action::CloseSheet);
+	h.send(Action::RowTrash { key: row.key.clone(), folder_id: row.folder_id });
+	h.until("gone", |s| s.list.as_ref().unwrap().rows.iter().all(|r| r.key != row.key));
+}
+
+#[test]
+fn marking_the_open_conversation_unread_from_its_row_leaves_it_unread() {
+	let h = side_by_side();
+	h.demo();
+	h.open("Your invoice for October");
+	let row = h.row("Your invoice for October");
+	h.until("read by opening", |s| s.list.as_ref().unwrap().rows.iter().any(|r| r.key == row.key && !r.unread));
+	h.send(Action::RowRead { key: row.key.clone(), folder_id: row.folder_id, read: false });
+	h.until("unread and closed", |s| s.conversation.is_none() && s.list.as_ref().unwrap().rows.iter().any(|r| r.key == row.key && r.unread));
+}
+
+#[test]
+fn typing_on_in_a_search_closes_what_was_open_and_closing_goes_back_to_the_folder() {
+	let h = side_by_side();
+	h.demo();
+	h.send(Action::OpenSearch);
+	h.send(Action::SearchText { text: "invoice".into() });
+	h.until("a result", |s| s.search.as_ref().is_some_and(|v| v.rows.len() == 1));
+	let (key, folder_id) = h.with(|s| { let r = &s.search.as_ref().unwrap().rows[0]; (r.key.clone(), r.folder_id.clone()) });
+	h.send(Action::OpenThread { key, folder_id });
+	h.until("open", |s| s.conversation.is_some());
+	h.send(Action::SearchText { text: "invoice october".into() });
+	h.until("closed by typing", |s| s.conversation.is_none());
+	h.send(Action::CloseSearch);
+	h.until("back to the folder", |s| s.shell.as_ref().unwrap().stack == [Screen::Inbox]);
+}
+
+#[test]
+fn a_lone_draft_can_open_as_a_conversation_and_be_discarded() {
+	let h = side_by_side();
+	h.demo();
+	h.send(Action::ComposeNew);
+	h.until_screen(Screen::Composer);
+	h.send(Action::ComposeClose { text: ComposeText { to: "mia@tuta.com".into(), cc: String::new(), bcc: String::new(), subject: "Plan".into(), body: "Soon".into(), from_index: 0 } });
+	h.until("not composing", |s| s.composer.is_none());
+	let drafts = h.with(|s| s.list.as_ref().unwrap().folders.iter().find(|f| f.icon == FolderIcon::Drafts).unwrap().id.clone());
+	h.send(Action::OpenFolder { id: drafts });
+	h.until_row("Plan");
+	h.open("Plan");
+	h.until("it opens as a draft", |s| s.conversation.as_ref().is_some_and(|c| c.cards[0].draft));
+	assert!(h.with(|s| s.composer.is_none()));
+	let mail = h.with(|s| s.conversation.as_ref().unwrap().cards[0].id.clone());
+	h.send(Action::DiscardDraft { mail });
+	h.until("gone from Drafts", |s| s.list.as_ref().unwrap().rows.is_empty());
+	h.until("nothing left open", |s| s.conversation.is_none());
+}
+
+#[test]
+fn a_card_says_its_subject_and_where_it_shows_on_the_web() {
+	let h = side_by_side();
+	h.demo();
+	h.open("Photos from Saturday");
+	h.until("its web link once open", |s| s.conversation.as_ref().is_some_and(|c| c.cards.iter().any(|c| c.open_url.is_some())));
+	assert_eq!(h.with(|s| s.conversation.as_ref().unwrap().cards[0].subject.clone()), "Photos from Saturday");
 }

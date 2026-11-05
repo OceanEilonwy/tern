@@ -26,6 +26,12 @@ pub enum Word {
 const WORDS: usize = 8;
 
 impl Word {
+	/// The word the core says it is working on, in the same words.
+	pub fn from_label(label: &str) -> Option<Word> {
+		use Word::*;
+		[Fetching, Opening, Downloading, Moving, Deleting, Attaching, Drafting, Sending].into_iter().find(|w| w.label() == label)
+	}
+
 	pub fn label(self) -> &'static str {
 		match self {
 			Word::Fetching => "Fetching…",

@@ -494,10 +494,10 @@ impl Page {
 			let row = gtk::Box::builder().spacing(12).margin_top(4).margin_bottom(4).margin_start(12).margin_end(6).build();
 			row.append(&gtk::Label::builder().label(more).xalign(0.0).hexpand(true).css_classes(["caption", "dim-label"]).build());
 			let show = gtk::Button::builder().label("Show All in Search").css_classes(["flat", "caption", "accent"]).build();
-			let (ctx, dialog, line) = (self.ctx.clone(), self.dialog.clone(), view.line.clone());
+			let (engine, dialog) = (self.ctx.engine.clone(), self.dialog.clone());
 			show.connect_clicked(move |_| {
+				engine.send(Action::RuleInSearch);
 				dialog.close();
-				ctx.show_rule(line.trim());
 			});
 			row.append(&show);
 			self.preview.append(&gtk::ListBoxRow::builder().child(&row).activatable(false).build());
@@ -506,9 +506,8 @@ impl Page {
 
 	/// Lists everything the line catches in the main window's search, leaving Preferences.
 	pub fn show_all(&self) {
-		let line = self.line();
+		self.ctx.engine.send(Action::RuleInSearch);
 		self.dialog.close();
-		self.ctx.show_rule(line.trim());
 	}
 
 	/// Deletes this rule.

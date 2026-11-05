@@ -10,7 +10,8 @@ use tern_mail::{Attachment, FolderKind, MailId, NewAttachment};
 
 use crate::activity::Word;
 use tern_compose::{Fields, Quote, MAX_TOTAL_BYTES};
-use crate::{attachments::icon_for, format, runtime, suggest, window::Ctx};
+use tern_app::format;
+use crate::{attachments::icon_for, runtime, suggest, window::Ctx};
 
 pub struct Composer {
 	ctx: Ctx,

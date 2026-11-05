@@ -1,20 +1,20 @@
-//! Draws a [`Doc`] into a read-only `gtk::TextView`.
+//! Draws the blocks of a mail, as the core published them, into a read-only `gtk::TextView`.
 
 use std::collections::HashMap;
 
 use adw::prelude::*;
 use gtk::{gdk, glib, pango};
 
-use tern_html::{Block, Cell, Doc, ImageSrc, Inline, Style};
+use tern_app::view::{BlockKind, BlockView, SpanView, TableRowView};
 
 const INDENT: i32 = 28;
 const MAX_IMAGE_WIDTH: i32 = 640;
 const MAX_IMAGE_HEIGHT: i32 = 560;
 
-/// What a rendered body still needs: images to load, and where its links point.
+/// What a drawn body still needs: pictures to fill in, by block, and where its links point.
 #[derive(Default)]
 pub struct Rendered {
-	pub images: Vec<(gtk::Picture, ImageSrc)>,
+	pub images: Vec<(gtk::Picture, u32)>,
 	pub links: Vec<(gtk::TextTag, String)>,
 }
 
@@ -28,8 +28,8 @@ struct Painter<'a> {
 	faint: gdk::RGBA,
 }
 
-/// Replaces what `view` shows with `doc`.
-pub fn render(view: &gtk::TextView, doc: &Doc) -> Rendered {
+/// Replaces what `view` shows with `blocks`.
+pub fn render(view: &gtk::TextView, blocks: &[BlockView]) -> Rendered {
 	// Children can only be anchored in the view's own buffer, so attach it first.
 	let buffer = gtk::TextBuffer::new(None);
 	view.set_buffer(Some(&buffer));
@@ -37,7 +37,7 @@ pub fn render(view: &gtk::TextView, doc: &Doc) -> Rendered {
 	let accent = adw::StyleManager::default().accent_color().to_standalone_rgba(dark);
 	let fg = view.color();
 	let mut p = Painter {
-		buffer: buffer.clone(),
+		buffer,
 		tags: HashMap::new(),
 		view,
 		out: Rendered::default(),
@@ -45,15 +45,14 @@ pub fn render(view: &gtk::TextView, doc: &Doc) -> Rendered {
 		dim: gdk::RGBA::new(fg.red(), fg.green(), fg.blue(), 0.62),
 		faint: gdk::RGBA::new(fg.red(), fg.green(), fg.blue(), 0.06),
 	};
-	p.blocks(&doc.blocks, 0, 0);
-	// No trailing blank lines.
-	let mut end = buffer.end_iter();
-	let mut start = end;
-	while start.backward_char() && start.char() == '\n' {}
-	if start.char() != '\n' {
-		start.forward_char();
+	let mut last: Option<&BlockView> = None;
+	for block in blocks {
+		if let Some(last) = last {
+			p.between(last, block);
+		}
+		p.block(block);
+		last = Some(block);
 	}
-	buffer.delete(&mut start, &mut end);
 	p.out
 }
 
@@ -71,37 +70,40 @@ impl Painter<'_> {
 			"code" => {
 				tag.set_family(Some("monospace"));
 				tag.set_background_rgba(Some(&self.faint));
-			}
+			},
 			"pre" => {
 				tag.set_family(Some("monospace"));
 				tag.set_paragraph_background_rgba(Some(&self.faint));
 				tag.set_wrap_mode(gtk::WrapMode::None);
 				tag.set_left_margin(12);
-			}
+			},
 			"dim" => tag.set_foreground_rgba(Some(&self.dim)),
-			"missing" => {
-				tag.set_foreground_rgba(Some(&self.dim));
-				tag.set_style(pango::Style::Italic);
-			}
 			"link" => {
 				tag.set_foreground_rgba(Some(&self.accent));
 				tag.set_underline(pango::Underline::Single);
-			}
+			},
 			"h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
 				let scale = [1.6, 1.4, 1.2, 1.1, 1.0, 1.0][(name.as_bytes()[1] - b'1') as usize];
 				tag.set_scale(scale);
 				tag.set_weight(800);
 				tag.set_pixels_below_lines(2);
-			}
+			},
 			"rule" => {
 				tag.set_foreground_rgba(Some(&self.dim));
 				tag.set_justification(gtk::Justification::Center);
-			}
+			},
 			_ => {
 				if let Some(n) = name.strip_prefix("indent-").and_then(|n| n.parse::<i32>().ok()) {
 					tag.set_left_margin(n * INDENT);
+				} else if let Some(n) = name.strip_prefix("hang-").and_then(|n| n.parse::<i32>().ok()) {
+					// The marker hangs left of the text, which the tab lines up.
+					tag.set_left_margin(n * INDENT);
+					tag.set_indent(-INDENT);
+					let mut tabs = pango::TabArray::new(1, true);
+					tabs.set_tab(0, pango::TabAlign::Left, INDENT);
+					tag.set_tabs(Some(&tabs));
 				}
-			}
+			},
 		}
 		self.buffer.tag_table().add(&tag);
 		self.tags.insert(name.to_string(), tag.clone());
@@ -121,134 +123,94 @@ impl Painter<'_> {
 		}
 	}
 
-	/// Tags every line of a block gets: its indent, and dimming inside quotes.
-	fn base(indent: i32, quote: i32) -> Vec<String> {
+	/// Tags every line of a block gets: its margin, and dimming inside quotes.
+	fn base(block: &BlockView) -> Vec<String> {
+		let level = block.quote_depth + block.list_depth;
 		let mut v = Vec::new();
-		if indent > 0 {
-			v.push(format!("indent-{indent}"));
+		if block.marker.is_some() {
+			v.push(format!("hang-{level}"));
+		} else if level > 0 {
+			v.push(format!("indent-{level}"));
 		}
-		if quote > 0 {
+		if block.quote_depth > 0 {
 			v.push("dim".into());
 		}
 		v
 	}
 
-	fn blocks(&mut self, blocks: &[Block], indent: i32, quote: i32) {
-		for (i, block) in blocks.iter().enumerate() {
-			let base = Self::base(indent, quote);
-			if i > 0 {
-				// A blank line between blocks, like a mail's paragraph margins.
-				self.insert("\n\n", &base, None);
-			}
-			match block {
-				Block::Para(inl) => self.inlines(inl, &base),
-				Block::Heading(level, inl) => {
-					let mut names = base.clone();
-					names.push(format!("h{level}"));
-					self.inlines(inl, &names);
+	/// A blank line between blocks, like a mail's paragraph margins; list items sit one per line.
+	fn between(&mut self, last: &BlockView, block: &BlockView) {
+		// A new list starting straight after another is apart from it: a change of marker, or numbers
+		// that start again.
+		let bullet = |b: &BlockView| b.marker.as_deref() == Some("•");
+		let another = block.marker.is_some() && last.marker.is_some() && (bullet(last) != bullet(block) || block.marker.as_deref() == Some("1."));
+		let tight = last.list_depth > 0 && block.list_depth > 0 && !another;
+		self.insert(if tight { "\n" } else { "\n\n" }, &Self::base(block), None);
+	}
+
+	fn block(&mut self, block: &BlockView) {
+		let base = Self::base(block);
+		if let Some(marker) = &block.marker {
+			self.insert(&format!("{marker}\t"), &base, None);
+		}
+		match &block.kind {
+			BlockKind::Text { spans } => self.spans(spans, &base),
+			BlockKind::Heading { level, spans } => {
+				let mut names = base;
+				names.push(format!("h{level}"));
+				self.spans(spans, &names);
+			},
+			BlockKind::Pre { text } => {
+				let mut names = base;
+				names.push("pre".into());
+				self.insert(text, &names, None);
+			},
+			BlockKind::Rule => {
+				let mut names = base;
+				names.push("rule".into());
+				self.insert("⸻", &names, None);
+			},
+			BlockKind::Image { alt, .. } => {
+				let anchor = self.buffer.create_child_anchor(&mut self.buffer.end_iter());
+				let picture = gtk::Picture::builder().content_fit(gtk::ContentFit::Contain).can_shrink(true).alternative_text(alt.as_str()).css_classes(["inline-image"]).build();
+				if !alt.is_empty() {
+					picture.set_tooltip_text(Some(alt));
 				}
-				Block::Pre(text) => {
-					let mut names = base.clone();
-					names.push("pre".into());
-					self.insert(text, &names, None);
-				}
-				Block::Rule => {
-					let mut names = base.clone();
-					names.push("rule".into());
-					self.insert("⸻", &names, None);
-				}
-				Block::Quote(inner) => self.blocks(inner, indent + 1, quote + 1),
-				Block::List { ordered, start, items } => self.list(*ordered, *start, items, indent, quote),
-				Block::Table(rows) => self.table(rows, &base),
-			}
+				self.view.add_child_at_anchor(&picture, &anchor);
+				self.out.images.push((picture, block.index));
+			},
+			BlockKind::Table { rows } => self.table(rows, &base),
 		}
 	}
 
-	/// Items one per line, the marker hanging left of the text.
-	fn list(&mut self, ordered: bool, start: u32, items: &[Vec<Block>], indent: i32, quote: i32) {
-		let level = indent + 1;
-		let hang = format!("hang-{level}");
-		if !self.tags.contains_key(&hang) {
-			let tag = gtk::TextTag::new(Some(&hang));
-			tag.set_left_margin(level * INDENT);
-			tag.set_indent(-INDENT);
-			let mut tabs = pango::TabArray::new(1, true);
-			tabs.set_tab(0, pango::TabAlign::Left, INDENT);
-			tag.set_tabs(Some(&tabs));
-			self.buffer.tag_table().add(&tag);
-			self.tags.insert(hang.clone(), tag);
-		}
-		// The hanging tag sets the margin, so no indent tag here.
-		let mut names = Self::base(0, quote);
-		names.push(hang);
-		for (k, item) in items.iter().enumerate() {
-			if k > 0 {
-				self.insert("\n", &names, None);
+	fn spans(&mut self, spans: &[SpanView], base: &[String]) {
+		for span in spans {
+			let mut names = base.to_vec();
+			for (on, name) in [(span.bold, "bold"), (span.italic, "italic"), (span.underline, "underline"), (span.strike, "strike"), (span.code, "code")] {
+				if on {
+					names.push(name.to_string());
+				}
 			}
-			let marker = if ordered { format!("{}.\t", start as usize + k) } else { "•\t".to_string() };
-			self.insert(&marker, &names, None);
-			let (first, rest) = match item.split_first() {
-				Some((Block::Para(inl) | Block::Heading(_, inl), rest)) => (Some(inl), rest),
-				_ => (None, &item[..]),
-			};
-			if let Some(inl) = first {
-				self.inlines(inl, &names);
-			}
-			for block in rest {
-				self.insert("\n", &names, None);
-				self.blocks(std::slice::from_ref(block), level, quote);
-			}
+			let link_tag = span.link.as_ref().map(|url| {
+				names.push("link".into());
+				let tag = gtk::TextTag::new(None);
+				self.buffer.tag_table().add(&tag);
+				self.out.links.push((tag.clone(), url.clone()));
+				tag
+			});
+			self.insert(&span.text, &names, link_tag.as_ref());
 		}
 	}
 
-	fn inlines(&mut self, inlines: &[Inline], base: &[String]) {
-		for inl in inlines {
-			match inl {
-				Inline::Text { text, style, link } => {
-					let mut names = base.to_vec();
-					names.extend(style_names(*style));
-					let link_tag = link.as_ref().map(|url| {
-						names.push("link".into());
-						let tag = gtk::TextTag::new(None);
-						self.buffer.tag_table().add(&tag);
-						self.out.links.push((tag.clone(), url.clone()));
-						tag
-					});
-					self.insert(text, &names, link_tag.as_ref());
-				}
-				Inline::Break => self.insert("\n", base, None),
-				Inline::Missing(alt) => {
-					let mut names = base.to_vec();
-					names.push("missing".into());
-					self.insert(&format!("[{alt}]"), &names, None);
-				}
-				Inline::Image { src, alt } => {
-					let anchor = self.buffer.create_child_anchor(&mut self.buffer.end_iter());
-					let picture = gtk::Picture::builder()
-						.content_fit(gtk::ContentFit::Contain)
-						.can_shrink(true)
-						.alternative_text(alt.as_str())
-						.css_classes(["inline-image"])
-						.build();
-					if !alt.is_empty() {
-						picture.set_tooltip_text(Some(alt));
-					}
-					self.view.add_child_at_anchor(&picture, &anchor);
-					self.out.images.push((picture, src.clone()));
-				}
-			}
-		}
-	}
-
-	fn table(&mut self, rows: &[Vec<Cell>], base: &[String]) {
+	fn table(&mut self, rows: &[TableRowView], base: &[String]) {
 		let grid = gtk::Grid::builder().column_spacing(24).row_spacing(8).margin_top(12).margin_bottom(12).margin_start(16).margin_end(16).build();
-		let columns = rows.iter().map(Vec::len).max().unwrap_or(1) as i32;
-		let header = rows.len() > 1 && rows[0].iter().all(|c| c.header);
+		let columns = rows.iter().map(|r| r.cells.len()).max().unwrap_or(1) as i32;
+		let header = rows.len() > 1 && rows[0].cells.iter().all(|c| c.header);
 		let mut y = 0;
 		for (r, row) in rows.iter().enumerate() {
-			for (c, cell) in row.iter().enumerate() {
+			for (c, cell) in row.cells.iter().enumerate() {
 				let label = gtk::Label::builder().xalign(0.0).wrap(true).max_width_chars(40).selectable(true).build();
-				label.set_markup(&cell_markup(&cell.content));
+				label.set_markup(&cell_markup(&cell.spans));
 				if cell.header {
 					label.add_css_class("heading");
 				}
@@ -276,46 +238,29 @@ impl Painter<'_> {
 	}
 }
 
-fn style_names(s: Style) -> Vec<String> {
-	let mut v = Vec::new();
-	for (on, name) in [(s.bold, "bold"), (s.italic, "italic"), (s.underline, "underline"), (s.strike, "strike"), (s.code, "code")] {
-		if on {
-			v.push(name.to_string());
-		}
-	}
-	v
-}
-
-fn cell_markup(inlines: &[Inline]) -> String {
+fn cell_markup(spans: &[SpanView]) -> String {
 	let mut m = String::new();
-	for inl in inlines {
-		match inl {
-			Inline::Text { text, style, link } => {
-				let mut t = glib::markup_escape_text(text).to_string();
-				if style.code {
-					t = format!("<tt>{t}</tt>");
-				}
-				if style.bold {
-					t = format!("<b>{t}</b>");
-				}
-				if style.italic {
-					t = format!("<i>{t}</i>");
-				}
-				if style.underline {
-					t = format!("<u>{t}</u>");
-				}
-				if style.strike {
-					t = format!("<s>{t}</s>");
-				}
-				if let Some(url) = link {
-					t = format!("<a href=\"{}\">{t}</a>", glib::markup_escape_text(url));
-				}
-				m.push_str(&t);
-			}
-			Inline::Break => m.push('\n'),
-			Inline::Missing(alt) => m.push_str(&format!("<i>[{}]</i>", glib::markup_escape_text(alt))),
-			Inline::Image { alt, .. } => m.push_str(&glib::markup_escape_text(alt)),
+	for span in spans {
+		let mut t = glib::markup_escape_text(&span.text).to_string();
+		if span.code {
+			t = format!("<tt>{t}</tt>");
 		}
+		if span.bold {
+			t = format!("<b>{t}</b>");
+		}
+		if span.italic {
+			t = format!("<i>{t}</i>");
+		}
+		if span.underline {
+			t = format!("<u>{t}</u>");
+		}
+		if span.strike {
+			t = format!("<s>{t}</s>");
+		}
+		if let Some(url) = &span.link {
+			t = format!("<a href=\"{}\">{t}</a>", glib::markup_escape_text(url));
+		}
+		m.push_str(&t);
 	}
 	m
 }

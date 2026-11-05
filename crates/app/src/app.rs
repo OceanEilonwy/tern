@@ -65,6 +65,7 @@ pub enum Msg {
 	Background(std::sync::mpsc::Sender<BackgroundResult>),
 	/// The platform wants the sync's next round now.
 	SyncNow,
+	SyncKinds(Vec<FolderKind>),
 	/// The engine has been dropped.
 	Stop,
 }
@@ -183,8 +184,6 @@ struct Session {
 
 /// One round of keeping the cache up to date, for a session.
 struct Round {
-	host: Option<Arc<dyn Host>>,
-	on_screen: Option<Arc<Mutex<Option<FolderId>>>>,
 	paths: Paths,
 	meaning: Arc<Meaning>,
 	backend: Arc<dyn Backend>,
@@ -226,29 +225,17 @@ impl Round {
 		self.post(Box::new(|app| app.start_work(Word::Fetching)));
 		let settings = *self.settings.lock().unwrap_or_else(|p| p.into_inner());
 		let current = self.current.clone();
-		let platform_says = self.on_screen.clone();
 		let job = Job {
 			backend: self.backend.clone(),
 			cache: self.cache.clone(),
 			fetcher: self.fetcher.clone(),
 			level: settings.offline,
 			rules: rules::load(&self.paths),
-			on_screen: Arc::new(move || match &platform_says {
-				Some(folder) => folder.lock().unwrap_or_else(|p| p.into_inner()).clone(),
-				None => current.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|f| f.id.clone()),
-			}),
+			on_screen: Arc::new(move || current.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|f| f.id.clone())),
 			labels: true,
 			contacts_done: self.contacts_done.clone(),
 		};
 		let finished = tern_sync::round(&job, &|event| {
-			if let Some(host) = &self.host {
-				match &event {
-					Event::Folders(_) | Event::RulesMoved => host.mail_changed(None),
-					Event::FolderChanged(id) => host.mail_changed(Some(id.clone())),
-					Event::NoFolders(e) => host.folders_failed(e.clone()),
-					Event::Labels(_) | Event::Problem(_) => {},
-				}
-			}
 			self.post(Box::new(move |app| match event {
 				Event::Folders(folders) => {
 					app.note_fine();
@@ -469,7 +456,9 @@ pub struct App {
 	cleanup_waiting: bool,
 	device: &'static str,
 	host: Option<Arc<dyn Host>>,
-	on_screen: Option<Arc<Mutex<Option<FolderId>>>>,
+	retry_hint: &'static str,
+	follow_neighbour: bool,
+	lone_draft_composes: bool,
 	/// An account to open at the start in place of any saved one.
 	start_with: Option<Arc<dyn Backend>>,
 	paths: Paths,
@@ -632,7 +621,9 @@ impl App {
 		App {
 			device: options.device,
 			host: options.host,
-			on_screen: options.on_screen,
+			retry_hint: options.retry_hint,
+			follow_neighbour: options.follow_neighbour,
+			lone_draft_composes: options.lone_draft_composes,
 			start_with: options.signed_in,
 			settings: Arc::new(Mutex::new(Settings::load(&paths))),
 			meaning: options.meaning.unwrap_or_else(|| Meaning::new(&paths)),
@@ -699,6 +690,38 @@ impl App {
 	pub fn sync_now(&self) {
 		if let Some(session) = &self.session {
 			session.wake.notify_one();
+		}
+	}
+
+	/// Brings the folders of these kinds up to date, as after sending or saving a draft.
+	pub fn sync_kinds(&mut self, kinds: &[FolderKind]) {
+		self.folder_changed(None);
+		let ids: Vec<FolderId> = self.folders.iter().filter(|f| kinds.contains(&f.kind)).map(|f| f.id.clone()).collect();
+		for id in ids {
+			self.sync_folder(&id, false);
+		}
+	}
+
+	/// The open conversation has left the list on show: its neighbour opens, where the two are on
+	/// screen together. `before` is the list as it was.
+	fn follow_on(&mut self, before: &[String]) {
+		if !self.follow_neighbour {
+			return;
+		}
+		let Some(key) = self.conv.as_ref().map(|c| c.key.clone()) else { return };
+		let rows = self.search.as_ref().map_or(&self.rows, |s| &s.rows);
+		if rows.iter().any(|r| r.key == key) {
+			return;
+		}
+		let Some(at) = before.iter().position(|k| *k == key) else { return };
+		let Some(next) = rows.get(at.min(rows.len().saturating_sub(1))).map(|r| r.key.clone()) else {
+			self.conv = None;
+			return self.remove_screen(Screen::Conversation);
+		};
+		let found = self.search.as_ref().and_then(|s| s.folders.get(&next).cloned());
+		let here = self.current.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|f| f.id.clone());
+		if let Some(folder) = found.or(here) {
+			self.open_thread(next, folder);
 		}
 	}
 
@@ -1066,8 +1089,6 @@ impl App {
 	fn round(&self) -> Option<Round> {
 		let session = self.session.as_ref()?;
 		Some(Round {
-			host: self.host.clone(),
-			on_screen: self.on_screen.clone(),
 			paths: self.paths.clone(),
 			meaning: self.meaning.clone(),
 			backend: session.backend.clone(),
@@ -1285,6 +1306,7 @@ impl App {
 				if app.list_generation != generation {
 					return;
 				}
+				let before: Vec<String> = app.rows.iter().map(|r| r.key.clone()).collect();
 				app.rows = rows;
 				app.rows_loaded = true;
 				app.synced = state.synced_ms > 0;
@@ -1293,6 +1315,9 @@ impl App {
 				app.selection.retain(|k| keys.contains(k));
 				if let Some(session) = &app.session {
 					session.fetcher.want(Want::Viewing(app.rows.iter().take(VIEWING).map(|r| r.latest.id.clone()).collect()));
+				}
+				if app.search.is_none() {
+					app.follow_on(&before);
 				}
 			}
 		});
@@ -1399,7 +1424,7 @@ impl App {
 			mails.push(tern_cache::ThreadMail { summary: row.latest.clone(), folder: self.folder_kind(&folder), folder_id: folder.clone() });
 		}
 		// A lone draft goes straight back to being written.
-		if mails.len() == 1 && mails[0].summary.draft {
+		if self.lone_draft_composes && mails.len() == 1 && mails[0].summary.draft {
 			return self.edit_draft(mails[0].summary.id.clone());
 		}
 		mails.reverse();
@@ -1474,7 +1499,7 @@ impl App {
 						match picture {
 							Picture::Data(data) => pictures_to_get.push((block, None, Some(data))),
 							Picture::Cid(cid) => {
-								if let Some(att) = attachments.iter().find(|a| a.cid.as_deref() == Some(&cid)) {
+								if let Some(att) = attachments.iter().find(|a| a.cid.as_deref().map(|c| c.trim_matches(['<', '>'])) == Some(cid.as_str())) {
 									pictures_to_get.push((block, Some(att.clone()), None));
 								}
 							},
@@ -1527,6 +1552,10 @@ impl App {
 		let mut mails = session.cache.thread(&conv.key, &conv.folder).unwrap_or_default();
 		mails.reverse();
 		if mails.is_empty() {
+			// Left to the list changing, which says where to go next.
+			if self.follow_neighbour {
+				return;
+			}
 			self.conv = None;
 			return self.remove_screen(Screen::Conversation);
 		}
@@ -1656,8 +1685,10 @@ impl App {
 		let (key, folder) = (conv.key.clone(), conv.folder.clone());
 		let ids: Vec<MailId> = self.thread_here(&key, &folder).into_iter().map(|m| m.id).collect();
 		let message = if ids.len() > 1 { many } else { one }.to_string();
-		self.conv = None;
-		self.remove_screen(Screen::Conversation);
+		if !self.follow_neighbour {
+			self.conv = None;
+			self.remove_screen(Screen::Conversation);
+		}
 		self.move_away(ids, kind, message);
 	}
 
@@ -1873,7 +1904,7 @@ impl App {
 			return self.say("Rule added");
 		}
 		let n = ids.len();
-		if let Some(conv) = &self.conv {
+		if let Some(conv) = self.conv.as_ref().filter(|_| !self.follow_neighbour) {
 			if conv.cards.iter().all(|c| ids.contains(&c.summary.id)) {
 				self.conv = None;
 				self.remove_screen(Screen::Conversation);
@@ -2038,13 +2069,6 @@ impl App {
 				}
 			}
 		});
-	}
-
-	fn sync_kinds(&mut self, kinds: &[FolderKind]) {
-		let ids: Vec<FolderId> = self.folders.iter().filter(|f| kinds.contains(&f.kind)).map(|f| f.id.clone()).collect();
-		for id in ids {
-			self.sync_folder(&id, false);
-		}
 	}
 
 	/// Closing keeps the message: unless nothing changed it goes to Drafts behind the screen. If
@@ -2224,8 +2248,10 @@ impl App {
 					return;
 				}
 				search.searching = false;
+				let before: Vec<String> = search.rows.iter().map(|r| r.key.clone()).collect();
 				search.folders = hits.iter().map(|h| (h.row.key.clone(), h.folder.clone())).collect();
 				search.rows = hits.into_iter().map(|h| h.row).collect();
+				app.follow_on(&before);
 			}
 		});
 	}
@@ -2459,7 +2485,9 @@ impl App {
 			Action::OpenFolder { id } => {
 				if let Some(folder) = self.folders.iter().find(|f| f.id.0 == id).cloned() {
 					self.conv = None;
+					self.search = None;
 					self.remove_screen(Screen::Conversation);
+					self.remove_screen(Screen::Search);
 					self.open_folder(folder);
 				}
 			},
@@ -2471,6 +2499,27 @@ impl App {
 				} else {
 					self.open_when_ready = Some((key, FolderId(folder_id)));
 				}
+			},
+			Action::RowPin { key } => {
+				let pinned = self.rows.iter().chain(self.search.iter().flat_map(|s| s.rows.iter())).find(|r| r.key == key).is_some_and(|r| r.pinned);
+				self.set_pinned(&[key], !pinned);
+			},
+			Action::RowRead { key, folder_id, read } => {
+				// Kept unread: left, or showing it marks it read again.
+				if !read && self.conv.as_ref().is_some_and(|c| c.key == key) {
+					self.conv = None;
+					self.remove_screen(Screen::Conversation);
+				}
+				self.thread_unread(&key, &FolderId(folder_id), !read);
+			},
+			Action::RowSpam { key, folder_id } => {
+				let own = self.thread_here(&key, &FolderId(folder_id)).into_iter().filter(|m| !m.outgoing).collect();
+				self.open_spam(own);
+			},
+			Action::RowTrash { key, folder_id } => {
+				let ids: Vec<MailId> = self.thread_here(&key, &FolderId(folder_id)).into_iter().map(|m| m.id).collect();
+				let message = if ids.len() > 1 { "Conversation moved to Trash" } else { "Moved to Trash" }.to_string();
+				self.move_away(ids, FolderKind::Trash, message);
 			},
 			Action::ToggleSelect { key } => {
 				if !self.selection.remove(&key) {
@@ -2508,6 +2557,7 @@ impl App {
 			Action::OpenLink { url } => self.open_link(url),
 			Action::Answer { mail, kind } => self.compose_answer(mail_id(&mail), kind),
 			Action::EditDraft { mail } => self.edit_draft(mail_id(&mail)),
+			Action::DiscardDraft { mail } => self.move_away(vec![mail_id(&mail)], FolderKind::Trash, "Draft discarded".to_string()),
 			Action::ComposeNew => self.open_composer(Fields::default()),
 			Action::ComposeSend { text } => self.compose_send(text),
 			Action::ComposeClose { text } => self.compose_close(text),
@@ -2558,13 +2608,25 @@ impl App {
 				self.search = Some(SearchState { revision, query: String::new(), rule: None, searching: false, generation: 0, rows: Vec::new(), folders: HashMap::new() });
 				self.push(Screen::Search);
 			},
+			Action::CloseSearch => {
+				self.search = None;
+				self.conv = None;
+				self.remove_screen(Screen::Search);
+				self.remove_screen(Screen::Conversation);
+				self.reload_list();
+			},
 			Action::SearchText { text } => {
-				if let Some(search) = self.search.as_mut() {
-					if search.rule.as_deref() != Some(text.as_str()) {
-						search.rule = None;
-					}
-					search.query = text;
+				let Some(search) = self.search.as_mut() else { return };
+				if search.query == text {
+					return;
 				}
+				if search.rule.as_deref() != Some(text.as_str()) {
+					search.rule = None;
+				}
+				search.query = text;
+				// Other words: nothing stays open, so no result opens, and is marked read, in its place.
+				self.conv = None;
+				self.remove_screen(Screen::Conversation);
 				self.run_search();
 			},
 			Action::RuleInSearch => {
@@ -2769,9 +2831,6 @@ impl App {
 				app.say(format!("Freed {}", format::size(freed)));
 				app.measure();
 				app.folder_changed(None);
-				if let Some(host) = &app.host {
-					host.mail_changed(None);
-				}
 				if let Some(session) = &app.session {
 					session.wake.notify_one();
 				}
@@ -2901,8 +2960,12 @@ impl App {
 				.collect(),
 			title: current.map_or_else(|| "Tern".to_string(), |f| f.name),
 			state,
-			empty_title: if self.failed.is_some() { "Could not load messages".into() } else { "No messages".into() },
-			empty_detail: self.failed.as_ref().map(|e| format!("{e}. Pull down to try again.")),
+			empty_title: match (&self.failed, self.folders.is_empty()) {
+				(Some(_), true) => "Could not load folders".into(),
+				(Some(_), false) => "Could not load messages".into(),
+				(None, _) => "No messages".into(),
+			},
+			empty_detail: self.failed.as_ref().map(|e| format!("{e}. {}", self.retry_hint)),
 			more: rows.len() >= self.shown || !self.complete,
 			rows,
 			selection,
@@ -2924,18 +2987,23 @@ impl App {
 							.attachments
 							.iter()
 							.filter(|a| a.cid.as_ref().is_none_or(|cid| !o.inline.contains(cid)))
-							.map(|a| AttachmentView { id: a.id.clone(), name: a.name.clone(), size: format::size(a.size), image: a.mime.starts_with("image/") })
+							.map(|a| AttachmentView { id: a.id.clone(), name: a.name.clone(), size: format::size(a.size), image: a.mime.starts_with("image/"), mime: a.mime.clone() })
 							.collect()
 					})
 					.unwrap_or_default();
 				let snippet = c.error.clone().or_else(|| {
-					opened.filter(|_| !c.expanded).map(|o| {
-						let line = o.plain.split_whitespace().collect::<Vec<_>>().join(" ");
-						line.chars().take(120).collect()
-					})
+					if c.expanded {
+						return None;
+					}
+					match opened {
+						Some(o) => Some(o.plain.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect()),
+						None => c.summary.to.as_ref().map(|to| format!("To {}", to.display())),
+					}
 				});
 				CardView {
 					id: mail_ref(&c.summary.id),
+					subject: subject_or_none(&c.summary.subject),
+					sent: c.kind == FolderKind::Sent,
 					from: if c.summary.from.display().is_empty() { "(Unknown sender)".into() } else { c.summary.from.display().to_string() },
 					address: c.summary.from.address.clone(),
 					initials: initials(c.summary.from.display()),
@@ -2951,6 +3019,7 @@ impl App {
 					attachments,
 					web_url: opened.filter(|o| o.notice.is_some()).map(|o| o.mail.web_url.clone()),
 					notice: opened.and_then(|o| o.notice.clone()),
+					open_url: opened.map(|o| o.mail.web_url.clone()),
 				}
 			})
 			.collect();
@@ -3152,8 +3221,7 @@ impl App {
 					keep_rule: sheet.keep_rule,
 					confirm: match (picked, sheet.keep_rule) {
 						(0, true) => "Add rule".to_string(),
-						(0, false) => "Move to Spam".to_string(),
-						(1, _) => "Move 1 to Spam".to_string(),
+						(0, false) | (1, _) => "Move to Spam".to_string(),
 						(n, _) => format!("Move {n} to Spam"),
 					},
 					choices: ["sender", "domain", "subject"].map(|v| ChoiceView { value: v.to_string(), label: { let mut c = v.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }, selected: false }).to_vec(),
