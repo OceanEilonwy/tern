@@ -14,5 +14,5 @@ name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
 
 [dependencies]
-tern-mobile = { path = "../mobile", features = ["uniffi"] }
+tern-app = { workspace = true, features = ["uniffi"] }
 uniffi = { workspace = true, features = ["cli"] }

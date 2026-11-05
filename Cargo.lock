@@ -3483,11 +3483,41 @@ dependencies = [
  "oo7",
  "serde",
  "serde_json",
+ "tern-app",
  "tern-cache",
- "tern-core",
- "tern-engine",
+ "tern-compose",
+ "tern-demo",
+ "tern-html",
+ "tern-mail",
+ "tern-rules",
+ "tern-sync",
  "tern-tuta",
  "tokio",
+]
+
+[[package]]
+name = "tern-app"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "libc",
+ "log 0.4.27",
+ "serde",
+ "serde_json",
+ "tern-cache",
+ "tern-compose",
+ "tern-demo",
+ "tern-html",
+ "tern-mail",
+ "tern-rules",
+ "tern-sync",
+ "tern-tuta",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
+ "uniffi",
 ]
 
 [[package]]
@@ -3496,64 +3526,78 @@ version = "0.1.0"
 dependencies = [
  "rusqlite",
  "serde_json",
- "tern-core",
+ "tern-mail",
+ "tern-rules",
  "tokio",
 ]
 
 [[package]]
-name = "tern-core"
+name = "tern-compose"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "serde",
- "thiserror 2.0.18",
+ "tern-demo",
+ "tern-html",
+ "tern-mail",
  "tokio",
 ]
 
 [[package]]
-name = "tern-engine"
+name = "tern-demo"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64",
- "chrono",
- "ego-tree",
- "log 0.4.27",
- "scraper",
- "serde",
- "serde_json",
- "tern-cache",
- "tern-core",
- "tern-tuta",
+ "tern-mail",
  "tokio",
- "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
 name = "tern-ffi"
 version = "0.1.0"
 dependencies = [
- "tern-mobile",
+ "tern-app",
  "uniffi",
 ]
 
 [[package]]
-name = "tern-mobile"
+name = "tern-html"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ego-tree",
+ "scraper",
+]
+
+[[package]]
+name = "tern-mail"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64",
- "libc",
- "log 0.4.27",
  "serde",
- "serde_json",
- "tern-cache",
- "tern-core",
- "tern-engine",
- "tern-tuta",
  "thiserror 2.0.18",
  "tokio",
- "uniffi",
+]
+
+[[package]]
+name = "tern-rules"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tern-mail",
+ "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "tern-sync"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "log 0.4.27",
+ "tern-cache",
+ "tern-demo",
+ "tern-mail",
+ "tern-rules",
+ "tokio",
 ]
 
 [[package]]
@@ -3566,7 +3610,7 @@ dependencies = [
  "log 0.4.27",
  "serde",
  "serde_json",
- "tern-core",
+ "tern-mail",
  "tokio",
  "tuta-sdk",
 ]

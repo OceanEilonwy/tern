@@ -14,7 +14,7 @@ demo:
 	TERN_DEMO=1 cargo run -p tern
 
 test: test-ui
-	cargo test -p tern -p tern-core -p tern-tuta -p tern-cache -p tern-engine -p tern-mobile
+	cargo test -p tern -p tern-mail -p tern-rules -p tern-html -p tern-compose -p tern-demo -p tern-tuta -p tern-cache -p tern-sync -p tern-app
 
 # Drives the real window on a headless display: KDE's kwin_wayland in virtual mode when installed
 # (it draws real frames, so layout settles as on screen), else GNOME's mutter, headless (as in CI;

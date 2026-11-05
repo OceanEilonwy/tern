@@ -11,7 +11,7 @@
 #
 # Android signing secrets: TERN_KEYSTORE_BASE64 (the keystore file, base64), TERN_KEYSTORE_PASSWORD,
 # TERN_KEY_ALIAS, TERN_KEY_PASSWORD. A version tag needs them and must name the version in
-# crates/mobile/Cargo.toml; a build of main without them keeps its APKs unsigned, named so.
+# crates/ffi/Cargo.toml; a build of main without them keeps its APKs unsigned, named so.
 name: Release
 
 on:
@@ -76,9 +76,9 @@ jobs:
       - name: Version
         id: version
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/mobile/Cargo.toml | head -n 1)
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/ffi/Cargo.toml | head -n 1)
           if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
-            echo "tag $GITHUB_REF_NAME doesn't match the version $version in crates/mobile/Cargo.toml"; exit 1
+            echo "tag $GITHUB_REF_NAME doesn't match the version $version in crates/ffi/Cargo.toml"; exit 1
           fi
           IFS=. read -r major minor patch <<< "${version%%-*}"
           echo "version=$version" >> "$GITHUB_OUTPUT"

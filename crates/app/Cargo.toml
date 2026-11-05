@@ -1,28 +1,35 @@
 [package]
-name = "tern"
+name = "tern-app"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
 publish = false
 
+# The one core: the app's state, navigation and what each action does. A platform draws what this
+# publishes and sends back what the person did. The bridge for other languages is behind `uniffi`.
+[features]
+uniffi = ["dep:uniffi"]
+
 [dependencies]
-tern-core = { workspace = true }
+tern-mail = { workspace = true }
+tern-rules = { workspace = true }
+tern-html = { workspace = true }
+tern-compose = { workspace = true }
+tern-demo = { workspace = true }
 tern-tuta = { workspace = true }
 tern-cache = { workspace = true }
-tern-engine = { workspace = true }
+tern-sync = { workspace = true }
 serde = { workspace = true }
-log = { workspace = true }
+log = { workspace = true, features = ["std"] }
 serde_json = { workspace = true }
-gtk = { package = "gtk4", version = "0.11", features = ["v4_22"] }
-adw = { package = "libadwaita", version = "0.9", features = ["v1_8"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync", "macros"] }
-oo7 = { version = "0.6", default-features = false, features = ["tokio", "native_crypto"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros"] }
 base64 = { workspace = true }
+libc = "0.2"
 async-trait = "0.1.77"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-
-[build-dependencies]
-glib-build-tools = "0.22"
+uniffi = { workspace = true, optional = true }
+thiserror = "2.0"
+toml = "=1.1.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -2,14 +2,20 @@
 //! sync, and Clean Up drops more on request.
 
 use rusqlite::{params, OptionalExtension};
-use tern_core::{FolderId, MailId};
+use tern_mail::{FolderId, MailId};
 
-use crate::{forget, sync::PAGE, Cache, FolderState, Result};
+use crate::{forget, Cache, FolderState, Result, PAGE};
 
 /// Mails that always stay: those in Drafts and in pinned conversations.
 const SPARED: &str = "(m.thread IN (SELECT thread FROM pins) OR m.folder IN (SELECT id FROM folders WHERE kind = 'Drafts'))";
 
 impl Cache {
+	/// Forgets every page cursor, as a cache written before they were kept has none.
+	pub fn clear_cursors(&self) -> Result<()> {
+		self.conn().execute("DELETE FROM cursors", [])?;
+		Ok(())
+	}
+
 	/// Remembers the page cursor after `id`, the last mail of a page, so that once older mail is
 	/// trimmed, fetching older mail continues from there.
 	pub fn set_cursor(&self, id: &MailId, next: &str) -> Result<()> {
@@ -144,7 +150,7 @@ impl Cache {
 
 #[cfg(test)]
 mod tests {
-	use tern_core::{Address, Folder, FolderKind, Mail, MailSummary};
+	use tern_mail::{Address, Folder, FolderKind, Mail, MailSummary};
 
 	use super::*;
 

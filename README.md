@@ -97,7 +97,9 @@ make test         # unit tests, plus the window checks on a headless display (mo
 
 Not supported yet: two-factor sign-in, and password-protected mail to people outside Tuta.
 
-`crates/app` is the GTK app, `crates/cache` the encrypted cache and sync, `crates/tuta` the Tuta account,
-and `vendor/tuta-sdk` Tuta's own Rust SDK with Tern's additions (see `PATCHES.md`).
+`crates/desktop` is the GTK app, `android/` the Compose app, and `crates/app` the core they share.
+Beneath it, `crates/sync` keeps `crates/cache`, the encrypted cache, up to date from `crates/tuta`, the
+Tuta account. `crates/mail`, `rules`, `html`, `compose` and `demo` are the smaller pieces, and
+`vendor/tuta-sdk` is Tuta's own Rust SDK with Tern's additions (see `PATCHES.md`).
 
 GPL-3.0, like the Tuta SDK it builds on.

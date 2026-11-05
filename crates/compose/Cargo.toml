@@ -1,0 +1,16 @@
+[package]
+name = "tern-compose"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+# Writing mail, with no toolkit in it: subjects, quoting, recipients, mailto links, and building the draft.
+[dependencies]
+tern-mail = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tern-demo = { workspace = true }
+tern-html = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

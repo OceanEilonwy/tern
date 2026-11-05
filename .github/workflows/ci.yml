@@ -28,6 +28,11 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Unit tests
         run: cargo test --workspace --locked
+      # The Tuta SDK brings its own UniFFI, so of that this can only look at what the core asks for itself.
+      - name: The core stays free of any toolkit, and of the bridge by default
+        run: |
+          ! cargo tree -p tern-app -e normal --prefix none --locked | grep -E '^(gtk4|libadwaita|glib) '
+          ! cargo tree -p tern-app -e normal --prefix none --locked --depth 1 | grep -E '^uniffi '
       # GNOME's mutter, headless, drawn in software: the runner has no GPU.
       - name: Window scenes
         env:

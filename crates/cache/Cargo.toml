@@ -6,7 +6,8 @@ license = "GPL-3.0-only"
 publish = false
 
 [dependencies]
-tern-core = { workspace = true }
+tern-mail = { workspace = true }
+tern-rules = { workspace = true }
 serde_json = { workspace = true }
 # SQLCipher, linked against the system's libcrypto: the cache holds decrypted mail.
 rusqlite = { version = "=0.40.2", features = ["bundled-sqlcipher"] }

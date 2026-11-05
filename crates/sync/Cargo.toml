@@ -1,0 +1,19 @@
+[package]
+name = "tern-sync"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+# Keeping the mail cache up to date from a server, the same on every platform.
+[dependencies]
+tern-mail = { workspace = true }
+tern-rules = { workspace = true }
+tern-cache = { workspace = true }
+log = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros"] }
+
+[dev-dependencies]
+tern-demo = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+async-trait = "0.1.77"

@@ -1,0 +1,15 @@
+[package]
+name = "tern-mail"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+# What mail is, for every other crate: its types, and what a server must do.
+[dependencies]
+async-trait = "0.1.77"
+thiserror = "2.0"
+serde = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

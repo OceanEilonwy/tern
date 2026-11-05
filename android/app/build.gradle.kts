@@ -1,5 +1,5 @@
 // Tern for Android: a thin Compose wrapper. All of the app's behaviour is the Rust in
-// ../crates/mobile, built here for each ABI, with its Kotlin bindings written from the library.
+// ../crates/app (loaded as ../crates/ffi), built here for each ABI, with its Kotlin bindings written from the library.
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -114,8 +114,8 @@ val uniffiBindings = tasks.register<Exec>("uniffiBindings") {
     doFirst { bindingsDir.get().asFile.deleteRecursively() }
     commandLine(
         "cargo", "run", "--release", "--locked", "-p", "tern-ffi", "--bin", "uniffi-bindgen", "--",
-        "generate", "--library", "--crate", "tern_mobile", "target/${abis.first().second}/mobile/libtern_ffi.so",
-        "--config", "crates/mobile/uniffi.toml", "--language", "kotlin", "--no-format", "--out-dir", bindingsDir.get().asFile.path,
+        "generate", "--library", "--crate", "tern_app", "target/${abis.first().second}/mobile/libtern_ffi.so",
+        "--config", "crates/app/uniffi.toml", "--language", "kotlin", "--no-format", "--out-dir", bindingsDir.get().asFile.path,
     )
 }
 

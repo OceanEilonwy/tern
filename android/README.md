@@ -1,8 +1,7 @@
 # Tern for Android
 
-Tern on Android 17 and newer. All of the app's behaviour is Rust: `crates/mobile` holds the state,
-the navigation and what every action does, on top of the same `tern-core`, `tern-cache`, `tern-tuta`
-and `tern-engine` crates as the desktop app. This folder is a thin Jetpack Compose wrapper: it draws
+Tern on Android 17 and newer. All of the app's behaviour is Rust: `crates/app` holds the state,
+the navigation and what every action does, and `crates/ffi` is the library this app loads. This folder is a thin Jetpack Compose wrapper: it draws
 the views the engine publishes and sends back what the person did.
 
 Kotlin only does what the platform must:
@@ -31,7 +30,7 @@ real app as `xyz.hollingworth.Tern.profile`. A plain release build stays unsigne
 A version tag runs `.github/workflows/release.yml`, as in Fob: one APK for each ABI, about half the size,
 and a universal one holding both, with `SHA256SUMS`, on the Releases page beside the Linux downloads. All
 share one versionCode, so any installs over any other. The tag must name the version in
-`crates/mobile/Cargo.toml`, and needs these repository secrets:
+`crates/ffi/Cargo.toml`, and needs these repository secrets:
 
 ```sh
 keytool -genkeypair -v -keystore tern.jks -alias tern -keyalg RSA -keysize 4096 -validity 10000
@@ -50,7 +49,7 @@ Kotlin shows it. Sender and subject stay off the lock screen until it is unlocke
 ## Test
 
 ```sh
-cargo test -p tern-mobile                # the whole app against the demo account, on the host
+cargo test -p tern-app                   # the whole app against the demo account, on the host
 ANDROID_SERIAL=emulator-5580 ./gradlew :app:connectedDebugAndroidTest   # the Keystore, on a device
 python3 tools/drive.py tour              # taps through every screen on emulator-5580, with screenshots
 ```

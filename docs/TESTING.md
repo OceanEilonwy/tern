@@ -2,7 +2,7 @@
 
 ```sh
 make test         # unit tests, plus the window checks on a headless display (kwin_wayland or broadway)
-cargo test -p tern-mobile  # the whole Android app against the demo account, on the host (make test runs this too)
+cargo test -p tern-app  # the whole app, as Android drives it, against the demo account, on the host (make test runs this too)
 cargo test -p tuta-sdk --features net --lib
 TERN_TEST_EMAIL=you@tuta.com TERN_TEST_PASSWORD=… cargo test -p tern-tuta -- --ignored   # live round trip
 cargo test -p tern semantic -- --ignored    # downloads the search model and finds mail by meaning

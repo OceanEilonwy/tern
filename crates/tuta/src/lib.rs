@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use tern_core::{
+use tern_mail::{
 	Account, Address, Attachment, Backend, Draft, Error, Folder, FolderId, FolderKind, Label, Mail, MailId, MailPage, MailSummary, ReplyKind, Result,
 };
 use tutasdk::bindings::file_client::{FileClient, FileClientError};
@@ -737,8 +737,8 @@ mod tests {
 			.send(Draft {
 				to: vec![Address::new("", backend.account().address)],
 				subject: subject.clone(),
-				body_html: tern_core::text_to_html("Sent by Tern's live test."),
-				attachments: vec![tern_core::NewAttachment { name: "test.pdf".into(), mime: "application/pdf".into(), data: data.clone() }],
+				body_html: "<div>Sent by Tern's live test.</div>".to_string(),
+				attachments: vec![tern_mail::NewAttachment { name: "test.pdf".into(), mime: "application/pdf".into(), data: data.clone() }],
 				..Default::default()
 			})
 			.await
@@ -755,13 +755,13 @@ mod tests {
 		// A draft with an attachment, saved again keeping it and adding a second, then sent.
 		let drafts = folders.iter().find(|f| f.kind == FolderKind::Drafts).unwrap();
 		let subject = format!("Tern draft self-test {stamp}");
-		let pdf = |name: &str| tern_core::NewAttachment { name: name.into(), mime: "application/pdf".into(), data: data.clone() };
+		let pdf = |name: &str| tern_mail::NewAttachment { name: name.into(), mime: "application/pdf".into(), data: data.clone() };
 		let me = vec![Address::new("", backend.account().address)];
 		let first = backend
 			.save_draft(Draft {
 				to: me.clone(),
 				subject: subject.clone(),
-				body_html: tern_core::text_to_html("First version."),
+				body_html: "<div>First version.</div>".to_string(),
 				attachments: vec![pdf("one.pdf")],
 				..Default::default()
 			})
@@ -775,7 +775,7 @@ mod tests {
 			.save_draft(Draft {
 				to: me.clone(),
 				subject: subject.clone(),
-				body_html: tern_core::text_to_html("Second version."),
+				body_html: "<div>Second version.</div>".to_string(),
 				attachments: vec![pdf("two.pdf")],
 				existing: Some(first.clone()),
 				kept: saved.attachments.clone(),
@@ -795,7 +795,7 @@ mod tests {
 			.send(Draft {
 				to: me.clone(),
 				subject: subject.clone(),
-				body_html: tern_core::text_to_html("Final version."),
+				body_html: "<div>Final version.</div>".to_string(),
 				existing: Some(second),
 				kept,
 				..Default::default()
