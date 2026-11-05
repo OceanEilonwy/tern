@@ -29,7 +29,7 @@ jobs:
       # Tern compiles against Android 17 (API 37.2).
       - name: Install Android SDK platform and NDK
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.2" "ndk;30.0.14904198" > /dev/null
-      # The app builds its engine (crates/mobile) from Rust for each ABI.
+      # The app builds its core (crates/app, loaded as crates/ffi) from Rust for each ABI.
       - name: Rust for Android
         run: |
           rustup toolchain install stable --profile minimal

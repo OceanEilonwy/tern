@@ -1,18 +1,22 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/core",
+    "crates/mail",
+    "crates/rules",
+    "crates/html",
+    "crates/compose",
+    "crates/demo",
     "crates/tuta",
     "crates/cache",
-    "crates/engine",
-    "crates/mobile",
-    "crates/ffi",
+    "crates/sync",
     "crates/app",
+    "crates/ffi",
+    "crates/desktop",
     "vendor/tuta-sdk/sdk",
     "vendor/tuta-sdk/crypto-primitives",
     "vendor/tuta-sdk/util",
 ]
-default-members = ["crates/app"]
+default-members = ["crates/desktop"]
 
 [workspace.package]
 version = "365.261029.1"
@@ -27,10 +31,15 @@ publish = false
 tuta-sdk = { path = "vendor/tuta-sdk/sdk", default-features = false }
 crypto-primitives = { path = "vendor/tuta-sdk/crypto-primitives", default-features = false }
 util = { path = "vendor/tuta-sdk/util", default-features = false }
-tern-core = { path = "crates/core" }
+tern-mail = { path = "crates/mail" }
+tern-rules = { path = "crates/rules" }
+tern-html = { path = "crates/html" }
+tern-compose = { path = "crates/compose" }
+tern-demo = { path = "crates/demo" }
 tern-tuta = { path = "crates/tuta" }
 tern-cache = { path = "crates/cache" }
-tern-engine = { path = "crates/engine" }
+tern-sync = { path = "crates/sync" }
+tern-app = { path = "crates/app" }
 base64 = { version = "0.22.1" }
 log = { version = "0.4.22" }
 serde = { version = "1.0.210", features = ["derive", "rc"] }

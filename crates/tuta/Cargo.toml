@@ -6,7 +6,7 @@ license = "GPL-3.0-only"
 publish = false
 
 [dependencies]
-tern-core = { workspace = true }
+tern-mail = { workspace = true }
 tuta-sdk = { workspace = true, features = ["net"] }
 crypto-primitives = { workspace = true }
 async-trait = "0.1.77"

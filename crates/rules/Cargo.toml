@@ -1,0 +1,12 @@
+[package]
+name = "tern-rules"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+# Mail rules: the language they are written in, their file format, and what they do to some mail. No files or servers.
+[dependencies]
+tern-mail = { workspace = true }
+serde = { workspace = true }
+toml = "=1.1.8"

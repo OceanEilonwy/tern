@@ -10,16 +10,14 @@
 pub mod embed;
 pub mod search;
 mod storage;
-pub mod policy;
-pub mod sync;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
-use tern_core::rules::Expr;
-use tern_core::{thread_key, Address, Folder, FolderId, FolderKind, Mail, MailId, MailSummary};
+use tern_rules::Expr;
+use tern_mail::{thread_key, Address, Folder, FolderId, FolderKind, Mail, MailId, MailSummary};
 
 use search::{Found, Query};
 
@@ -171,7 +169,7 @@ fn kind_from(text: &str) -> FolderKind {
 	}
 }
 
-fn now_ms() -> i64 {
+pub fn now_ms() -> i64 {
 	std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
@@ -837,6 +835,34 @@ fn note(conn: &Connection, a: &Address, met: Met) -> Result<()> {
 	Ok(())
 }
 
+/// Mails whose meaning is worked out at a time.
+pub const VECTOR_BATCH: usize = 100;
+
+/// Works out the meaning of every stored mail that lacks it with `model`, stored under `name`.
+/// Returns how many. Runs on the CPU for about a millisecond per hundred mails; call it off the UI thread.
+pub fn vectors(cache: &Cache, model: &embed::Model, name: &str) -> Result<usize> {
+	let mut done = 0;
+	loop {
+		let batch: Vec<(i64, String, Vec<f32>)> = cache
+			.unembedded(name, VECTOR_BATCH)?
+			.into_iter()
+			.map(|(id, text)| {
+				let vector = model.embed(&text);
+				(id, text, vector)
+			})
+			.collect();
+		let stored = cache.put_vectors(name, &batch)?;
+		done += stored;
+		// Mails that changed meanwhile wait for the next round rather than going round here.
+		if batch.len() < VECTOR_BATCH || stored == 0 {
+			return Ok(done);
+		}
+	}
+}
+
+/// Mails per request when paging through a folder.
+pub const PAGE: usize = 50;
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -871,7 +897,7 @@ mod tests {
 		let (cache, inbox, sent) = setup();
 		cache.merge_page(&inbox, &[summary(3, "50% off", 300), summary(2, "Lunch", 200), summary(1, "Last chance: 50% off", 100)], true, true).unwrap();
 		cache.merge_page(&sent, &[summary(4, "Re: 50% off", 400)], true, true).unwrap();
-		let rule = tern_core::rules::parse("subject:\"50% off\"").unwrap();
+		let rule = tern_rules::parse("subject:\"50% off\"").unwrap();
 		let (found, total) = cache.matching(&rule, &[FolderKind::Sent], 1).unwrap();
 		assert_eq!(total, 2, "the sent one is skipped");
 		assert_eq!(found.iter().map(|(m, f)| (m.id.element.as_str(), f)).collect::<Vec<_>>(), [("e3", &inbox)], "newest first, up to the limit");
@@ -923,7 +949,7 @@ mod tests {
 		cache.merge_page(&inbox, &[summary(4, "Re: 50% off", 400), summary(3, "Lunch", 300), summary(1, "50% off", 100)], true, true).unwrap();
 		cache.merge_page(&sent, &[summary(2, "Re: 50% off", 200)], true, true).unwrap();
 		cache.merge_page(&trash, &[summary(5, "Old 50% off", 500)], true, true).unwrap();
-		let rule = tern_core::rules::parse("subject:\"50% off\" or lunch").unwrap();
+		let rule = tern_rules::parse("subject:\"50% off\" or lunch").unwrap();
 		let hits = cache.rule_hits(&rule, 10).unwrap();
 		assert_eq!(hits.iter().map(|h| (h.row.latest.id.element.as_str(), h.row.count, h.folder.0.as_str())).collect::<Vec<_>>(), [("e4", 3, "in"), ("e3", 1, "in")], "one row per conversation; Trash left out");
 		assert_eq!(cache.rule_hits(&rule, 1).unwrap().len(), 1);
@@ -1164,8 +1190,8 @@ mod tests {
 		cache.merge_page(&inbox, &[pay.clone(), pizza.clone()], true, true).unwrap();
 		cache.merge_page(&trash, std::slice::from_ref(&dinner), true, true).unwrap();
 		let model = crate::embed::tests::tiny();
-		assert_eq!(sync::vectors(&cache, &model, "tiny").unwrap(), 3);
-		assert_eq!(sync::vectors(&cache, &model, "tiny").unwrap(), 0, "worked out once");
+		assert_eq!(crate::vectors(&cache, &model, "tiny").unwrap(), 3);
+		assert_eq!(crate::vectors(&cache, &model, "tiny").unwrap(), 0, "worked out once");
 		let search = |q: &str| -> Vec<String> {
 			let q = Query::parse(q);
 			let v = model.embed(&q.text());
@@ -1191,7 +1217,7 @@ mod tests {
 		let model = crate::embed::tests::tiny();
 		let stale = cache.unembedded("tiny", 10).unwrap();
 		assert_eq!(stale, [(1, "Plans\n".to_string())]);
-		sync::vectors(&cache, &model, "tiny").unwrap();
+		crate::vectors(&cache, &model, "tiny").unwrap();
 		assert!(cache.unembedded("tiny", 10).unwrap().is_empty());
 		// Its body arrives: worked out again, from the body too.
 		cache.put_mail(&opened(&s, "pizza")).unwrap();
@@ -1200,7 +1226,7 @@ mod tests {
 		let (id, text) = stale[0].clone();
 		assert_eq!(cache.put_vectors("tiny", &[(id, text, model.embed("Plans"))]).unwrap(), 0);
 		// Opening it again with the same body keeps the vector.
-		sync::vectors(&cache, &model, "tiny").unwrap();
+		crate::vectors(&cache, &model, "tiny").unwrap();
 		cache.put_mail(&opened(&s, "pizza")).unwrap();
 		assert!(cache.unembedded("tiny", 10).unwrap().is_empty());
 		cache.clear_vectors().unwrap();
@@ -1242,7 +1268,7 @@ mod tests {
 		// The search words and the meaning of an opened mail stay encrypted too.
 		cache.put_mail(&opened(&s, "<p>The zanzibarite lunch plan</p>")).unwrap();
 		let model = crate::embed::tests::tiny();
-		assert_eq!(sync::vectors(&cache, &model, "tiny").unwrap(), 1);
+		assert_eq!(crate::vectors(&cache, &model, "tiny").unwrap(), 1);
 		let vector = crate::embed::to_blob(&model.embed("secret subject\nThe zanzibarite lunch plan"));
 		drop(cache);
 		// No file holds readable text, the write-ahead log included.

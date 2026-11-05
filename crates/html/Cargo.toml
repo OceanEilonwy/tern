@@ -1,0 +1,12 @@
+[package]
+name = "tern-html"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+# Mail's HTML read into a safe document a toolkit can draw. Knows nothing else of Tern.
+[dependencies]
+scraper = { version = "0.29", default-features = false }
+ego-tree = "0.11"
+base64 = { workspace = true }

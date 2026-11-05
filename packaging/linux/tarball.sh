@@ -4,7 +4,7 @@
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
-version=${1:-$(sed -n 's/^version = "\(.*\)"/\1/p' crates/app/Cargo.toml | head -1)}
+version=${1:-$(sed -n 's/^version = "\(.*\)"/\1/p' crates/desktop/Cargo.toml | head -1)}
 arch=$(uname -m)
 name=tern-$version-$arch-linux
 stage=dist/$name
