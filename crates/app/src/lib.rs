@@ -26,7 +26,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use app::{App, Msg};
 use semantic::Meaning;
 use tern_cache::Cache;
-use tern_mail::{Backend, FolderKind};
+use tern_mail::Backend;
 use tern_sync::fetcher::Fetcher;
 use paths::Paths;
 pub use view::*;
@@ -100,7 +100,7 @@ pub struct Engine {
 	settings: Arc<std::sync::Mutex<settings::Settings>>,
 }
 
-/// The parts of a session a platform's screens use directly, until they draw from views instead.
+/// The parts of a session, for tests that look behind the views.
 #[derive(Clone)]
 pub struct SessionParts {
 	pub backend: Arc<dyn Backend>,
@@ -108,7 +108,7 @@ pub struct SessionParts {
 	pub fetcher: Fetcher,
 }
 
-/// What a platform still working on the session's parts directly needs to hear. Comes from any thread.
+/// For tests that look behind the views. Comes from any thread.
 pub trait Host: Send + Sync {
 	/// The session changed: a new account, its backend swapped once connected, or `None` at sign-out.
 	fn session(&self, parts: Option<SessionParts>);
@@ -199,7 +199,7 @@ fn step(app: &mut App, msg: Msg) {
 		},
 		Msg::Background(reply) => app.background_check(reply),
 		Msg::SyncNow => app.sync_now(),
-		Msg::SyncKinds(kinds) => app.sync_kinds(&kinds),
+		Msg::Compose(fields) => app.compose(*fields),
 		Msg::Stop => {},
 	}));
 }
@@ -239,9 +239,9 @@ impl Engine {
 		let _ = self.tx.send(Msg::SyncNow);
 	}
 
-	/// Mail in folders of these kinds changed behind the core's back, so it brings them up to date.
-	pub fn sync_kinds(&self, kinds: &[FolderKind]) {
-		let _ = self.tx.send(Msg::SyncKinds(kinds.to_vec()));
+	/// Opens a composer with these fields, once there is an account: for a mail link from outside.
+	pub fn compose(&self, fields: tern_compose::Fields) {
+		let _ = self.tx.send(Msg::Compose(Box::new(fields)));
 	}
 }
 

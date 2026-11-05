@@ -593,9 +593,14 @@ Built to the "Cache cleanup" boards on the design canvas.
 
 - **`tern-app` is the one core.** It holds the state, navigation and what each action does, and publishes
   views. Platforms draw them. Android does this entirely. The desktop runs the engine in its own process,
-  and everything but the composer goes through it. The composer still holds its own behaviour and reaches the
-  session's parts through the Rust-only `Host` trait, which goes once it has moved; it needs the core to hold
-  several at once.
+  and every screen goes through it. All the desktop keeps is drawing and what only it can do: windows, keyboard
+  handling, pane widths, file dialogs and the keyring. The Rust-only `Host` trait remains so that the desktop's
+  scenes can look behind the views; nothing the app does depends on what it hands over.
+- **Several composers.** The core holds any number and says which one actions are for with `ComposeFocus`. A
+  phone only ever has one, and goes on hearing about just that one in `Update::Composer`; the desktop draws a
+  window for each in `Update::Composers`.
+- **Attachments stop at 25 MB.** The desktop used to warn past that and try anyway, which Tuta may refuse. It now
+  says so and does not add the file, as on Android.
 - **Beside the list, the next conversation follows.** `follow_neighbour` has the core open a conversation's
   neighbour when it leaves the list, where the two are on screen together; on a phone it goes back to the list.
   A lone draft opens as a conversation on the desktop too, and in a composer on a phone.
@@ -613,7 +618,7 @@ Built to the "Cache cleanup" boards on the design canvas.
 - **Paths are handed down**, not read from the environment wherever needed. Android used to rewrite its own
   `HOME` and `XDG_*` to steer the crates beneath it. Only `SSL_CERT_DIR` remains, set once before anything
   reads it, as the TLS library has no other way in. The desktop's `paths()` and `meaning()` are process-wide
-  because its environment never changes; they go once its remaining screens have moved.
+  because its environment never changes.
 - **One log**, through the `log` crate. Tern's warnings only by default, so that the SDK cannot put anything
   about mail in the system's log on Android; `TERN_LOG` asks for more. The SDK used to install its own Android
   logger and panic if one was there, so it is patched not to. Only a real sign-in on a device goes that way:

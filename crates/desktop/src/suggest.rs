@@ -1,162 +1,125 @@
-//! Address suggestions under the To, Cc and Bcc fields, from contacts and mail sent and received.
+//! Address suggestions under the To, Cc and Bcc fields, as the core finds them.
 //!
-//! The word being typed (after the last comma) is looked up as it changes. Up and Down move through
-//! the suggestions, Tab or Enter takes one, Escape closes them.
+//! The field's text goes to the core as it changes. Up and Down move through the suggestions, Tab or
+//! Enter takes one, Escape closes them.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gdk, glib};
-use tern_mail::Address;
+use tern_app::view::SuggestionView;
 
-use tern_compose::format_address;
-use crate::window::Ctx;
+type TakeHook = Box<dyn Fn(u32)>;
 
-const SHOWN: usize = 6;
-
-struct Suggest {
-	entry: gtk::Entry,
+pub struct Suggest {
 	popover: gtk::Popover,
 	list: gtk::ListBox,
-	found: std::cell::RefCell<Vec<Address>>,
-	/// Set while the entry's text is changed from here, so that change looks nothing up.
-	filling: Cell<bool>,
-}
-
-pub fn attach(entry: &gtk::Entry, ctx: &Ctx) {
-	let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Single).css_classes(["navigation-sidebar"]).build();
-	let popover = gtk::Popover::builder().autohide(false).has_arrow(false).position(gtk::PositionType::Bottom).halign(gtk::Align::Start).child(&list).build();
-	popover.set_parent(entry);
-	let this = Rc::new(Suggest { entry: entry.clone(), popover: popover.clone(), list: list.clone(), found: Default::default(), filling: Cell::new(false) });
-
-	let (weak, ctx) = (Rc::downgrade(&this), ctx.clone());
-	entry.connect_changed(move |_| {
-		if let Some(this) = weak.upgrade() {
-			if !this.filling.get() {
-				this.lookup(&ctx);
-			}
-		}
-	});
-	let weak = Rc::downgrade(&this);
-	list.connect_row_activated(move |_, row| {
-		if let Some(this) = weak.upgrade() {
-			this.take(row.index() as usize);
-		}
-	});
-	let keys = gtk::EventControllerKey::new();
-	keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-	let weak = Rc::downgrade(&this);
-	keys.connect_key_pressed(move |_, key, _, _| {
-		let Some(this) = weak.upgrade() else { return glib::Propagation::Proceed };
-		if !this.popover.is_visible() {
-			return glib::Propagation::Proceed;
-		}
-		let n = this.found.borrow().len() as i32;
-		let at = this.list.selected_row().map_or(0, |r| r.index());
-		match key {
-			gdk::Key::Down => this.select((at + 1).min(n - 1)),
-			gdk::Key::Up => this.select((at - 1).max(0)),
-			gdk::Key::Tab | gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter => this.take(at as usize),
-			gdk::Key::Escape => this.close(),
-			_ => return glib::Propagation::Proceed,
-		}
-		glib::Propagation::Stop
-	});
-	entry.add_controller(keys);
-	let focus = gtk::EventControllerFocus::new();
-	let weak = Rc::downgrade(&this);
-	focus.connect_leave(move |_| {
-		if let Some(this) = weak.upgrade() {
-			this.close();
-		}
-	});
-	entry.add_controller(focus);
-	// The popover is the entry's child; it must go before the entry does. Holding `this` here also
-	// keeps the suggestions alive as long as the entry.
-	let keep = std::cell::RefCell::new(Some(this));
-	entry.connect_destroy(move |_| {
-		if let Some(this) = keep.borrow_mut().take() {
-			this.popover.unparent();
-		}
-	});
-}
-
-fn popover_of(entry: &gtk::Entry) -> Option<gtk::Popover> {
-	let mut child = entry.first_child();
-	while let Some(w) = child {
-		if let Ok(p) = w.clone().downcast::<gtk::Popover>() {
-			return Some(p);
-		}
-		child = w.next_sibling();
-	}
-	None
-}
-
-/// How many suggestions are open under `entry`.
-pub fn open_count(entry: &gtk::Entry) -> usize {
-	let Some(p) = popover_of(entry).filter(|p| p.is_visible()) else { return 0 };
-	let mut n = 0;
-	let mut row = p.child().and_downcast::<gtk::ListBox>().and_then(|l| l.first_child());
-	while let Some(r) = row {
-		n += 1;
-		row = r.next_sibling();
-	}
-	n
-}
-
-/// Closes the suggestions under `entry`, if open. Returns whether they were.
-pub fn dismiss(entry: &gtk::Entry) -> bool {
-	match popover_of(entry).filter(|p| p.is_visible()) {
-		Some(p) => {
-			p.popdown();
-			true
-		},
-		None => false,
-	}
-}
-
-/// The word being typed: what follows the last comma or semicolon.
-fn current_word(text: &str) -> (usize, &str) {
-	let start = text.rfind([',', ';']).map_or(0, |i| i + 1);
-	(start, text[start..].trim_start())
+	shown: RefCell<Vec<SuggestionView>>,
+	entry: gtk::Entry,
+	/// Taking suggestion `i`.
+	on_take: RefCell<Option<TakeHook>>,
+	/// Closed by the person, so the same suggestions do not come back until new ones do.
+	dismissed: Cell<bool>,
 }
 
 impl Suggest {
-	fn lookup(&self, ctx: &Ctx) {
-		let text = self.entry.text();
-		let (start, word) = current_word(&text);
-		let Some(cache) = ctx.cache() else { return };
-		if word.chars().count() < 1 {
-			return self.close();
-		}
-		let earlier = text[..start].to_lowercase();
-		let found: Vec<Address> = cache
-			.suggest(word, SHOWN + 4)
-			.unwrap_or_default()
-			.into_iter()
-			// Already in the field.
-			.filter(|a| !earlier.contains(&a.address.to_lowercase()))
-			.take(SHOWN)
-			.collect();
+	pub fn new(entry: &gtk::Entry) -> Rc<Suggest> {
+		let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Single).css_classes(["navigation-sidebar"]).build();
+		let popover = gtk::Popover::builder().autohide(false).has_arrow(false).position(gtk::PositionType::Bottom).halign(gtk::Align::Start).child(&list).build();
+		popover.set_parent(entry);
+		let this = Rc::new(Suggest { popover, list, shown: RefCell::default(), entry: entry.clone(), on_take: RefCell::default(), dismissed: Cell::new(false) });
+
+		let weak = Rc::downgrade(&this);
+		this.list.connect_row_activated(move |_, row| {
+			if let Some(this) = weak.upgrade() {
+				this.take(row.index());
+			}
+		});
+		let keys = gtk::EventControllerKey::new();
+		keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+		let weak = Rc::downgrade(&this);
+		keys.connect_key_pressed(move |_, key, _, _| {
+			let Some(this) = weak.upgrade() else { return glib::Propagation::Proceed };
+			if !this.popover.is_visible() {
+				return glib::Propagation::Proceed;
+			}
+			let n = this.shown.borrow().len() as i32;
+			let at = this.list.selected_row().map_or(0, |r| r.index());
+			match key {
+				gdk::Key::Down => this.select((at + 1).min(n - 1)),
+				gdk::Key::Up => this.select((at - 1).max(0)),
+				gdk::Key::Tab | gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter => this.take(at),
+				gdk::Key::Escape => {
+					this.dismiss();
+				},
+				_ => return glib::Propagation::Proceed,
+			}
+			glib::Propagation::Stop
+		});
+		entry.add_controller(keys);
+		let focus = gtk::EventControllerFocus::new();
+		let weak = Rc::downgrade(&this);
+		focus.connect_leave(move |_| {
+			if let Some(this) = weak.upgrade() {
+				this.dismiss();
+			}
+		});
+		entry.add_controller(focus);
+		// The popover is the entry's child; it must go before the entry does.
+		let popover = this.popover.clone();
+		entry.connect_destroy(move |_| popover.unparent());
+		this
+	}
+
+	pub fn connect_take(&self, f: impl Fn(u32) + 'static) {
+		*self.on_take.borrow_mut() = Some(Box::new(f));
+	}
+
+	/// Draws what the core has found for this field; none closes them.
+	pub fn show(&self, found: &[SuggestionView]) {
 		if found.is_empty() {
-			return self.close();
+			self.shown.borrow_mut().clear();
+			self.popover.popdown();
+			return;
 		}
-		while let Some(row) = self.list.first_child() {
-			self.list.remove(&row);
+		if *self.shown.borrow() != found {
+			self.dismissed.set(false);
+			while let Some(row) = self.list.first_child() {
+				self.list.remove(&row);
+			}
+			for a in found {
+				let name = gtk::Label::builder().xalign(0.0).label(if a.name.is_empty() { &a.address } else { &a.name }).css_classes(["heading"]).build();
+				let address = gtk::Label::builder().xalign(0.0).label(&a.address).css_classes(["caption", "dim-label"]).visible(!a.name.is_empty()).build();
+				let column = gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_top(3).margin_bottom(3).build();
+				column.append(&name);
+				column.append(&address);
+				self.list.append(&column);
+			}
+			*self.shown.borrow_mut() = found.to_vec();
+			self.select(0);
 		}
-		for a in &found {
-			let name = gtk::Label::builder().xalign(0.0).label(if a.name.is_empty() { &a.address } else { &a.name }).css_classes(["heading"]).build();
-			let address = gtk::Label::builder().xalign(0.0).label(&a.address).css_classes(["caption", "dim-label"]).visible(!a.name.is_empty()).build();
-			let column = gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_top(3).margin_bottom(3).build();
-			column.append(&name);
-			column.append(&address);
-			self.list.append(&column);
+		if !self.dismissed.get() && self.entry.focus_child().is_some() {
+			self.popover.set_size_request(self.entry.width().max(240), -1);
+			self.popover.popup();
 		}
-		*self.found.borrow_mut() = found;
-		self.select(0);
-		self.popover.set_size_request(self.entry.width().max(240), -1);
-		self.popover.popup();
+	}
+
+	/// How many suggestions are open.
+	pub fn open_count(&self) -> usize {
+		if self.popover.is_visible() {
+			self.shown.borrow().len()
+		} else {
+			0
+		}
+	}
+
+	/// Closes the suggestions, if open. Returns whether they were.
+	pub fn dismiss(&self) -> bool {
+		let open = self.popover.is_visible();
+		self.dismissed.set(true);
+		self.popover.popdown();
+		open
 	}
 
 	fn select(&self, i: i32) {
@@ -165,33 +128,10 @@ impl Suggest {
 		}
 	}
 
-	/// Puts suggestion `i` in place of the word being typed.
-	fn take(&self, i: usize) {
-		let Some(a) = self.found.borrow().get(i).cloned() else { return };
-		let text = self.entry.text().to_string();
-		let (start, _) = current_word(&text);
-		let before = text[..start].trim_end();
-		let joined = if before.is_empty() { format!("{}, ", format_address(&a)) } else { format!("{before} {}, ", format_address(&a)) };
-		self.filling.set(true);
-		self.entry.set_text(&joined);
-		self.entry.set_position(-1);
-		self.filling.set(false);
-		self.close();
-	}
-
-	fn close(&self) {
+	fn take(&self, i: i32) {
 		self.popover.popdown();
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn the_word_being_typed_follows_the_last_separator() {
-		assert_eq!(current_word("mi"), (0, "mi"));
-		assert_eq!(current_word("Ann <ann@x.org>, sa"), (16, "sa"));
-		assert_eq!(current_word("a@x.org; "), (8, ""));
+		if let Some(f) = self.on_take.borrow().as_ref() {
+			f(i as u32);
+		}
 	}
 }

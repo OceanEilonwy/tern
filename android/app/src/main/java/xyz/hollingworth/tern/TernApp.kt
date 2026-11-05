@@ -81,6 +81,8 @@ private object Listener : EngineListener {
             is Update.List -> Store.list.value = update.view
             is Update.Conversation -> Store.conversation.value = update.view
             is Update.Composer -> Store.composer.value = update.view
+            // One at a time here, so the one above says all of it.
+            is Update.Composers -> {}
             is Update.Search -> Store.search.value = update.view
             is Update.Settings -> Store.settings.value = update.view
             is Update.Rules -> Store.rules.value = update.view

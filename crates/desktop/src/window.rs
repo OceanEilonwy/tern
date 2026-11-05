@@ -1,18 +1,18 @@
 //! The main window: the sign-in page or the mailbox, and the app-wide actions.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use tern_app::view::{Action, ChoiceView, ConnectionKind, Effect, RuleEditorView, RulesView, Screen, SettingsView, SheetView, ShellView, SnackView, Update};
+use tern_app::view::{Action, ChoiceView, ConnectionKind, ComposerView, Effect, RuleEditorView, RulesView, Screen, SettingsView, SheetView, ShellView, SnackView, Update};
 use tern_app::{Engine, EngineListener, Host, Options, SecretStore, SessionParts};
 use tern_cache::Cache;
 use tern_compose::Fields;
 use tern_demo::DemoBackend;
-use tern_mail::{Backend, Error, FolderKind};
-use tern_sync::fetcher::Fetcher;
+use tern_mail::Backend;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::activity::{Activity, Busy, Word};
@@ -22,6 +22,8 @@ use crate::layout::Layout;
 use crate::{attachments, cleanup, default_app, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot, spam};
 
 type OfferHook = Box<dyn Fn(Option<&str>)>;
+/// The composer last asked to throw its mail away, and the dialog asking.
+type Discarding = (Option<(u64, adw::Window)>, Option<adw::AlertDialog>);
 type SettingsHook = Box<dyn Fn(&SettingsView)>;
 type RulesHook = Box<dyn Fn(&RulesView)>;
 type RuleEditorHook = Box<dyn Fn(Option<&RuleEditorView>)>;
@@ -33,7 +35,6 @@ pub struct Ctx {
 	pub toasts: adw::ToastOverlay,
 	backend: Rc<RefCell<Option<Arc<dyn Backend>>>>,
 	cache: Rc<RefCell<Option<Arc<Cache>>>>,
-	fetcher: Rc<RefCell<Option<Fetcher>>>,
 	pub engine: Arc<Engine>,
 	/// Preferences, when open: what Clean Up opens over, and where it says it is done.
 	preferences: Rc<RefCell<Option<glib::WeakRef<adw::PreferencesDialog>>>>,
@@ -51,6 +52,10 @@ pub struct Ctx {
 	layout: Rc<Cell<Layout>>,
 	/// Move to Spam, while open.
 	pub picker: Rc<RefCell<Option<Rc<spam::Picker>>>>,
+	/// The composers on screen, by the core's id.
+	pub composers: Rc<RefCell<BTreeMap<u64, Rc<Composer>>>>,
+	/// The composer last asked to throw its mail away, and the dialog asking, once it is up.
+	discarding: Rc<RefCell<Discarding>>,
 	offer: Rc<RefCell<Option<OfferHook>>>,
 	/// What Tern is doing now, in a word.
 	pub activity: Activity,
@@ -63,11 +68,6 @@ impl Ctx {
 
 	pub fn cache(&self) -> Option<Arc<Cache>> {
 		self.cache.borrow().clone()
-	}
-
-	/// Fetches mail bodies for the account signed in now.
-	pub fn fetcher(&self) -> Option<Fetcher> {
-		self.fetcher.borrow().clone()
 	}
 
 	pub fn settings_view(&self) -> Option<SettingsView> {
@@ -130,6 +130,7 @@ impl Ctx {
 				picker.show(spam::Offer { revision, line, problem, rows, count, keep_rule, confirm, choices });
 				*self.picker.borrow_mut() = Some(picker);
 			},
+			Some(SheetView::Discard) => self.ask_discard(),
 			Some(SheetView::Cleanup { total, choices }) => {
 				let (dialog, all) = cleanup::dialog(self, &total, &choices);
 				match self.open_preferences() {
@@ -144,6 +145,9 @@ impl Ctx {
 				}
 				if let Some(picker) = self.picker.borrow_mut().take() {
 					picker.dialog.force_close();
+				}
+				if let Some(dialog) = self.discarding.borrow_mut().1.take() {
+					dialog.force_close();
 				}
 			},
 		}
@@ -174,19 +178,48 @@ impl Ctx {
 		self.toasts.add_toast(toast);
 	}
 
-	pub fn error(&self, err: &Error) {
-		self.toast(&err.to_string());
+	/// For the scenes: draws the composers the core has, opening and closing windows to match.
+	fn show_composers(&self, views: Vec<ComposerView>) {
+		let gone: Vec<Rc<Composer>> = self.composers.borrow().values().filter(|c| !views.iter().any(|v| v.id == c.id)).cloned().collect();
+		for composer in gone {
+			self.composers.borrow_mut().remove(&composer.id);
+			composer.finish();
+		}
+		for view in &views {
+			let known = self.composers.borrow().get(&view.id).cloned();
+			match known {
+				Some(composer) => composer.show(view),
+				None => {
+					let composer = Composer::open(self, view);
+					self.composers.borrow_mut().insert(view.id, composer);
+				},
+			}
+		}
 	}
 
-	/// Called by a composer once its mail is sent.
-	pub fn sent(&self, subject: &str) {
-		self.toast(&tern_app::format::sent_toast(subject));
-		self.changed(&[FolderKind::Sent, FolderKind::Drafts]);
+	/// The composer whose mail may be about to be thrown away, if the core asks.
+	pub fn ask_discard_from(&self, id: u64, window: &adw::Window) {
+		self.discarding.borrow_mut().0 = Some((id, window.clone()));
 	}
 
-	/// Mail in folders of these kinds changed on the server, as after saving a draft.
-	pub fn changed(&self, kinds: &[FolderKind]) {
-		self.engine.sync_kinds(kinds);
+	/// Asks before throwing a composer's mail away, and its saved draft with it.
+	fn ask_discard(&self) {
+		let Some((id, window)) = self.discarding.borrow().0.clone() else { return };
+		if self.discarding.borrow().1.is_some() {
+			return;
+		}
+		let dialog = adw::AlertDialog::new(Some("Discard Message?"), Some("The message and its draft will be deleted."));
+		dialog.add_responses(&[("cancel", "_Cancel"), ("discard", "_Discard")]);
+		dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+		dialog.set_default_response(Some("cancel"));
+		dialog.set_close_response("cancel");
+		let engine = self.engine.clone();
+		dialog.connect_response(None, move |_, response| {
+			engine.send(Action::ComposeFocus { id });
+			engine.send(if response == "discard" { Action::ComposeDiscardConfirmed } else { Action::CloseSheet });
+		});
+		dialog.present(Some(&window));
+		self.discarding.borrow_mut().1 = Some(dialog);
 	}
 
 	/// Offers, in the sidebar, to clean up the size Tern takes on disk; None takes the offer back.
@@ -208,7 +241,6 @@ pub struct Window {
 	pub login: Login,
 	pub mailbox: Rc<Mailbox>,
 	/// Mail asked for before there was an account to send it from, to write once signed in.
-	waiting: RefCell<Vec<Fields>>,
 	/// What the core is doing, for the activity word.
 	working: RefCell<Option<(Word, Busy)>>,
 	/// The sign-in page has just come up, and takes the focus once it knows what to show.
@@ -238,9 +270,10 @@ impl Window {
 			rule_editor_view: Rc::default(),
 			backend: Rc::default(),
 			cache: Rc::default(),
-			fetcher: Rc::default(),
 			layout: Rc::new(Cell::new(layout)),
 			picker: Rc::default(),
+			composers: Rc::default(),
+			discarding: Rc::default(),
 			offer: Rc::default(),
 			activity: Activity::default(),
 		};
@@ -262,7 +295,7 @@ impl Window {
 			window.add_breakpoint(bp);
 		}
 
-		let this = Rc::new(Window { ctx, stack, login, mailbox, waiting: RefCell::default(), working: RefCell::default(), focus_login: Cell::new(false) });
+		let this = Rc::new(Window { ctx, stack, login, mailbox, working: RefCell::default(), focus_login: Cell::new(false) });
 		// The GTK window owns this struct until it is destroyed; callbacks and actions hold only weak references.
 		let owner = RefCell::new(Some(this.clone()));
 		window.connect_destroy(move |_| drop(owner.take()));
@@ -323,12 +356,8 @@ impl Window {
 	/// Writes a mail with these fields: now if an account is open, else as soon as one is, with the
 	/// window up for signing in.
 	pub fn compose(&self, fields: Fields) {
-		if self.ctx.cache().is_some() {
-			Composer::open(&self.ctx, fields, None);
-		} else {
-			self.waiting.borrow_mut().push(fields);
-			self.ctx.window.present();
-		}
+		self.ctx.engine.compose(fields);
+		self.ctx.window.present();
 	}
 
 	/// Takes what the core says, on the GTK thread.
@@ -344,6 +373,7 @@ impl Window {
 				},
 				Update::Settings { view } => self.ctx.show_settings(view),
 				Update::Sheet { view } => self.ctx.show_sheet(view),
+				Update::Composers { views } => self.ctx.show_composers(views),
 				Update::List { view } => self.mailbox.show_list(view),
 				Update::Search { view } => self.mailbox.show_search(view),
 				Update::Conversation { view } => self.mailbox.reader.show(view.as_ref()),
@@ -407,20 +437,15 @@ impl Window {
 		let Some(parts) = parts else {
 			*self.ctx.backend.borrow_mut() = None;
 			*self.ctx.cache.borrow_mut() = None;
-			*self.ctx.fetcher.borrow_mut() = None;
 			self.mailbox.clear();
 			return;
 		};
 		// The same account again once it has connected, with the same cache and a real backend.
 		let opening = self.ctx.cache.borrow().is_none();
 		*self.ctx.backend.borrow_mut() = Some(parts.backend);
-		*self.ctx.fetcher.borrow_mut() = Some(parts.fetcher);
 		*self.ctx.cache.borrow_mut() = Some(parts.cache);
 		if opening {
 			self.mailbox.start();
-			for fields in self.waiting.take() {
-				Composer::open(&self.ctx, fields, None);
-			}
 			log::debug!("mailbox shown");
 		}
 	}

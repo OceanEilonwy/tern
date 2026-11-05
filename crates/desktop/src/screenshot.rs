@@ -12,7 +12,8 @@ use std::sync::Arc;
 use adw::prelude::*;
 use gtk::{glib, graphene};
 use tern_demo::DemoBackend;
-use tern_mail::{Backend, NewAttachment};
+use tern_app::view::AnswerKind;
+use tern_mail::Backend;
 
 use crate::activity::Word;
 use tern_compose::Fields;
@@ -48,6 +49,40 @@ async fn wait_for(ready: impl Fn() -> bool) {
 		sleep(50).await;
 	}
 	eprintln!("tern: screenshot scene did not get ready");
+}
+
+/// The newest composer's id, so a new one can be told from it.
+fn newest(win: &Rc<Window>) -> u64 {
+	win.ctx.composers.borrow().keys().next_back().copied().unwrap_or(0)
+}
+
+/// The composer opened since `since`, once it is up.
+async fn opened_since(win: &Rc<Window>, since: u64) -> Option<Rc<Composer>> {
+	wait_for(|| newest(win) > since).await;
+	(newest(win) > since).then(|| win.ctx.composers.borrow().values().next_back().cloned()).flatten()
+}
+
+async fn composing(win: &Rc<Window>, fields: Fields) -> Option<Rc<Composer>> {
+	let since = newest(win);
+	win.ctx.engine.compose(fields);
+	opened_since(win, since).await
+}
+
+async fn answered(win: &Rc<Window>, mailbox: &Rc<crate::mailbox::Mailbox>, kind: AnswerKind) -> Option<Rc<Composer>> {
+	let since = newest(win);
+	mailbox.reader.answer(kind);
+	opened_since(win, since).await
+}
+
+async fn edited(win: &Rc<Window>, mailbox: &Rc<crate::mailbox::Mailbox>) -> Option<Rc<Composer>> {
+	let since = newest(win);
+	mailbox.reader.edit_current_draft();
+	opened_since(win, since).await
+}
+
+/// What a composer carries of the earlier mail.
+fn quote_of(v: &tern_app::view::ComposerView) -> (Option<String>, Option<String>, Option<String>, Option<String>, bool, bool) {
+	(v.picked_who.clone(), v.picked_text.clone(), v.whole_label.clone(), v.whole_text.clone(), v.whole_included, v.whole_forward)
 }
 
 /// Signs in from the sign-in page holding only a weak reference, as the app does, so the scene fails
@@ -173,9 +208,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		"draft" => {
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			let fields = Fields { to: "mia@tuta.com".into(), subject: "Trip plan".into(), body: "Day one: the coast.".into(), ..Default::default() };
-			let composer = Composer::open(&win.ctx, fields, None);
-			let attachment = NewAttachment { name: "map.pdf".into(), mime: "application/pdf".into(), data: b"%PDF map".to_vec() };
-			composer.attach(vec![attachment]);
+			let composer = composing(win, fields).await.expect("a composer");
+			composer.attach("map.pdf", "application/pdf", b"%PDF map");
 			composer.window.close();
 			drop(composer);
 			mailbox.select_folder(tern_mail::FolderKind::Drafts);
@@ -184,7 +218,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if !mailbox.reader.mails().iter().any(|m| m.draft) {
 				return Err(format!("the saved draft did not show as a draft: {:?}", mailbox.reader.mails().iter().map(|m| (&m.subject, m.draft)).collect::<Vec<_>>()));
 			}
-			let again = mailbox.reader.edit_current_draft().await.ok_or("the draft did not open for editing")?;
+			let again = edited(win, &mailbox).await.ok_or("the draft did not open for editing")?;
 			if again.subject_and_to() != ("Trip plan".to_string(), "mia@tuta.com".to_string()) {
 				return Err(format!("the draft reopened as {:?}", again.subject_and_to()));
 			}
@@ -220,9 +254,9 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if !mailbox.reader.select_in_current("12:30 at the usual place?") {
 				return Err("the reply's text is not in the open mail".into());
 			}
-			let reply = mailbox.reader.answer(tern_compose::Answer::Reply).await.ok_or("no reply")?;
-			let quote = reply.quote();
-			if quote.picked != Some(("Sam Okafor".into(), "12:30 at the usual place?".into())) || quote.whole.as_ref().is_none_or(|w| w.included || w.forward) {
+			let reply = answered(win, &mailbox, AnswerKind::Reply).await.ok_or("no reply")?;
+			let quote = reply.view().ok_or("no reply")?;
+			if quote.picked_who.as_deref() != Some("Sam Okafor wrote:") || quote.picked_text.as_deref() != Some("12:30 at the usual place?") || quote.whole_label.is_none() || quote.whole_included || quote.whole_forward {
 				return Err(format!("the reply quotes {quote:?}"));
 			}
 			reply.send();
@@ -232,8 +266,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("a reply with a pick sent {html}"));
 			}
 			// Nothing picked, the pick left out, the whole mail added.
-			let reply = mailbox.reader.answer(tern_compose::Answer::Reply).await.ok_or("no reply")?;
-			if reply.quote().picked.is_some() {
+			let reply = answered(win, &mailbox, AnswerKind::Reply).await.ok_or("no reply")?;
+			if reply.view().is_some_and(|v| v.picked_text.is_some()) {
 				reply.drop_picked();
 			}
 			reply.include_whole(true);
@@ -244,9 +278,9 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("a reply with the whole mail sent {html}"));
 			}
 			// A forward carries the mail; × leaves it out.
-			let forward = mailbox.reader.answer(tern_compose::Answer::Forward).await.ok_or("no forward")?;
-			if !forward.quote().whole.is_some_and(|w| w.included && w.forward) {
-				return Err(format!("the forward carries {:?}", forward.quote()));
+			let forward = answered(win, &mailbox, AnswerKind::Forward).await.ok_or("no forward")?;
+			if !forward.view().is_some_and(|v| v.whole_label.is_some() && v.whole_included && v.whole_forward) {
+				return Err(format!("the forward carries {:?}", forward.view()));
 			}
 			forward.type_to("mia@tuta.com");
 			forward.send();
@@ -254,7 +288,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if !newest_sent().await?.contains("---------- Forwarded message ----------") {
 				return Err("the forward went without the mail".into());
 			}
-			let forward = mailbox.reader.answer(tern_compose::Answer::Forward).await.ok_or("no forward")?;
+			let forward = answered(win, &mailbox, AnswerKind::Forward).await.ok_or("no forward")?;
 			forward.include_whole(false);
 			forward.type_to("mia@tuta.com");
 			forward.send();
@@ -268,8 +302,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			wait_for(|| mailbox.reader.opened().is_some()).await;
 			sleep(300).await;
 			mailbox.reader.select_in_current("12:30 at the usual place?");
-			let reply = mailbox.reader.answer(tern_compose::Answer::Reply).await.ok_or("no reply")?;
-			let written = reply.quote();
+			let reply = answered(win, &mailbox, AnswerKind::Reply).await.ok_or("no reply")?;
+			let written = reply.view().map(|v| quote_of(&v));
 			reply.type_body("Yes, see you then.");
 			reply.window.close();
 			wait_for(|| !reply.window.is_visible()).await;
@@ -277,17 +311,18 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			mailbox.select_folder(FolderKind::Drafts);
 			wait_for(|| mailbox.select_by_subject("Re: Lunch")).await;
 			wait_for(|| mailbox.reader.opened().is_some_and(|o| o.draft)).await;
-			let again = mailbox.reader.edit_current_draft().await.ok_or("the draft did not open")?;
-			if again.body_text() != "Yes, see you then." || again.quote() != written {
-				return Err(format!("the draft reopened as {:?} quoting {:?}, written {written:?}", again.body_text(), again.quote()));
+			let again = edited(win, &mailbox).await.ok_or("the draft did not open")?;
+			if again.body_text() != "Yes, see you then." || again.view().map(|v| quote_of(&v)) != written {
+				return Err(format!("the draft reopened as {:?} quoting {:?}, written {written:?}", again.body_text(), again.view().map(|v| quote_of(&v))));
 			}
 			again.window.set_visible(false);
 			drop(again);
 			let id = mailbox.reader.current().map(|o| tern_mail::MailId { list: o.id.list, element: o.id.element }).ok_or("no draft")?;
 			win.ctx.cache().ok_or("no cache")?.set_draft_quote(&id, None).map_err(|e| e.to_string())?;
-			let again = mailbox.reader.edit_current_draft().await.ok_or("the draft did not open")?;
-			if again.quote().picked != written.picked || again.quote().whole.is_some() {
-				return Err(format!("read back from the draft: {:?}", again.quote()));
+			let again = edited(win, &mailbox).await.ok_or("the draft did not open")?;
+			let back = again.view().map(|v| quote_of(&v)).ok_or("no draft")?;
+			if Some(&back.1) != written.as_ref().map(|w| &w.1) || back.2.is_some() {
+				return Err(format!("read back from the draft: {back:?}"));
 			}
 			again.window.set_visible(false);
 			Ok(())
@@ -298,7 +333,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			mailbox.select_by_subject("five small things");
 			wait_for(|| mailbox.reader.opened().is_some()).await;
-			let reply = mailbox.reader.answer(tern_compose::Answer::Reply).await.ok_or("no reply")?;
+			let reply = answered(win, &mailbox, AnswerKind::Reply).await.ok_or("no reply")?;
 			let picked = reply.from.selected_item().and_downcast::<gtk::StringObject>().map(|s| s.string().to_string());
 			if !reply.from.is_visible() || picked.as_deref() != Some("news@you.example") {
 				return Err(format!("the reply is from {picked:?}"));
@@ -306,7 +341,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			reply.send();
 			wait_for(|| !reply.window.is_visible()).await;
 			drop(reply);
-			let fresh = Composer::open(&win.ctx, Fields { to: "mia@tuta.com".into(), subject: "From the main address".into(), ..Default::default() }, None);
+			let fresh = composing(win, Fields { to: "mia@tuta.com".into(), subject: "From the main address".into(), ..Default::default() }).await.expect("a composer");
 			if fresh.from.selected() != 0 {
 				return Err("a new mail is not from the main address".into());
 			}
@@ -373,10 +408,11 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		"suggest" => {
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			sleep(500).await;
-			let composer = Composer::open(&win.ctx, Fields::default(), None);
+			let composer = composing(win, Fields::default()).await.expect("a composer");
 			sleep(200).await;
-			let shown = composer.type_to("Pri");
-			if shown == 0 {
+			composer.type_to("Pri");
+			wait_for(|| composer.suggested() > 0).await;
+			if composer.suggested() == 0 {
 				return Err("no suggestions for \"Pri\"".into());
 			}
 			Ok(())
@@ -449,7 +485,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("while opening, the word is {:?}", win.ctx.activity.word()));
 			}
 			let fields = Fields { to: "mia@tuta.com".into(), subject: "Route".into(), body: "Here.".into(), ..Default::default() };
-			let composer = Composer::open(&win.ctx, fields, None);
+			let composer = composing(win, fields).await.expect("a composer");
 			composer.send();
 			sleep(300).await;
 			match win.ctx.activity.word() {
@@ -835,8 +871,8 @@ pub fn drive(win: Rc<Window>) {
 			wait_for(|| mailbox.reader.opened().is_some()).await;
 		}
 		let answer = match scene.as_str() {
-			"reply" => Some(tern_compose::Answer::ReplyAll),
-			"forward" => Some(tern_compose::Answer::Forward),
+			"reply" => Some(AnswerKind::ReplyAll),
+			"forward" => Some(AnswerKind::Forward),
 			_ => None,
 		};
 		if scene == "reply" {
@@ -845,7 +881,7 @@ pub fn drive(win: Rc<Window>) {
 			mailbox.reader.select_in_current("12:30 at the usual place?");
 		}
 		let answered = match answer {
-			Some(a) => mailbox.reader.answer(a).await,
+			Some(a) => answered(&win, &mailbox, a).await,
 			None => None,
 		};
 		let target: gtk::Widget = if let Some(composer) = answered {
@@ -853,8 +889,8 @@ pub fn drive(win: Rc<Window>) {
 		} else if scene == "sent" {
 			// The whole send path: compose with an attachment, send, find it in Sent.
 			let fields = Fields { to: "mia@tuta.com".into(), subject: "Route for Sunday".into(), body: "Here is the route.\n\nSee you there!".into(), ..Default::default() };
-			let composer = Composer::open(&win.ctx, fields, None);
-			composer.attach(vec![NewAttachment { name: "walk-route.pdf".into(), mime: "application/pdf".into(), data: b"%PDF-1.4 route".to_vec() }]);
+			let composer = composing(&win, fields).await.expect("a composer");
+			composer.attach("walk-route.pdf", "application/pdf", b"%PDF-1.4 route");
 			composer.send();
 			let w = composer.window.clone();
 			wait_for(|| !w.is_visible()).await;
@@ -898,11 +934,9 @@ pub fn drive(win: Rc<Window>) {
 				body: "Hi Mia,\n\nThanks for the photos! Here are mine from the afternoon, and the map of the walk.\n\nSee you soon,\nYou".into(),
 				..Default::default()
 			};
-			let composer = Composer::open(&win.ctx, fields, None);
-			composer.attach(vec![
-				NewAttachment { name: "harbour.png".into(), mime: "image/png".into(), data: vec![0; 2_340_000] },
-				NewAttachment { name: "walk-route.pdf".into(), mime: "application/pdf".into(), data: vec![0; 184_000] },
-			]);
+			let composer = composing(&win, fields).await.expect("a composer");
+			composer.attach("harbour.png", "image/png", &vec![0; 2_340_000]);
+			composer.attach("walk-route.pdf", "application/pdf", &vec![0; 184_000]);
 			composer.window.clone().upcast()
 		} else {
 			win.ctx.window.clone().upcast()

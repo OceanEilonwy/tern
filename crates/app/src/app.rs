@@ -65,7 +65,7 @@ pub enum Msg {
 	Background(std::sync::mpsc::Sender<BackgroundResult>),
 	/// The platform wants the sync's next round now.
 	SyncNow,
-	SyncKinds(Vec<FolderKind>),
+	Compose(Box<Fields>),
 	/// The engine has been dropped.
 	Stop,
 }
@@ -397,6 +397,7 @@ struct Published {
 	list: Option<ListView>,
 	conversation: Option<Option<ConversationView>>,
 	composer: Option<Option<ComposerView>>,
+	composers: Option<Vec<ComposerView>>,
 	search: Option<SearchView>,
 	settings: Option<SettingsView>,
 	rules: Option<RulesView>,
@@ -429,7 +430,9 @@ pub struct App {
 	selection: BTreeSet<String>,
 	conv: Option<Conv>,
 	/// The composer on screen, or being saved; a failed save brings it back.
-	comp: Option<Comp>,
+	comps: Vec<Comp>,
+	/// The composer actions are for.
+	focus: Option<u64>,
 	next_comp: u64,
 	/// Links opened before an account was there to answer them from.
 	waiting: Vec<Fields>,
@@ -651,7 +654,8 @@ impl App {
 			list_generation: 0,
 			selection: BTreeSet::new(),
 			conv: None,
-			comp: None,
+			comps: Vec::new(),
+			focus: None,
 			next_comp: 1,
 			waiting: Vec::new(),
 			search: None,
@@ -1045,7 +1049,8 @@ impl App {
 		self.failed = None;
 		self.selection.clear();
 		self.conv = None;
-		self.comp = None;
+		self.comps.clear();
+		self.focus = None;
 		self.search = None;
 		self.rule_ed = None;
 		self.sheet = None;
@@ -1928,11 +1933,27 @@ impl App {
 		let revision = self.next_revision();
 		let show_cc = !fields.cc.is_empty() || !fields.bcc.is_empty();
 		let saved = snapshot(&fields);
-		self.comp = Some(Comp { id, fields, saved, addresses, revision, show_cc, pending: Vec::new(), sending: false, saving: false, error: None, bad: (false, false, false), suggest: None });
+		self.focus = Some(id);
+		self.comps.push(Comp { id, fields, saved, addresses, revision, show_cc, pending: Vec::new(), sending: false, saving: false, error: None, bad: (false, false, false), suggest: None });
 		self.push(Screen::Composer);
 	}
 
-	fn compose_answer(&mut self, mail: MailId, kind: AnswerKind) {
+	/// Opens a composer with these fields, now or once there is an account.
+	pub fn compose(&mut self, fields: Fields) {
+		self.open_composer(fields);
+	}
+
+	fn remove_composer(&mut self, id: u64) {
+		self.comps.retain(|c| c.id != id);
+		if self.focus == Some(id) {
+			self.focus = self.comps.last().map(|c| c.id);
+		}
+		if self.comps.is_empty() {
+			self.remove_screen(Screen::Composer);
+		}
+	}
+
+	fn compose_answer(&mut self, mail: MailId, kind: AnswerKind, chosen: Option<String>) {
 		let Some(session) = self.session.as_ref() else { return };
 		let me = session.backend.account();
 		let Some(card) = self.conv.as_ref().and_then(|c| c.cards.iter().find(|c| c.summary.id == mail)) else { return };
@@ -1945,11 +1966,11 @@ impl App {
 		let date = format::long_date(opened.mail.summary.received_ms);
 		// Blocks picked in the mail are what a reply answers.
 		let picked = opened.blocks.iter().filter(|b| b.picked).map(block_text).collect::<Vec<_>>().join("\n");
-		let picked = (!picked.trim().is_empty()).then_some(picked);
+		let picked = chosen.or((!picked.trim().is_empty()).then_some(picked));
 		let fields = tern_compose::answer_fields(&opened.mail, &opened.plain, &date, answer, &me, picked.as_deref());
 		let forwarded = if kind == AnswerKind::Forward { opened.mail.attachments.clone() } else { Vec::new() };
 		self.open_composer(fields);
-		let comp_id = self.comp.as_ref().map(|c| c.id);
+		let comp_id = self.focus;
 		for att in forwarded {
 			self.forward_attachment(comp_id, mail.clone(), att);
 		}
@@ -1958,7 +1979,7 @@ impl App {
 	fn forward_attachment(&mut self, comp_id: Option<u64>, mail: MailId, att: Attachment) {
 		let Some(session) = self.session.as_ref() else { return };
 		let backend = session.backend.clone();
-		if let Some(comp) = self.comp.as_mut() {
+		if let Some(comp) = self.comps.iter_mut().find(|c| Some(c.id) == comp_id) {
 			comp.pending.push(att.name.clone());
 		}
 		self.start_work(Word::Attaching);
@@ -1966,7 +1987,7 @@ impl App {
 			let result = backend.attachment(&mail, &att).await;
 			move |app: &mut App| {
 				app.end_work(Word::Attaching);
-				let Some(comp) = app.comp.as_mut().filter(|c| Some(c.id) == comp_id) else { return };
+				let Some(comp) = app.comps.iter_mut().find(|c| Some(c.id) == comp_id) else { return };
 				if let Some(at) = comp.pending.iter().position(|n| n == &att.name) {
 					comp.pending.remove(at);
 				}
@@ -2012,7 +2033,7 @@ impl App {
 	}
 
 	fn compose_send(&mut self, text: ComposeText) {
-		let Some(comp) = self.comp.as_mut() else { return };
+		let Some(comp) = self.comps.iter_mut().find(|c| Some(c.id) == self.focus) else { return };
 		if comp.sending || !comp.pending.is_empty() {
 			if !comp.pending.is_empty() {
 				comp.error = Some("Attachments are still downloading".into());
@@ -2045,22 +2066,18 @@ impl App {
 			let result = backend.send(draft).await;
 			move |app: &mut App| {
 				app.end_work(Word::Sending);
-				let on_show = app.comp.as_ref().is_some_and(|c| c.id == id);
 				match result {
 					Ok(()) => {
 						if let Some(old) = existing {
 							let _ = cache.remove(&old);
 						}
-						if on_show {
-							app.comp = None;
-							app.remove_screen(Screen::Composer);
-						}
+						app.remove_composer(id);
 						app.note_fine();
 						app.say(format::sent_toast(&subject));
 						app.sync_kinds(&[FolderKind::Sent, FolderKind::Drafts]);
 					},
 					Err(e) => {
-						if let Some(comp) = app.comp.as_mut().filter(|c| c.id == id) {
+						if let Some(comp) = app.comps.iter_mut().find(|c| c.id == id) {
 							comp.sending = false;
 							comp.error = Some(e.to_string());
 						}
@@ -2074,15 +2091,15 @@ impl App {
 	/// Closing keeps the message: unless nothing changed it goes to Drafts behind the screen. If
 	/// saving fails the composer comes back with the reason.
 	fn compose_close(&mut self, text: ComposeText) {
-		let Some(comp) = self.comp.as_mut() else { return };
+		let Some(comp) = self.comps.iter_mut().find(|c| Some(c.id) == self.focus) else { return };
 		if comp.sending {
 			return;
 		}
 		Self::take_text(comp, text);
 		let unchanged = snapshot(&comp.fields) == comp.saved;
 		if (comp.fields.is_empty() && comp.fields.existing.is_none()) || unchanged {
-			self.comp = None;
-			return self.remove_screen(Screen::Composer);
+			let id = comp.id;
+			return self.remove_composer(id);
 		}
 		if !comp.pending.is_empty() {
 			comp.error = Some("Attachments are still downloading".into());
@@ -2111,16 +2128,14 @@ impl App {
 				app.end_work(Word::Drafting);
 				match result {
 					Ok(_) => {
-						if app.comp.as_ref().is_some_and(|c| c.id == id) {
-							app.comp = None;
-						}
+						app.remove_composer(id);
 						app.note_fine();
 						app.say("Saved to Drafts");
 						app.sync_kinds(&[FolderKind::Drafts]);
 					},
 					Err(e) => {
 						app.note_error(&e);
-						if let Some(comp) = app.comp.as_mut().filter(|c| c.id == id) {
+						if let Some(comp) = app.comps.iter_mut().find(|c| c.id == id) {
 							comp.saving = false;
 							comp.error = Some(format!("Could not save the draft: {e}"));
 							comp.revision += 1;
@@ -2133,19 +2148,21 @@ impl App {
 	}
 
 	fn compose_discard(&mut self, text: ComposeText) {
-		let Some(comp) = self.comp.as_mut() else { return };
+		let Some(comp) = self.comps.iter_mut().find(|c| Some(c.id) == self.focus) else { return };
 		Self::take_text(comp, text);
 		if comp.fields.is_empty() && comp.fields.existing.is_none() {
-			self.comp = None;
-			return self.remove_screen(Screen::Composer);
+			let id = comp.id;
+			return self.remove_composer(id);
 		}
 		self.sheet = Some(Sheet::Discard);
 	}
 
 	fn compose_discard_confirmed(&mut self) {
 		self.sheet = None;
-		let Some(comp) = self.comp.take() else { return };
-		self.remove_screen(Screen::Composer);
+		let Some(id) = self.focus else { return };
+		let Some(at) = self.comps.iter().position(|c| c.id == id) else { return };
+		let comp = self.comps.remove(at);
+		self.remove_composer(id);
 		if let (Some(id), Some(session)) = (comp.fields.existing, self.session.as_ref()) {
 			let (backend, cache) = (session.backend.clone(), session.cache.clone());
 			let _ = cache.remove(&id);
@@ -2165,7 +2182,7 @@ impl App {
 	}
 
 	fn compose_attach(&mut self, name: String, mime: String, data: Vec<u8>) {
-		let Some(comp) = self.comp.as_mut() else { return };
+		let Some(comp) = self.comps.iter_mut().find(|c| Some(c.id) == self.focus) else { return };
 		if comp.fields.total_size() + data.len() as u64 > MAX_TOTAL_BYTES {
 			comp.error = Some("Attachments can be 25 MB in all".into());
 			return;
@@ -2180,16 +2197,17 @@ impl App {
 		let cache = session.cache.clone();
 		let (start, word) = current_word(&text);
 		if word.is_empty() {
-			if let Some(comp) = self.comp.as_mut() {
+			if let Some(comp) = self.comps.iter_mut().find(|c| Some(c.id) == self.focus) {
 				comp.suggest = None;
 			}
 			return;
 		}
 		let (earlier, word) = (text[..start].to_lowercase(), word.to_string());
+		let id = self.focus;
 		self.task(async move {
 			let found: Vec<Address> = cache.suggest(&word, 8).unwrap_or_default().into_iter().filter(|a| !earlier.contains(&a.address.to_lowercase())).take(4).collect();
 			move |app: &mut App| {
-				if let Some(comp) = app.comp.as_mut() {
+				if let Some(comp) = app.comps.iter_mut().find(|c| Some(c.id) == id) {
 					comp.suggest = (!found.is_empty()).then_some((field, found));
 				}
 			}
@@ -2198,7 +2216,7 @@ impl App {
 
 	fn compose_take(&mut self, text: ComposeText, field: AddressField, index: u32) {
 		let revision = self.next_revision();
-		let Some(comp) = self.comp.as_mut() else { return };
+		let Some(comp) = self.comps.iter_mut().find(|c| Some(c.id) == self.focus) else { return };
 		Self::take_text(comp, text);
 		let Some(address) = comp.suggest.as_ref().and_then(|(_, found)| found.get(index as usize)).cloned() else { return };
 		let slot = match field {
@@ -2555,7 +2573,13 @@ impl App {
 			Action::OpenAttachment { mail, attachment } => self.attachment(mail, attachment, false),
 			Action::SaveAttachment { mail, attachment } => self.attachment(mail, attachment, true),
 			Action::OpenLink { url } => self.open_link(url),
-			Action::Answer { mail, kind } => self.compose_answer(mail_id(&mail), kind),
+			Action::Answer { mail, kind } => self.compose_answer(mail_id(&mail), kind, None),
+			Action::AnswerPicked { mail, kind, picked } => self.compose_answer(mail_id(&mail), kind, picked),
+			Action::ComposeFocus { id } => {
+				if self.comps.iter().any(|c| c.id == id) {
+					self.focus = Some(id);
+				}
+			},
 			Action::EditDraft { mail } => self.edit_draft(mail_id(&mail)),
 			Action::DiscardDraft { mail } => self.move_away(vec![mail_id(&mail)], FolderKind::Trash, "Draft discarded".to_string()),
 			Action::ComposeNew => self.open_composer(Fields::default()),
@@ -2565,12 +2589,12 @@ impl App {
 			Action::ComposeDiscardConfirmed => self.compose_discard_confirmed(),
 			Action::ComposeAttach { name, mime, data } => self.compose_attach(name, mime, data),
 			Action::ComposeAttachFailed { name } => {
-				if let Some(comp) = self.comp.as_mut() {
+				if let Some(comp) = self.comps.iter_mut().find(|c| Some(c.id) == self.focus) {
 					comp.error = Some(format!("Could not read {name}"));
 				}
 			},
 			Action::ComposeRemoveAttachment { index } => {
-				if let Some(comp) = self.comp.as_mut() {
+				if let Some(comp) = self.comps.iter_mut().find(|c| Some(c.id) == self.focus) {
 					let i = index as usize;
 					let kept = comp.fields.kept.len();
 					if i < kept {
@@ -2581,24 +2605,24 @@ impl App {
 				}
 			},
 			Action::ComposeDropPicked => {
-				if let Some(comp) = self.comp.as_mut() {
+				if let Some(comp) = self.comps.iter_mut().find(|c| Some(c.id) == self.focus) {
 					comp.fields.quote.picked = None;
 				}
 			},
 			Action::ComposeIncludeWhole { included } => {
-				if let Some(whole) = self.comp.as_mut().and_then(|c| c.fields.quote.whole.as_mut()) {
+				if let Some(whole) = self.comps.iter_mut().find(|c| Some(c.id) == self.focus).and_then(|c| c.fields.quote.whole.as_mut()) {
 					whole.included = included;
 				}
 			},
 			Action::ComposeShowCc => {
-				if let Some(comp) = self.comp.as_mut() {
+				if let Some(comp) = self.comps.iter_mut().find(|c| Some(c.id) == self.focus) {
 					comp.show_cc = true;
 				}
 			},
 			Action::ComposeSuggest { field, text } => self.compose_suggest(field, text),
 			Action::ComposeTakeSuggestion { text, field, index } => self.compose_take(text, field, index),
 			Action::ComposeEdited => {
-				if let Some(comp) = self.comp.as_mut() {
+				if let Some(comp) = self.comps.iter_mut().find(|c| Some(c.id) == self.focus) {
 					comp.error = None;
 					comp.bad = (false, false, false);
 				}
@@ -2778,7 +2802,11 @@ impl App {
 			Some(Screen::Conversation) => self.conv = None,
 			Some(Screen::Search) => self.search = None,
 			Some(Screen::RuleEditor) => self.rule_ed = None,
-			Some(Screen::Composer) => self.comp = None,
+			Some(Screen::Composer) => {
+				if let Some(id) = self.focus {
+					self.remove_composer(id);
+				}
+			},
 			_ => {},
 		}
 	}
@@ -3034,17 +3062,18 @@ impl App {
 	}
 
 	fn composer_view(&self) -> Option<ComposerView> {
-		let comp = self.comp.as_ref()?;
-		if comp.saving {
-			return None;
-		}
+		self.comps.iter().find(|c| Some(c.id) == self.focus).filter(|c| !c.saving).map(Self::view_of_composer)
+	}
+
+	fn view_of_composer(comp: &Comp) -> ComposerView {
 		let f = &comp.fields;
 		let subject = f.subject.trim();
-		let kept = f.kept.iter().map(|a| ComposerAttachment { name: a.name.clone(), size: format::size(a.size), pending: false });
-		let new = f.attachments.iter().map(|a| ComposerAttachment { name: a.name.clone(), size: format::size(a.data.len() as u64), pending: false });
-		let pending = comp.pending.iter().map(|name| ComposerAttachment { name: name.clone(), size: String::new(), pending: true });
+		let kept = f.kept.iter().map(|a| ComposerAttachment { name: a.name.clone(), size: format::size(a.size), mime: a.mime.clone(), pending: false });
+		let new = f.attachments.iter().map(|a| ComposerAttachment { name: a.name.clone(), size: format::size(a.data.len() as u64), mime: a.mime.clone(), pending: false });
+		let pending = comp.pending.iter().map(|name| ComposerAttachment { name: name.clone(), size: String::new(), mime: String::new(), pending: true });
 		let attachments: Vec<ComposerAttachment> = kept.chain(new).chain(pending).collect();
-		Some(ComposerView {
+		ComposerView {
+			id: comp.id,
 			revision: comp.revision,
 			title: if subject.is_empty() { "New message".to_string() } else { subject.to_string() },
 			text: ComposeText {
@@ -3062,6 +3091,7 @@ impl App {
 			whole_label: f.quote.whole.as_ref().map(|w| w.label.clone()),
 			whole_text: f.quote.whole.as_ref().map(|w| format!("{}\n{}", w.head, w.text)),
 			whole_included: f.quote.whole.as_ref().is_some_and(|w| w.included),
+			whole_forward: f.quote.whole.as_ref().is_some_and(|w| w.forward),
 			total: (!attachments.is_empty()).then(|| format::size(f.total_size())),
 			attachments,
 			sending: comp.sending,
@@ -3072,7 +3102,7 @@ impl App {
 			bad_bcc: comp.bad.2,
 			suggest_field: comp.suggest.as_ref().map(|(field, _)| *field),
 			suggestions: comp.suggest.as_ref().map(|(_, found)| found.iter().map(|a| SuggestionView { name: a.name.clone(), address: a.address.clone() }).collect()).unwrap_or_default(),
-		})
+		}
 	}
 
 	fn search_view(&self) -> SearchView {
@@ -3259,6 +3289,7 @@ impl App {
 		send!(list, self.list_view(), |view| Update::List { view });
 		send!(conversation, self.conversation_view(), |view| Update::Conversation { view });
 		send!(composer, self.composer_view(), |view| Update::Composer { view });
+		send!(composers, self.comps.iter().map(Self::view_of_composer).collect::<Vec<_>>(), |views| Update::Composers { views });
 		send!(search, self.search_view(), |view| Update::Search { view });
 		send!(settings, self.settings_view(), |view| Update::Settings { view });
 		send!(rules, self.rules_view(), |view| Update::Rules { view });
