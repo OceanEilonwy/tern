@@ -936,6 +936,7 @@ impl Mailbox {
 		self.folder_list.remove_all();
 		self.folders.borrow_mut().clear();
 		*self.current.borrow_mut() = None;
+		*self.ctx.on_screen.lock().unwrap_or_else(|p| p.into_inner()) = None;
 		self.leave_search();
 		self.in_flight.borrow_mut().clear();
 		self.store.remove_all();
@@ -948,11 +949,6 @@ impl Mailbox {
 	/// For the screenshot scenes: whether the sidebar offers to clean up.
 	pub fn cleanup_offered(&self) -> bool {
 		self.broom.button.is_visible()
-	}
-
-	/// The folder on screen, if any.
-	pub fn current_folder(&self) -> Option<FolderId> {
-		self.current.borrow().as_ref().map(|f| f.id.clone())
 	}
 
 	pub fn cache_changed(self: &Rc<Self>, _folder: Option<&FolderId>) {
@@ -1030,6 +1026,7 @@ impl Mailbox {
 	fn open_folder(self: &Rc<Self>, folder: &Folder) {
 		self.leave_search();
 		*self.current.borrow_mut() = Some(folder.clone());
+		*self.ctx.on_screen.lock().unwrap_or_else(|p| p.into_inner()) = Some(folder.id.clone());
 		self.change_title(folder);
 		self.hold.set(true);
 		self.selection.set_selected(gtk::INVALID_LIST_POSITION);

@@ -33,6 +33,10 @@ pub struct Ctx {
 	settings: Rc<Cell<Settings>>,
 	/// Wakes the background sync.
 	wake: Arc<tokio::sync::Notify>,
+	/// The round of the sync under way, which ends when this does.
+	sync: Rc<RefCell<Option<tern_sync::Stops>>>,
+	/// The folder on screen, for the sync, which runs off this thread.
+	pub on_screen: Arc<std::sync::Mutex<Option<tern_mail::FolderId>>>,
 	changed: Rc<RefCell<Option<ChangedHook>>>,
 	show_rule: Rc<RefCell<Option<RuleHook>>>,
 	offer: Rc<RefCell<Option<OfferHook>>>,
@@ -75,6 +79,10 @@ impl Ctx {
 	/// Starts the background sync's next round now.
 	pub fn sync_now(&self) {
 		self.wake.notify_one();
+	}
+
+	pub fn set_sync(&self, round: Option<tern_sync::Stops>) {
+		*self.sync.borrow_mut() = round;
 	}
 
 	pub fn wake(&self) -> Arc<tokio::sync::Notify> {
@@ -154,6 +162,8 @@ impl Window {
 			fetcher: Rc::default(),
 			settings: Rc::new(Cell::new(Settings::load(crate::paths()))),
 			wake: Arc::default(),
+			sync: Rc::default(),
+			on_screen: Arc::default(),
 			changed: Rc::default(),
 			show_rule: Rc::default(),
 			offer: Rc::default(),
@@ -330,6 +340,10 @@ impl Window {
 		if let Some(fetcher) = self.ctx.fetcher.borrow_mut().take() {
 			fetcher.stop();
 		}
+		// The sync lets go of the account now, whether in a round or waiting for the next.
+		self.ctx.set_sync(None);
+		self.ctx.sync_now();
+		self.ctx.activity.set_problem(None);
 		let email = backend.account().address;
 		let forget = self.ctx.settings().forget_on_sign_out;
 		self.mailbox.clear();

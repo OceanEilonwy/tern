@@ -141,8 +141,12 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		"folders-fail" => {
 			wait_for(|| mailbox.status().is_some()).await;
 			match mailbox.status() {
-				Some(title) if title == "Could Not Load Folders" => Ok(()),
-				other => Err(format!("expected the folder error, got {other:?}")),
+				Some(title) if title == "Could Not Load Folders" => {},
+				other => return Err(format!("expected the folder error, got {other:?}")),
+			}
+			match win.ctx.activity.problem() {
+				Some("Offline") => Ok(()),
+				other => Err(format!("expected to be told it is offline, got {other:?}")),
 			}
 		}
 		// A refresh while the first page loads must not leave the list unable to load more.
