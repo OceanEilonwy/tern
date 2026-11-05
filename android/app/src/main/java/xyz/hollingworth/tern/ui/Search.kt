@@ -41,7 +41,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import xyz.hollingworth.tern.Store
-import xyz.hollingworth.tern.core.Action
+import com.tern.engine.Action
 
 private val TERMS: List<Pair<String, Color?>> = listOf("from:" to RuleFrom, "to:" to RuleTo, "subject:" to RuleSubject, "in:" to null, "has:attachment" to null)
 

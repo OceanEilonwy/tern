@@ -35,9 +35,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import xyz.hollingworth.tern.core.ConnectionKind
-import xyz.hollingworth.tern.core.RowView
-import xyz.hollingworth.tern.core.StatusView
+import com.tern.engine.ConnectionKind
+import com.tern.engine.RowView
+import com.tern.engine.StatusView
 
 @Composable
 fun IconAction(icon: ImageVector, description: String, enabled: Boolean = true, tint: Color = MaterialTheme.colorScheme.onSurface, onClick: () -> Unit) {

@@ -99,11 +99,11 @@ val cargoBuild = tasks.register<Exec>("cargoBuild") {
     environment("NDK_HOME", ndk)
     commandLine(
         listOf("cargo", "ndk") + abis.flatMap { listOf("-t", it.first) } +
-            listOf("-P", "36", "-o", jniDir.asFile.path, "build", "--profile", "mobile", "--locked", "--lib", "-p", "tern-mobile"),
+            listOf("-P", "36", "-o", jniDir.asFile.path, "build", "--profile", "mobile", "--locked", "--lib", "-p", "tern-ffi"),
     )
     // The SDK's crates are libraries of their own too; Tern links them in and needs no copies.
     doLast {
-        fileTree(jniDir) { include("**/*.so"); exclude("**/libtern_mobile.so") }.forEach { it.delete() }
+        fileTree(jniDir) { include("**/*.so"); exclude("**/libtern_ffi.so") }.forEach { it.delete() }
     }
 }
 
@@ -113,8 +113,8 @@ val uniffiBindings = tasks.register<Exec>("uniffiBindings") {
     workingDir = repo
     doFirst { bindingsDir.get().asFile.deleteRecursively() }
     commandLine(
-        "cargo", "run", "--release", "--locked", "-p", "tern-mobile", "--bin", "uniffi-bindgen", "--",
-        "generate", "--library", "--crate", "tern_mobile", "target/${abis.first().second}/mobile/libtern_mobile.so",
+        "cargo", "run", "--release", "--locked", "-p", "tern-ffi", "--bin", "uniffi-bindgen", "--",
+        "generate", "--library", "--crate", "tern_mobile", "target/${abis.first().second}/mobile/libtern_ffi.so",
         "--config", "crates/mobile/uniffi.toml", "--language", "kotlin", "--no-format", "--out-dir", bindingsDir.get().asFile.path,
     )
 }

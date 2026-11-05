@@ -172,13 +172,13 @@ fun Glyph(icon: ImageVector, description: String? = null, tint: Color = Material
     Icon(icon, description, modifier.size(size), tint)
 }
 
-val xyz.hollingworth.tern.core.FolderIcon.glyph: ImageVector
+val com.tern.engine.FolderIcon.glyph: ImageVector
     get() = when (this) {
-        xyz.hollingworth.tern.core.FolderIcon.INBOX -> Icons.Inbox
-        xyz.hollingworth.tern.core.FolderIcon.DRAFTS -> Icons.Pen
-        xyz.hollingworth.tern.core.FolderIcon.SENT -> Icons.Send
-        xyz.hollingworth.tern.core.FolderIcon.ARCHIVE -> Icons.Archive
-        xyz.hollingworth.tern.core.FolderIcon.SPAM -> Icons.Spam
-        xyz.hollingworth.tern.core.FolderIcon.TRASH -> Icons.Trash
-        xyz.hollingworth.tern.core.FolderIcon.FOLDER -> Icons.Archive
+        com.tern.engine.FolderIcon.INBOX -> Icons.Inbox
+        com.tern.engine.FolderIcon.DRAFTS -> Icons.Pen
+        com.tern.engine.FolderIcon.SENT -> Icons.Send
+        com.tern.engine.FolderIcon.ARCHIVE -> Icons.Archive
+        com.tern.engine.FolderIcon.SPAM -> Icons.Spam
+        com.tern.engine.FolderIcon.TRASH -> Icons.Trash
+        com.tern.engine.FolderIcon.FOLDER -> Icons.Archive
     }

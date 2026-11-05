@@ -8,7 +8,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
-import xyz.hollingworth.tern.core.SecretException
+import com.tern.engine.SecretException
 
 /** The one piece of logic only the platform can run: secrets through the real Android Keystore. */
 @RunWith(AndroidJUnit4::class)

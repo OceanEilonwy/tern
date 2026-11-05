@@ -6,6 +6,7 @@ members = [
     "crates/cache",
     "crates/engine",
     "crates/mobile",
+    "crates/ffi",
     "crates/app",
     "vendor/tuta-sdk/sdk",
     "vendor/tuta-sdk/crypto-primitives",

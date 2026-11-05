@@ -60,13 +60,13 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import xyz.hollingworth.tern.Store
-import xyz.hollingworth.tern.core.Action
-import xyz.hollingworth.tern.core.LinePart
-import xyz.hollingworth.tern.core.LineSpan
-import xyz.hollingworth.tern.core.PreviewTone
-import xyz.hollingworth.tern.core.RuleDoes
-import xyz.hollingworth.tern.core.RuleEditorView
-import xyz.hollingworth.tern.core.RulePiece
+import com.tern.engine.Action
+import com.tern.engine.LinePart
+import com.tern.engine.LineSpan
+import com.tern.engine.PreviewTone
+import com.tern.engine.RuleDoes
+import com.tern.engine.RuleEditorView
+import com.tern.engine.RulePiece
 
 @Composable
 fun RulesScreen() {

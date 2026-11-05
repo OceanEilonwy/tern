@@ -48,8 +48,8 @@ import androidx.compose.ui.unit.dp
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.delay
 import xyz.hollingworth.tern.Store
-import xyz.hollingworth.tern.core.Action
-import xyz.hollingworth.tern.core.Screen
+import com.tern.engine.Action
+import com.tern.engine.Screen
 
 private const val SLIDE_MS = 320
 private const val FADE_MS = 160

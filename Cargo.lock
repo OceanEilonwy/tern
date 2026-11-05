@@ -3528,6 +3528,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tern-ffi"
+version = "0.1.0"
+dependencies = [
+ "tern-mobile",
+ "uniffi",
+]
+
+[[package]]
 name = "tern-mobile"
 version = "0.1.0"
 dependencies = [
