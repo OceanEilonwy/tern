@@ -144,8 +144,9 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				Some(title) if title == "Could Not Load Folders" => {},
 				other => return Err(format!("expected the folder error, got {other:?}")),
 			}
-			match win.ctx.activity.problem() {
-				Some("Offline") => Ok(()),
+			wait_for(|| win.ctx.activity.problem().is_some()).await;
+			match win.ctx.activity.problem().as_deref() {
+				Some("Offline · saved mail") => Ok(()),
 				other => Err(format!("expected to be told it is offline, got {other:?}")),
 			}
 		}
@@ -328,7 +329,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if mailbox.cleanup_offered() {
 				return Err("the demo's small cache is offered for cleanup".into());
 			}
-			win.ctx.offer_cleanup(Some(1_300_000_000));
+			win.ctx.offer_cleanup(Some("1.3 GB"));
 			if !mailbox.cleanup_offered() {
 				return Err("no broom past the limit".into());
 			}
@@ -354,7 +355,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if cache.count(&inbox.id).map_err(|e| e.to_string())? == 0 {
 				return Err("the Inbox did not fetch again".into());
 			}
-			win.ctx.offer_cleanup(Some(1_300_000_000));
+			win.ctx.offer_cleanup(Some("1.3 GB"));
 			let (dialog, _) = crate::cleanup::dialog(&win.ctx, crate::cleanup::Usage { total: 1_300_000_000, older: 940_000_000, vectors: 210_000_000, model: 30_000_000 }, |_| {});
 			dialog.present(Some(&win.ctx.window));
 			Ok(())

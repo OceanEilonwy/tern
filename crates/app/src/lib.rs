@@ -24,8 +24,17 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 use app::{App, Msg};
+use semantic::Meaning;
+use tern_cache::Cache;
+use tern_mail::{Backend, Error, FolderId};
+use tern_sync::fetcher::Fetcher;
 use paths::Paths;
 pub use view::*;
+
+/// The name of the secret holding the saved session.
+pub const SESSION_SECRET: &str = "session";
+/// What the name of the secret holding an account's cache key starts with, before the address.
+pub const CACHE_KEY_SECRET: &str = "cache-key:";
 
 /// Secrets kept by the platform: the session, and the key of the encrypted mail cache.
 #[cfg_attr(feature = "uniffi", uniffi::export(with_foreign))]
@@ -74,7 +83,8 @@ pub struct EngineConfig {
 /// Android stops background work at 10 minutes; a check gives up before that and tries again later.
 const BACKGROUND_LIMIT: std::time::Duration = std::time::Duration::from_secs(8 * 60);
 
-fn runtime() -> &'static tokio::runtime::Runtime {
+/// The Tokio runtime everything here runs on, for a platform's own work too.
+pub fn runtime() -> &'static tokio::runtime::Runtime {
 	static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 	RT.get_or_init(|| tokio::runtime::Builder::new_multi_thread().worker_threads(3).thread_name("tern-io").enable_all().build().expect("start the Tokio runtime"))
 }
@@ -87,6 +97,44 @@ fn first_dir(dirs: &str) -> Option<&str> {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct Engine {
 	tx: UnboundedSender<Msg>,
+	settings: Arc<std::sync::Mutex<settings::Settings>>,
+}
+
+/// The parts of a session a platform's screens use directly, until they draw from views instead.
+#[derive(Clone)]
+pub struct SessionParts {
+	pub backend: Arc<dyn Backend>,
+	pub cache: Arc<Cache>,
+	pub fetcher: Fetcher,
+}
+
+/// What a platform still working on the session's parts directly needs to hear. Comes from any thread.
+pub trait Host: Send + Sync {
+	/// The session changed: a new account, its backend swapped once connected, or `None` at sign-out.
+	fn session(&self, parts: Option<SessionParts>);
+	/// The sync changed mail in this folder, or in any if `None`.
+	fn mail_changed(&self, folder: Option<FolderId>);
+	/// The sync could not even fetch the folder list.
+	fn folders_failed(&self, error: Error);
+}
+
+/// How a platform differs. What Android needs is the default.
+pub struct Options {
+	/// What the app calls the device it is on, as in "the mail on this phone".
+	pub device: &'static str,
+	/// Shared when the platform uses the language model itself.
+	pub meaning: Option<Arc<Meaning>>,
+	/// An account already open, with no saved session: the demo at start-up.
+	pub signed_in: Option<Arc<dyn Backend>>,
+	pub host: Option<Arc<dyn Host>>,
+	/// The folder on screen when it is the platform's to say, for keeping its older mail.
+	pub on_screen: Option<Arc<std::sync::Mutex<Option<FolderId>>>>,
+}
+
+impl Default for Options {
+	fn default() -> Options {
+		Options { device: "phone", meaning: None, signed_in: None, host: None, on_screen: None }
+	}
 }
 
 // Apart because a constructor's own attribute cannot depend on the feature.
@@ -118,6 +166,13 @@ impl Engine {
 	}
 }
 
+impl Drop for Engine {
+	/// Nobody can ask it for anything now, so its account's work ends, and the account stays signed in.
+	fn drop(&mut self) {
+		let _ = self.tx.send(Msg::Stop);
+	}
+}
+
 impl Engine {
 	pub fn open(config: EngineConfig, secrets: Arc<dyn SecretStore>, listener: Arc<dyn EngineListener>) -> Arc<Engine> {
 		// The system's log, for what is wrong and has nowhere on screen to go.
@@ -128,7 +183,7 @@ impl Engine {
 		if let Some(dir) = first_dir(&config.cert_dirs) {
 			std::env::set_var("SSL_CERT_DIR", dir);
 		}
-		Engine::start(Paths::new(&config.config_dir, &config.cache_dir), secrets, listener)
+		Engine::open_with(Paths::new(&config.config_dir, &config.cache_dir), Options::default(), secrets, listener)
 	}
 }
 
@@ -142,25 +197,44 @@ fn step(app: &mut App, msg: Msg) {
 			}
 		},
 		Msg::Background(reply) => app.background_check(reply),
+		Msg::SyncNow => app.sync_now(),
+		Msg::Stop => {},
 	}));
 }
 
 impl Engine {
-	fn start(paths: Paths, secrets: Arc<dyn SecretStore>, listener: Arc<dyn EngineListener>) -> Arc<Engine> {
+	pub fn open_with(paths: Paths, options: Options, secrets: Arc<dyn SecretStore>, listener: Arc<dyn EngineListener>) -> Arc<Engine> {
 		let (tx, mut rx) = unbounded_channel();
-		let mut app = App::new(tx.clone(), listener, secrets, runtime().handle().clone(), paths);
+		let mut app = App::new(tx.clone(), listener, secrets, runtime().handle().clone(), paths, options);
+		let settings = app.settings_handle();
 		runtime().spawn(async move {
 			app.start();
 			while let Some(msg) = rx.recv().await {
+				if matches!(msg, Msg::Stop) {
+					return app.stop();
+				}
 				step(&mut app, msg);
 				// Everything already here at once is drawn as one change.
 				while let Ok(msg) = rx.try_recv() {
+					if matches!(msg, Msg::Stop) {
+						return app.stop();
+					}
 					step(&mut app, msg);
 				}
 				app.publish();
 			}
 		});
-		Arc::new(Engine { tx })
+		Arc::new(Engine { tx, settings })
+	}
+
+	/// The settings as they are now.
+	pub fn settings(&self) -> settings::Settings {
+		*self.settings.lock().unwrap_or_else(|p| p.into_inner())
+	}
+
+	/// Starts the sync's next round now.
+	pub fn sync_now(&self) {
+		let _ = self.tx.send(Msg::SyncNow);
 	}
 }
 

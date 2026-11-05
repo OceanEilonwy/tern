@@ -5,12 +5,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
-use tern_demo::{DemoBackend, DEMO_LOGIN};
-use tern_mail::Backend;
-
-use crate::runtime;
-
-type SignedIn = Box<dyn Fn(Arc<dyn Backend>, Option<(String, String)>)>;
+use tern_app::view::{Action, SignInView};
+use tern_app::Engine;
+use tern_demo::DEMO_LOGIN;
 
 #[derive(Clone)]
 pub struct Login {
@@ -19,11 +16,13 @@ pub struct Login {
 	password: adw::PasswordEntryRow,
 	button: gtk::Button,
 	error: gtk::Label,
-	on_signed_in: Rc<RefCell<Option<SignedIn>>>,
+	engine: Arc<Engine>,
+	/// What the core last said, so typing is not overwritten by what it has not changed.
+	shown: Rc<RefCell<Option<SignInView>>>,
 }
 
 impl Login {
-	pub fn new() -> Login {
+	pub fn new(engine: Arc<Engine>) -> Login {
 		let email = adw::EntryRow::builder().title("Email Address").input_purpose(gtk::InputPurpose::Email).build();
 		let password = adw::PasswordEntryRow::builder().title("Password").build();
 		let fields = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
@@ -70,7 +69,7 @@ impl Login {
 		root.add_top_bar(&header);
 		root.set_content(Some(&scroll));
 
-		let login = Login { root, email, password, button, error, on_signed_in: Rc::default() };
+		let login = Login { root, email, password, button, error, engine, shown: Rc::default() };
 		let l = login.clone();
 		login.email.connect_changed(move |_| l.update_button());
 		let l = login.clone();
@@ -90,9 +89,6 @@ impl Login {
 		login
 	}
 
-	pub fn connect_signed_in(&self, f: impl Fn(Arc<dyn Backend>, Option<(String, String)>) + 'static) {
-		*self.on_signed_in.borrow_mut() = Some(Box::new(f));
-	}
 
 	/// Types `email` and presses Sign In, for the screenshot scenes.
 	pub fn sign_in_as(&self, email: &str) {
@@ -109,11 +105,8 @@ impl Login {
 		self.button.set_sensitive(ready && self.button.child().and_downcast::<adw::Spinner>().is_none());
 	}
 
-	pub fn reset(&self, email: Option<&str>) {
-		self.email.set_text(email.unwrap_or(""));
+	pub fn clear_password(&self) {
 		self.password.set_text("");
-		self.error.set_visible(false);
-		self.set_busy(false);
 	}
 
 	pub fn focus(&self) {
@@ -139,34 +132,28 @@ impl Login {
 		if !self.button.is_sensitive() {
 			return;
 		}
-		let email = self.email.text().trim().to_string();
-		let password = self.password.text().to_string();
 		self.error.set_visible(false);
-		if self.is_demo() {
-			return self.finish(Arc::new(DemoBackend::new()), None);
-		}
-		self.set_busy(true);
-		let this = self.clone();
-		runtime::spawn_local(async move {
-			let e = email.clone();
-			let result = runtime::run(async move { tern_tuta::login(&e, &password, crate::paths().sdk_dir()).await }).await;
-			log::debug!("{}", if result.is_ok() { "sign-in finished" } else { "sign-in failed" });
-			this.set_busy(false);
-			match result {
-				Ok((backend, session)) => this.finish(backend, Some((email, session))),
-				Err(err) => {
-					this.error.set_label(&err.to_string());
-					this.error.set_visible(true);
-					this.password.grab_focus();
-				}
-			}
-		});
+		self.engine.send(Action::SignIn { email: self.email.text().trim().to_string(), password: self.password.text().to_string() });
 	}
 
-	fn finish(&self, backend: Arc<dyn Backend>, saved: Option<(String, String)>) {
-		self.password.set_text("");
-		if let Some(f) = self.on_signed_in.borrow().as_ref() {
-			f(backend, saved);
+	/// Draws what the core says about signing in.
+	pub fn update(&self, view: SignInView) {
+		let before = self.shown.borrow_mut().replace(view.clone());
+		if before.as_ref().map(|b| &b.email) != Some(&view.email) {
+			self.email.set_text(&view.email);
+		}
+		if before.as_ref().map(|b| b.busy) != Some(view.busy) {
+			self.set_busy(view.busy);
+		}
+		match &view.error {
+			Some(error) => {
+				self.error.set_label(error);
+				self.error.set_visible(true);
+				if before.as_ref().and_then(|b| b.error.as_ref()) != Some(error) {
+					self.password.grab_focus();
+				}
+			},
+			None => self.error.set_visible(false),
 		}
 	}
 }

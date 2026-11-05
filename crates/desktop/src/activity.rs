@@ -43,7 +43,7 @@ impl Word {
 #[derive(Default)]
 struct State {
 	running: [usize; WORDS],
-	problem: Option<&'static str>,
+	problem: Option<String>,
 	shown: Vec<(glib::WeakRef<gtk::Box>, glib::WeakRef<gtk::Label>, glib::WeakRef<adw::Spinner>)>,
 }
 
@@ -55,7 +55,7 @@ impl State {
 
 	fn update(&mut self) {
 		let word = self.word();
-		let text = word.map(Word::label).or(self.problem);
+		let text = word.map(Word::label).or(self.problem.as_deref());
 		self.shown.retain(|(row, label, spinner)| {
 			let (Some(row), Some(label), Some(spinner)) = (row.upgrade(), label.upgrade(), spinner.upgrade()) else { return false };
 			row.set_visible(text.is_some());
@@ -94,15 +94,15 @@ impl Activity {
 	}
 
 	/// Says what is wrong with the connection, or that nothing is.
-	pub fn set_problem(&self, problem: Option<&'static str>) {
+	pub fn set_problem(&self, problem: Option<String>) {
 		let mut state = self.0.borrow_mut();
 		state.problem = problem;
 		state.update();
 	}
 
 	/// The problem with the connection last told, if any.
-	pub fn problem(&self) -> Option<&'static str> {
-		self.0.borrow().problem
+	pub fn problem(&self) -> Option<String> {
+		self.0.borrow().problem.clone()
 	}
 
 	/// The word on show now, if anything is under way.

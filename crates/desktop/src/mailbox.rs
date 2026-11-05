@@ -112,10 +112,10 @@ impl Broom {
 		Broom { button, text, size }
 	}
 
-	fn offer(&self, bytes: Option<u64>) {
-		self.button.set_visible(bytes.is_some());
-		if let Some(bytes) = bytes {
-			let size = format!("{} on this computer", glib::format_size(bytes));
+	fn offer(&self, size: Option<&str>) {
+		self.button.set_visible(size.is_some());
+		if let Some(size) = size {
+			let size = format!("{size} on this computer");
 			self.size.set_label(&size);
 			self.button.set_tooltip_text(Some(&format!("Clean Up — {size}")));
 		}

@@ -36,7 +36,7 @@ pub async fn measure(ctx: &Ctx) -> Option<Usage> {
 pub async fn check(ctx: &Ctx) {
 	let Some(usage) = measure(ctx).await else { return };
 	let shown = offer(usage.total, ctx.settings().cleanup_mb, disk());
-	ctx.offer_cleanup(shown.then_some(usage.total));
+	ctx.offer_cleanup(shown.then(|| tern_app::format::size(usage.total)).as_deref());
 }
 
 /// A choice in the dialog besides everything.

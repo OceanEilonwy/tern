@@ -6,22 +6,26 @@ use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::gio;
+use tern_app::settings::Settings;
+use tern_app::view::{Action, ChoiceView, ConnectionKind, Effect, Screen, SettingsView, ShellView, Update};
+use tern_app::{Engine, EngineListener, Host, Options, SecretStore, SessionParts};
 use tern_cache::Cache;
-use tern_demo::DemoBackend;
-use tern_mail::{Backend, Error, FolderKind};
-use tern_sync::Level;
-
-use crate::activity::Activity;
-use crate::layout::Layout;
 use tern_compose::Fields;
+use tern_demo::DemoBackend;
+use tern_mail::{Backend, Error, FolderId, FolderKind};
+use tern_sync::fetcher::Fetcher;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+use crate::activity::{Activity, Busy, Word};
 use crate::composer::Composer;
-use tern_sync::fetcher::{Fetcher, Tuning};
-use crate::settings::{Settings, CLEANUP_MB};
-use crate::{background, cleanup, default_app, format, keyring, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot, semantic};
+use crate::keyring::{InMemory, Keyring};
+use crate::layout::Layout;
+use crate::{cleanup, default_app, format, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot};
 
 type ChangedHook = Box<dyn Fn(&[FolderKind])>;
 type RuleHook = Box<dyn Fn(&str)>;
-type OfferHook = Box<dyn Fn(Option<u64>)>;
+type OfferHook = Box<dyn Fn(Option<&str>)>;
+type SettingsHook = Box<dyn Fn(&SettingsView)>;
 
 /// What every part of the window shares: the window, its toasts, the signed-in account and its cache.
 #[derive(Clone)]
@@ -31,12 +35,11 @@ pub struct Ctx {
 	backend: Rc<RefCell<Option<Arc<dyn Backend>>>>,
 	cache: Rc<RefCell<Option<Arc<Cache>>>>,
 	fetcher: Rc<RefCell<Option<Fetcher>>>,
-	settings: Rc<Cell<Settings>>,
+	pub engine: Arc<Engine>,
+	/// What the core last said about the settings.
+	settings_view: Rc<RefCell<Option<SettingsView>>>,
+	on_settings: Rc<RefCell<Option<SettingsHook>>>,
 	layout: Rc<Cell<Layout>>,
-	/// Wakes the background sync.
-	wake: Arc<tokio::sync::Notify>,
-	/// The round of the sync under way, which ends when this does.
-	sync: Rc<RefCell<Option<tern_sync::Stops>>>,
 	/// The folder on screen, for the sync, which runs off this thread.
 	pub on_screen: Arc<std::sync::Mutex<Option<tern_mail::FolderId>>>,
 	changed: Rc<RefCell<Option<ChangedHook>>>,
@@ -61,13 +64,23 @@ impl Ctx {
 	}
 
 	pub fn settings(&self) -> Settings {
-		self.settings.get()
+		self.engine.settings()
 	}
 
-	pub fn set_settings(&self, settings: Settings) {
-		self.settings.set(settings);
-		settings.save(crate::paths());
-		self.sync_now();
+	pub fn settings_view(&self) -> Option<SettingsView> {
+		self.settings_view.borrow().clone()
+	}
+
+	/// Calls `f` whenever the settings on show change, instead of whoever asked last.
+	pub fn connect_settings(&self, f: impl Fn(&SettingsView) + 'static) {
+		*self.on_settings.borrow_mut() = Some(Box::new(f));
+	}
+
+	fn show_settings(&self, view: SettingsView) {
+		if let Some(f) = self.on_settings.borrow().as_ref() {
+			f(&view);
+		}
+		*self.settings_view.borrow_mut() = Some(view);
 	}
 
 	pub fn layout(&self) -> Layout {
@@ -84,15 +97,7 @@ impl Ctx {
 
 	/// Starts the background sync's next round now.
 	pub fn sync_now(&self) {
-		self.wake.notify_one();
-	}
-
-	pub fn set_sync(&self, round: Option<tern_sync::Stops>) {
-		*self.sync.borrow_mut() = round;
-	}
-
-	pub fn wake(&self) -> Arc<tokio::sync::Notify> {
-		self.wake.clone()
+		self.engine.sync_now();
 	}
 
 	pub fn toast(&self, text: &str) {
@@ -133,14 +138,14 @@ impl Ctx {
 		*self.show_rule.borrow_mut() = Some(Box::new(f));
 	}
 
-	/// Offers, in the sidebar, to clean up the `bytes` Tern takes on disk; None takes the offer back.
-	pub fn offer_cleanup(&self, bytes: Option<u64>) {
+	/// Offers, in the sidebar, to clean up the size Tern takes on disk; None takes the offer back.
+	pub fn offer_cleanup(&self, size: Option<&str>) {
 		if let Some(f) = self.offer.borrow().as_ref() {
-			f(bytes);
+			f(size);
 		}
 	}
 
-	pub fn connect_offer_cleanup(&self, f: impl Fn(Option<u64>) + 'static) {
+	pub fn connect_offer_cleanup(&self, f: impl Fn(Option<&str>) + 'static) {
 		*self.offer.borrow_mut() = Some(Box::new(f));
 	}
 }
@@ -153,25 +158,32 @@ pub struct Window {
 	pub mailbox: Rc<Mailbox>,
 	/// Mail asked for before there was an account to send it from, to write once signed in.
 	waiting: RefCell<Vec<Fields>>,
+	/// Held while the core's sync is working, for the activity word.
+	fetching: RefCell<Option<Busy>>,
+	/// The sign-in page has just come up, and takes the focus once it knows what to show.
+	focus_login: Cell<bool>,
 }
 
 impl Window {
 	pub fn new(app: &adw::Application) -> Rc<Window> {
+		let on_screen = Arc::default();
 		let window = adw::ApplicationWindow::builder().application(app).title("Tern").default_width(1280).default_height(800).build();
 		window.set_size_request(360, 294);
 		let toasts = adw::ToastOverlay::new();
+		// Before the core can start, and rewrite the settings' file it may still be in.
+		let layout = Layout::load(crate::paths().config_dir());
+		let (engine, incoming) = start_engine(&on_screen);
 		let ctx = Ctx {
 			window: window.clone(),
 			toasts: toasts.clone(),
+			engine: engine.clone(),
+			settings_view: Rc::default(),
+			on_settings: Rc::default(),
 			backend: Rc::default(),
 			cache: Rc::default(),
 			fetcher: Rc::default(),
-			// The layout first: it may still be in the settings' file, which saving them rewrites.
-			layout: Rc::new(Cell::new(Layout::load(crate::paths().config_dir()))),
-			settings: Rc::new(Cell::new(Settings::load(crate::paths()))),
-			wake: Arc::default(),
-			sync: Rc::default(),
-			on_screen: Arc::default(),
+			layout: Rc::new(Cell::new(layout)),
+			on_screen,
 			changed: Rc::default(),
 			show_rule: Rc::default(),
 			offer: Rc::default(),
@@ -185,7 +197,7 @@ impl Window {
 		starting_page.set_content(Some(&starting));
 		stack.add_named(&starting_page, Some("starting"));
 
-		let login = Login::new();
+		let login = Login::new(engine.clone());
 		stack.add_named(&login.root, Some("login"));
 		let mailbox = Mailbox::new(ctx.clone());
 		stack.add_named(&mailbox.root, Some("mailbox"));
@@ -195,21 +207,11 @@ impl Window {
 			window.add_breakpoint(bp);
 		}
 
-		let this = Rc::new(Window { ctx, stack, login, mailbox, waiting: RefCell::default() });
+		let this = Rc::new(Window { ctx, stack, login, mailbox, waiting: RefCell::default(), fetching: RefCell::default(), focus_login: Cell::new(false) });
 		// The GTK window owns this struct until it is destroyed; callbacks and actions hold only weak references.
 		let owner = RefCell::new(Some(this.clone()));
 		window.connect_destroy(move |_| drop(owner.take()));
 		this.add_actions(app);
-		{
-			let weak = Rc::downgrade(&this);
-			this.login.connect_signed_in(move |backend, saved| {
-				if let Some(this) = weak.upgrade() {
-					// Only a real account keeps its mail on disk.
-					let persistent = saved.is_some();
-					this.signed_in(backend, saved, persistent);
-				}
-			});
-		}
 		if let Some((w, h)) = screenshot::size() {
 			window.set_default_size(w, h);
 			// On a headless display maximizing fills the screen; narrow scenes keep their size.
@@ -222,7 +224,18 @@ impl Window {
 			}
 		}
 		window.present();
-		this.clone().start();
+		// Holds only a weak reference: the window's life is its own.
+		let weak = Rc::downgrade(&this);
+		runtime::spawn_local(async move {
+			let mut incoming = incoming;
+			while let Some(what) = incoming.recv().await {
+				let Some(this) = weak.upgrade() else { return };
+				this.take(what);
+			}
+		});
+		if screenshot::scene().is_some() {
+			screenshot::drive(this.clone());
+		}
 		this
 	}
 
@@ -231,7 +244,7 @@ impl Window {
 		let sign_out = gio::SimpleAction::new("sign-out", None);
 		sign_out.connect_activate(move |_, _| {
 			if let Some(this) = weak.upgrade() {
-				this.sign_out();
+				this.ctx.engine.send(Action::SignOut);
 			}
 		});
 		app.add_action(&sign_out);
@@ -263,117 +276,123 @@ impl Window {
 		}
 	}
 
-	/// Opens the saved session if there is one, else shows the sign-in page.
-	fn start(self: Rc<Self>) {
-		if std::env::var_os("TERN_DEMO").is_some() {
-			let backend: Arc<dyn Backend> = if screenshot::scene().is_some() { screenshot::backend() } else { Arc::new(DemoBackend::new()) };
-			self.signed_in(backend, None, false);
-			screenshot::drive(self);
-			return;
-		}
-		if screenshot::scene().is_some() {
-			self.show_login(None);
-			screenshot::drive(self);
-			return;
-		}
-		runtime::spawn_local(async move {
-			let saved = runtime::run(keyring::load()).await;
-			let Some(saved) = saved else { return self.show_login(None) };
-			let session = saved.session.clone();
-			match runtime::run(async move { tern_tuta::resume(&session, crate::paths().sdk_dir()).await }).await {
-				Ok(backend) => self.signed_in(backend, None, true),
-				Err(err) => {
-					if err != Error::SessionExpired {
-						self.ctx.error(&err);
+	/// Takes what the core says, on the GTK thread.
+	fn take(self: &Rc<Self>, what: Incoming) {
+		match what {
+			Incoming::Update(update) => match *update {
+				Update::Shell { view } => self.show_shell(view),
+				Update::SignIn { view } => {
+					self.login.update(view);
+					if self.focus_login.take() {
+						self.login.focus();
 					}
-					self.show_login(Some(&saved.email));
-				}
-			}
-		});
-	}
-
-	fn show_login(&self, email: Option<&str>) {
-		self.login.reset(email);
-		self.stack.set_visible_child_name("login");
-		self.ctx.window.set_title(Some("Tern"));
-		self.login.focus();
-	}
-
-	/// `saved` is the session to remember, with the address it belongs to. A `persistent` account
-	/// keeps its mail in an encrypted cache on disk; the demo's lives in memory.
-	fn signed_in(self: &Rc<Self>, backend: Arc<dyn Backend>, saved: Option<(String, String)>, persistent: bool) {
-		log::debug!("opening the mailbox");
-		*self.ctx.backend.borrow_mut() = Some(backend.clone());
-		if let Some((email, session)) = saved {
-			runtime::spawn_local(async move { runtime::run(async move { keyring::store(&email, &session).await }).await });
+				},
+				Update::Settings { view } => self.ctx.show_settings(view),
+				_ => {},
+			},
+			Incoming::Session(parts) => self.session_changed(parts),
+			Incoming::MailChanged(folder) => self.mailbox.cache_changed(folder.as_ref()),
+			Incoming::FoldersFailed(e) => self.mailbox.sync_failed(&e),
 		}
-		self.stack.set_visible_child_name("mailbox");
-		let email = backend.account().address;
-		let this = self.clone();
-		runtime::spawn_local(async move {
-			let cache = if persistent {
-				let key = runtime::run({
-					let email = email.clone();
-					async move { keyring::cache_key(&email).await }
-				})
-				.await;
-				let path = crate::paths().mail_cache(&email);
-				match key {
-					Some(key) => runtime::run(async move { Cache::open(&path, &key).ok() }).await,
-					None => None,
+	}
+
+	fn show_shell(&self, view: ShellView) {
+		match view.stack.last() {
+			Some(Screen::Starting) | None => {},
+			Some(Screen::SignIn) => {
+				if self.stack.visible_child_name().as_deref() != Some("login") {
+					self.login.clear_password();
+					self.stack.set_visible_child_name("login");
+					self.ctx.window.set_title(Some("Tern"));
+					self.focus_login.set(true);
 				}
-			} else {
-				None
-			};
-			// Without a keyring nothing is kept on disk.
-			let cache = Arc::new(cache.unwrap_or_else(Cache::in_memory));
-			if !this.ctx.backend().is_some_and(|now| Arc::ptr_eq(&now, &backend)) {
-				return;
-			}
-			*this.ctx.fetcher.borrow_mut() = Some(Fetcher::new(backend.clone(), cache.clone(), runtime::handle(), Tuning::DEFAULT));
-			*this.ctx.cache.borrow_mut() = Some(cache);
-			this.mailbox.start();
-			background::start(&this.ctx, Rc::downgrade(&this.mailbox));
-			for fields in this.waiting.take() {
-				Composer::open(&this.ctx, fields, None);
+			},
+			Some(_) => {
+				if self.stack.visible_child_name().as_deref() != Some("mailbox") {
+					self.login.clear_password();
+					self.stack.set_visible_child_name("mailbox");
+				}
+				// There is nothing here to sign in again from, so go and do it, as ever.
+				if view.status.kind == ConnectionKind::SignedOut {
+					self.ctx.engine.send(Action::SignInAgain);
+				}
+			},
+		}
+		let mut fetching = self.fetching.borrow_mut();
+		match view.status.kind {
+			ConnectionKind::Working => {
+				fetching.get_or_insert_with(|| self.ctx.activity.start(Word::Fetching));
+			},
+			kind => {
+				fetching.take();
+				self.ctx.activity.set_problem(matches!(kind, ConnectionKind::Offline | ConnectionKind::Busy).then_some(view.status.line));
+			},
+		}
+		self.ctx.offer_cleanup(view.cleanup_offer.as_deref());
+	}
+
+	fn session_changed(self: &Rc<Self>, parts: Option<SessionParts>) {
+		let Some(parts) = parts else {
+			*self.ctx.backend.borrow_mut() = None;
+			*self.ctx.cache.borrow_mut() = None;
+			*self.ctx.fetcher.borrow_mut() = None;
+			self.mailbox.clear();
+			return;
+		};
+		// The same account again once it has connected, with the same cache and a real backend.
+		let opening = self.ctx.cache.borrow().is_none();
+		*self.ctx.backend.borrow_mut() = Some(parts.backend);
+		*self.ctx.fetcher.borrow_mut() = Some(parts.fetcher);
+		*self.ctx.cache.borrow_mut() = Some(parts.cache);
+		if opening {
+			self.mailbox.start();
+			for fields in self.waiting.take() {
+				Composer::open(&self.ctx, fields, None);
 			}
 			log::debug!("mailbox shown");
-		});
-	}
-
-	/// Ends the session; forgets the account's mail on this computer too when the setting says so.
-	fn sign_out(self: &Rc<Self>) {
-		let Some(backend) = self.ctx.backend.borrow_mut().take() else { return };
-		let cache = self.ctx.cache.borrow_mut().take();
-		if let Some(fetcher) = self.ctx.fetcher.borrow_mut().take() {
-			fetcher.stop();
 		}
-		// The sync lets go of the account now, whether in a round or waiting for the next.
-		self.ctx.set_sync(None);
-		self.ctx.sync_now();
-		self.ctx.activity.set_problem(None);
-		let email = backend.account().address;
-		let forget = self.ctx.settings().forget_on_sign_out;
-		self.mailbox.clear();
-		self.show_login(Some(&email));
-		runtime::spawn_local(async move {
-			runtime::run(async move {
-				let _ = backend.sign_out().await;
-				keyring::forget().await;
-				drop(cache);
-				// Kept unless asked otherwise, so signing in again opens with the mail already here.
-				if !forget {
-					return;
-				}
-				let path = crate::paths().mail_cache(&email);
-				for suffix in ["", "-wal", "-shm"] {
-					let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-				}
-				keyring::forget_cache_key(&email).await;
-			})
-			.await
-		});
 	}
+}
+
+/// What comes from the core, in order, for the GTK thread.
+enum Incoming {
+	Update(Box<Update>),
+	Session(Option<SessionParts>),
+	MailChanged(Option<FolderId>),
+	FoldersFailed(Error),
+}
+
+struct Bridge(UnboundedSender<Incoming>);
+
+impl EngineListener for Bridge {
+	fn on_update(&self, update: Update) {
+		let _ = self.0.send(Incoming::Update(Box::new(update)));
+	}
+	fn on_effect(&self, _: Effect) {}
+	fn on_log(&self, _: String) {}
+}
+
+impl Host for Bridge {
+	fn session(&self, parts: Option<SessionParts>) {
+		let _ = self.0.send(Incoming::Session(parts));
+	}
+	fn mail_changed(&self, folder: Option<FolderId>) {
+		let _ = self.0.send(Incoming::MailChanged(folder));
+	}
+	fn folders_failed(&self, error: Error) {
+		let _ = self.0.send(Incoming::FoldersFailed(error));
+	}
+}
+
+/// The core, for this desktop. The scenes keep to themselves, with no real keyring.
+fn start_engine(on_screen: &Arc<std::sync::Mutex<Option<FolderId>>>) -> (Arc<Engine>, UnboundedReceiver<Incoming>) {
+	let (tx, incoming) = unbounded_channel();
+	let bridge = Arc::new(Bridge(tx));
+	let in_scene = screenshot::scene().is_some();
+	let signed_in: Option<Arc<dyn Backend>> = std::env::var_os("TERN_DEMO").map(|_| if in_scene { screenshot::backend() } else { Arc::new(DemoBackend::new()) });
+	let secrets: Arc<dyn SecretStore> = if in_scene { Arc::new(InMemory::default()) } else { Arc::new(Keyring) };
+	let options = Options { device: "computer", meaning: Some(crate::meaning().clone()), signed_in, host: Some(bridge.clone()), on_screen: Some(on_screen.clone()) };
+	(Engine::open_with(crate::paths().clone(), options, secrets, bridge), incoming)
 }
 
 /// Preferences, with its Rules section.
@@ -387,33 +406,19 @@ pub fn preferences_dialog(ctx: &Ctx) -> (adw::PreferencesDialog, Rc<rule_editor:
 		.title("Offline Mail")
 		.description("Tern keeps recent mail on this computer, encrypted, so it shows at once and can be read offline. It checks for new mail every few minutes.")
 		.build();
-	let labels: Vec<String> = Level::ALL
-		.iter()
-		.map(|l| format!("{} — {} per folder, {} opened ahead", level_label(*l), l.headers(), l.bodies()))
-		.collect();
-	let model = gtk::StringList::new(&labels.iter().map(String::as_str).collect::<Vec<_>>());
-	let row = adw::ComboRow::builder().title("Keep Ready").model(&model).build();
-	row.set_selected(Level::ALL.iter().position(|l| *l == ctx.settings().offline).unwrap_or(1) as u32);
-	row.connect_selected_notify({
-		let ctx = ctx.clone();
-		move |row| {
-			if let Some(level) = Level::ALL.get(row.selected() as usize) {
-				ctx.set_settings(Settings { offline: *level, ..ctx.settings() });
-			}
-		}
-	});
-	group.add(&row);
+	let view = ctx.settings_view().unwrap_or_else(|| panic!("the core publishes settings at once"));
+	group.add(&choice_row(ctx, "Keep Ready", None, &view.keep_ready, |value| Action::SetKeepReady { value }));
 	let forget = adw::SwitchRow::builder()
 		.title("Forget Mail on Sign Out")
 		.subtitle("Deletes the mail kept on this computer when you sign out. Signing in again downloads it afresh.")
-		.active(ctx.settings().forget_on_sign_out)
+		.active(view.forget_on_sign_out)
 		.build();
 	forget.connect_active_notify({
 		let ctx = ctx.clone();
-		move |row| ctx.set_settings(Settings { forget_on_sign_out: row.is_active(), ..ctx.settings() })
+		move |row| ctx.engine.send(Action::SetForget { on: row.is_active() })
 	});
 	group.add(&forget);
-	group.add(&cleanup_limit_row(ctx));
+	group.add(&choice_row(ctx, "Offer Cleanup Past", Some("The sidebar offers to clean up once mail here takes more than this."), &view.cleanup_limits, |value| Action::SetCleanupLimit { value }));
 	group.add(&storage_row(ctx, &dialog));
 	page.add(&group);
 	page.add(&search);
@@ -428,16 +433,18 @@ pub fn preferences_dialog(ctx: &Ctx) -> (adw::PreferencesDialog, Rc<rule_editor:
 	(dialog, rules)
 }
 
-/// When the sidebar offers to clean up.
-fn cleanup_limit_row(ctx: &Ctx) -> adw::ComboRow {
-	let names: Vec<String> = CLEANUP_MB.iter().map(|&mb| if mb == 0 { "Never".to_string() } else { gtk::glib::format_size(u64::from(mb) * 1_000_000).to_string() }).collect();
-	let model = gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>());
-	let row = adw::ComboRow::builder().title("Offer Cleanup Past").subtitle("The sidebar offers to clean up once mail here takes more than this.").model(&model).build();
-	row.set_selected(CLEANUP_MB.iter().position(|&mb| mb == ctx.settings().cleanup_mb).unwrap_or(1) as u32);
-	let ctx = ctx.clone();
+/// One of the choices the core offers.
+fn choice_row(ctx: &Ctx, title: &str, subtitle: Option<&str>, choices: &[ChoiceView], action: fn(String) -> Action) -> adw::ComboRow {
+	let names: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
+	let row = adw::ComboRow::builder().title(title).model(&gtk::StringList::new(&names)).build();
+	if let Some(subtitle) = subtitle {
+		row.set_subtitle(subtitle);
+	}
+	row.set_selected(choices.iter().position(|c| c.selected).unwrap_or(0) as u32);
+	let (ctx, values): (_, Vec<String>) = (ctx.clone(), choices.iter().map(|c| c.value.clone()).collect());
 	row.connect_selected_notify(move |row| {
-		if let Some(&mb) = CLEANUP_MB.get(row.selected() as usize) {
-			ctx.set_settings(Settings { cleanup_mb: mb, ..ctx.settings() });
+		if let Some(value) = values.get(row.selected() as usize) {
+			ctx.engine.send(action(value.clone()));
 		}
 	});
 	row
@@ -475,41 +482,24 @@ fn storage_row(ctx: &Ctx, dialog: &adw::PreferencesDialog) -> adw::ActionRow {
 /// Search by meaning is off until asked for, as it downloads a model once.
 fn search_group(ctx: &Ctx) -> adw::PreferencesGroup {
 	let group = adw::PreferencesGroup::builder().title("Search").description("Search looks through the mail kept on this computer.").build();
-	let about = format!("Also finds mail about what you type, not only mail with its words. Downloads a {} language model once; your mail never leaves this computer.", semantic::SIZE);
-	let row = adw::SwitchRow::builder().title("Search by Meaning").subtitle(&about).active(ctx.settings().semantic).build();
-	let ctx = ctx.clone();
-	row.connect_active_notify(move |row| {
-		let on = row.is_active();
-		if on == ctx.settings().semantic {
-			return;
-		}
-		ctx.set_settings(Settings { semantic: on, ..ctx.settings() });
-		if !on {
-			return crate::meaning().forget(ctx.cache().as_deref());
-		}
-		// Fetch the model now and say so; the background sync then works out each mail's meaning.
-		row.set_subtitle("Downloading the language model…");
-		let (row, about) = (row.clone(), about.clone());
-		runtime::spawn_local(async move {
-			match runtime::run(crate::meaning().clone().ensure()).await {
-				Ok(_) => row.set_subtitle(&about),
-				Err(e) => {
-					row.set_subtitle(&format!("Could not download the model: {e}"));
-					row.set_active(false);
-				},
+	let view = ctx.settings_view().unwrap_or_else(|| panic!("the core publishes settings at once"));
+	let row = adw::SwitchRow::builder().title("Search by Meaning").subtitle(view.semantic_line).active(view.semantic).build();
+	row.connect_active_notify({
+		let ctx = ctx.clone();
+		move |row| ctx.engine.send(Action::SetSemantic { on: row.is_active() })
+	});
+	// The download's progress, and the switch going back off if it fails.
+	let shown = row.downgrade();
+	ctx.connect_settings(move |view| {
+		if let Some(row) = shown.upgrade() {
+			row.set_subtitle(&view.semantic_line);
+			if row.is_active() != view.semantic {
+				row.set_active(view.semantic);
 			}
-		});
+		}
 	});
 	group.add(&row);
 	group
-}
-
-fn level_label(level: Level) -> &'static str {
-	match level {
-		Level::Low => "Low",
-		Level::Medium => "Medium",
-		Level::High => "High",
-	}
 }
 
 fn about_dialog() -> adw::AboutDialog {
