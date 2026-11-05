@@ -601,9 +601,8 @@ Built to the "Cache cleanup" boards on the design canvas.
 - **Several composers.** The core holds any number and says which one actions are for with `ComposeFocus`. A
   phone only ever has one, and goes on hearing about just that one in `Update::Composer`; the desktop draws a
   window for each in `Update::Composers`.
-- **Labels are browsed like folders, on the desktop for now.** Under the folders in the sidebar, each lists the
-  mail here carrying it, across folders, through the same machinery as a search. It only knows mail kept here, as a
-  search does. Android has what it needs in `ListView.labels` and `Action::OpenLabel`, but no place for them yet.
+- **Labels are browsed like folders.** Under the folders in the sidebar or drawer, each lists the mail here
+  carrying it, across folders, through the same machinery as a search. It only knows mail kept here, as a search does.
 - **Attachments stop at 25 MB.** The desktop used to warn past that and try anyway, which Tuta may refuse. It now
   says so and does not add the file, as on Android.
 - **Beside the list, the next conversation follows.** `follow_neighbour` has the core open a conversation's

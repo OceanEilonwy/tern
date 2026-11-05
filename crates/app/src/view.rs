@@ -364,6 +364,8 @@ pub struct ComposersView {
 pub struct SearchView {
 	pub revision: u64,
 	pub query: String,
+	/// Browsing a label, so there is nothing to type.
+	pub browsing: bool,
 	pub searching: bool,
 	pub title: String,
 	pub note: String,

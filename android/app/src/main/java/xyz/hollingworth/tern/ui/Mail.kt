@@ -14,6 +14,8 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -67,6 +69,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import xyz.hollingworth.tern.Store
 import com.tern.engine.Action
+import com.tern.engine.FolderIcon
 import com.tern.engine.ConnectionKind
 import com.tern.engine.FolderView
 import com.tern.engine.ListState
@@ -82,7 +85,7 @@ fun MailScreen(wide: Boolean, conversationOpen: Boolean) {
         // The list takes its share of the room beside the rail, and the mail being read the rest.
         val listWidth = ((maxWidth - 96.dp) * 0.4f).coerceIn(264.dp, 400.dp)
         Row(Modifier.fillMaxSize()) {
-            FolderRail(list?.folders.orEmpty())
+            FolderRail(list?.folders.orEmpty(), list?.labels.orEmpty())
             Box(Modifier.width(listWidth).fillMaxHeight().border(0.5.dp, MaterialTheme.colorScheme.outlineVariant)) {
                 ConversationList(wide = true, onMenu = {})
             }
@@ -107,7 +110,7 @@ fun MailScreen(wide: Boolean, conversationOpen: Boolean) {
             drawerState = drawer,
             drawerContent = {
                 ModalDrawerSheet(drawerContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                    FolderMenu(list?.folders.orEmpty(), shell?.address.orEmpty(), shell?.cleanupOffer) { scope.launch { drawer.close() } }
+                    FolderMenu(list?.folders.orEmpty(), list?.labels.orEmpty(), shell?.address.orEmpty(), shell?.cleanupOffer) { scope.launch { drawer.close() } }
                 }
             },
         ) {
@@ -124,16 +127,17 @@ private fun NothingOpen() {
 }
 
 @Composable
-private fun FolderRail(folders: List<FolderView>) {
+private fun FolderRail(folders: List<FolderView>, labels: List<FolderView>) {
     val colors = MaterialTheme.colorScheme
     Column(
-        Modifier.width(96.dp).fillMaxHeight().statusBarsPadding().navigationBarsPadding().padding(top = 8.dp, bottom = 8.dp),
+        Modifier.width(96.dp).fillMaxHeight().verticalScroll(rememberScrollState()).statusBarsPadding().navigationBarsPadding().padding(top = 8.dp, bottom = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        folders.forEach { folder ->
+        (folders + labels).forEach { folder ->
+            val label = folder.icon == FolderIcon.LABEL
             Column(
-                Modifier.width(88.dp).height(64.dp).clickable(role = Role.Tab) { Store.send(Action.OpenFolder(folder.id)) },
+                Modifier.width(88.dp).height(64.dp).clickable(role = Role.Tab) { Store.send(if (label) Action.OpenLabel(folder.id) else Action.OpenFolder(folder.id)) },
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {
@@ -150,7 +154,7 @@ private fun FolderRail(folders: List<FolderView>) {
 }
 
 @Composable
-private fun FolderMenu(folders: List<FolderView>, address: String, cleanup: String?, close: () -> Unit) {
+private fun FolderMenu(folders: List<FolderView>, labels: List<FolderView>, address: String, cleanup: String?, close: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     @Composable
     fun item(glyph: androidx.compose.ui.graphics.vector.ImageVector, name: String, selected: Boolean = false, note: String? = null, dot: Boolean = false, onClick: () -> Unit) {
@@ -175,10 +179,16 @@ private fun FolderMenu(folders: List<FolderView>, address: String, cleanup: Stri
             Text("Tern", style = MaterialTheme.typography.titleMedium)
             Text(address, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
         }
-        folders.forEach { f ->
-            item(f.icon.glyph, f.name, f.selected, f.unread.takeIf { it > 0u }?.toString()) { Store.send(Action.OpenFolder(f.id)) }
+        // An account can have more labels than fit: these scroll, and what is under them stays put.
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            folders.forEach { f ->
+                item(f.icon.glyph, f.name, f.selected, f.unread.takeIf { it > 0u }?.toString()) { Store.send(Action.OpenFolder(f.id)) }
+            }
+            if (labels.isNotEmpty()) {
+                Text("Labels", Modifier.padding(start = 16.dp, top = 16.dp, bottom = 8.dp), colors.onSurfaceVariant, style = MaterialTheme.typography.labelLarge)
+                labels.forEach { l -> item(l.icon.glyph, l.name, l.selected) { Store.send(Action.OpenLabel(l.id)) } }
+            }
         }
-        Spacer(Modifier.weight(1f))
         Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp).height(1.dp).background(colors.outlineVariant))
         item(Icons.Refresh, "Check for new mail") { Store.send(Action.Refresh) }
         if (cleanup != null) item(Icons.Broom, "Clean up", note = cleanup, dot = true) { Store.send(Action.OpenCleanup) }
