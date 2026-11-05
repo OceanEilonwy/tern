@@ -29,7 +29,7 @@ use tokio::sync::Notify;
 
 use crate::doc::{block_text, flatten, Picture};
 use crate::view::*;
-use crate::{EngineListener, SecretStore};
+use crate::{EngineListener, SecretError, SecretStore};
 
 /// Conversations listed before scrolling asks for more.
 const ROWS: usize = 100;
@@ -170,6 +170,17 @@ struct Session {
 	contacts_done: Arc<std::sync::atomic::AtomicBool>,
 	/// The demo account, which has mail arrive when asked.
 	demo: Option<Arc<DemoBackend>>,
+	/// The rounds of the sync, which end with the session.
+	sync: Option<Stops>,
+}
+
+/// A task that ends when this is dropped.
+struct Stops(tokio::task::AbortHandle);
+
+impl Drop for Stops {
+	fn drop(&mut self) {
+		self.0.abort();
+	}
 }
 
 /// One round of keeping the cache up to date, for a session.
@@ -472,6 +483,8 @@ pub struct App {
 	background_waiting: Vec<std::sync::mpsc::Sender<BackgroundResult>>,
 	background_running: bool,
 	resuming: bool,
+	/// The session to ask the server for again, for an account not yet connected.
+	saved_session: Option<String>,
 	/// A conversation asked for, from a notification, before the account was open.
 	open_when_ready: Option<(String, FolderId)>,
 	open_dir: PathBuf,
@@ -602,6 +615,27 @@ fn private_file(dir: &std::path::Path, name: &str, data: &[u8]) -> std::io::Resu
 	Ok(path)
 }
 
+/// The saved session and its address. `None` only when there really is none.
+fn saved_session(secrets: &dyn SecretStore) -> Result<Option<(String, String)>, SecretError> {
+	Ok(secrets.get(SESSION.into())?.and_then(|raw| serde_json::from_slice(&raw).ok()))
+}
+
+/// The key of `email`'s mail cache, made and stored on first use. `None` means this session keeps
+/// no cache on disk: a store that cannot answer, or holds something unusable, must not lose the
+/// key by having it replaced, and one that cannot save a new key would lose the cache next start.
+fn cache_key(secrets: &dyn SecretStore, email: &str) -> Option<[u8; 32]> {
+	let name = format!("cache-key:{email}");
+	match secrets.get(name.clone()) {
+		Ok(Some(key)) => return <[u8; 32]>::try_from(key.as_slice()).ok(),
+		Ok(None) => {},
+		Err(_) => return None,
+	}
+	let mut key = [0u8; 32];
+	std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut key)).ok()?;
+	secrets.put(name, key.to_vec()).ok()?;
+	Some(key)
+}
+
 impl App {
 	pub fn new(tx: UnboundedSender<Msg>, listener: Arc<dyn EngineListener>, secrets: Arc<dyn SecretStore>, runtime: tokio::runtime::Handle, cache_dir: PathBuf) -> App {
 		App {
@@ -647,6 +681,7 @@ impl App {
 			background_waiting: Vec::new(),
 			background_running: false,
 			resuming: false,
+			saved_session: None,
 			open_when_ready: None,
 			open_dir: cache_dir.join("tern").join("open"),
 			published: Published::default(),
@@ -753,37 +788,39 @@ impl App {
 				self.log(format!("could not clear opened files: {e}"));
 			}
 		}
-		let saved: Option<(String, String)> = self.secrets.get(SESSION.into()).and_then(|raw| serde_json::from_slice(&raw).ok());
-		let Some((email, session)) = saved else {
-			self.stack = vec![Screen::SignIn];
-			self.run_background();
-			return self.publish();
-		};
-		self.signin.email = email.clone();
-		let key = self.cache_key(&email);
-		let path = settings::cache_path(&email);
-		let (e, s) = (email.clone(), session.clone());
+		let secrets = self.secrets.clone();
 		self.task(async move {
-			let cache = key.and_then(|key| Cache::open(&path, &key).ok());
-			move |app: &mut App| {
-				let backend: Arc<dyn Backend> = Arc::new(NoServer { address: e.clone() });
-				app.enter(e, backend, cache.unwrap_or_else(Cache::in_memory), true, false);
-				app.resume(s);
+			// The platform may take its time over secrets, and the cache over its first read.
+			let found = tokio::task::spawn_blocking(move || {
+				let saved = saved_session(secrets.as_ref())?;
+				Ok::<_, SecretError>(saved.map(|(email, session)| {
+					let cache = cache_key(secrets.as_ref(), &email).and_then(|key| Cache::open(&settings::cache_path(&email), &key).ok());
+					(email, session, cache)
+				}))
+			})
+			.await
+			.unwrap_or(Err(SecretError::Unavailable));
+			move |app: &mut App| match found {
+				Ok(Some((email, session, cache))) => {
+					app.signin.email = email.clone();
+					app.saved_session = Some(session.clone());
+					let backend: Arc<dyn Backend> = Arc::new(NoServer { address: email.clone() });
+					app.enter(email, backend, cache.unwrap_or_else(Cache::in_memory), true, false);
+					app.resume(session);
+				},
+				Ok(None) => {
+					app.stack = vec![Screen::SignIn];
+					app.run_background();
+				},
+				// Still saved, as far as anyone knows: nothing is forgotten over this.
+				Err(_) => {
+					app.signin.error = Some("Could not read the saved sign-in. Try again, or sign in.".into());
+					app.stack = vec![Screen::SignIn];
+					app.run_background();
+				},
 			}
 		});
 		self.publish();
-	}
-
-	/// The key of `email`'s mail cache, made and stored on first use.
-	fn cache_key(&self, email: &str) -> Option<[u8; 32]> {
-		let name = format!("cache-key:{email}");
-		if let Some(key) = self.secrets.get(name.clone()).and_then(|k| <[u8; 32]>::try_from(k.as_slice()).ok()) {
-			return Some(key);
-		}
-		let mut key = [0u8; 32];
-		std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut key)).ok()?;
-		self.secrets.put(name, key.to_vec());
-		Some(key)
 	}
 
 	/// Asks the server to take the saved session back.
@@ -827,8 +864,7 @@ impl App {
 	/// Asks at once for what a saved session could not reach before.
 	fn resume_now(&mut self) {
 		if !self.resuming && self.session.as_ref().is_some_and(|s| !s.connected) {
-			let saved: Option<(String, String)> = self.secrets.get(SESSION.into()).and_then(|raw| serde_json::from_slice(&raw).ok());
-			if let Some((_, session)) = saved {
+			if let Some(session) = self.saved_session.clone() {
 				self.resume(session);
 			}
 		}
@@ -868,6 +904,7 @@ impl App {
 			last_round: Arc::default(),
 			contacts_done: Arc::default(),
 			demo,
+			sync: None,
 		});
 		self.stack = vec![Screen::Inbox];
 		self.signin.busy = false;
@@ -904,21 +941,29 @@ impl App {
 			return;
 		}
 		self.signin.busy = true;
+		let secrets = self.secrets.clone();
 		self.task(async move {
 			let result = tern_tuta::login(&email, &password).await;
+			let opened = match &result {
+				Ok((_, session)) => {
+					let (email, session) = (email.clone(), session.clone());
+					tokio::task::spawn_blocking(move || {
+						if let Ok(raw) = serde_json::to_vec(&(&email, &session)) {
+							// Not remembered is not fatal: the next start asks again.
+							let _ = secrets.put(SESSION.into(), raw);
+						}
+						cache_key(secrets.as_ref(), &email).and_then(|key| Cache::open(&settings::cache_path(&email), &key).ok())
+					})
+					.await
+					.unwrap_or(None)
+				},
+				Err(_) => None,
+			};
 			move |app: &mut App| match result {
 				Ok((backend, session)) => {
-					if let Ok(raw) = serde_json::to_vec(&(&email, &session)) {
-						app.secrets.put(SESSION.into(), raw);
-					}
-					let key = app.cache_key(&email);
-					let path = settings::cache_path(&email);
 					app.reset_account();
-					let e = email.clone();
-					app.task(async move {
-						let cache = key.and_then(|key| Cache::open(&path, &key).ok());
-						move |app: &mut App| app.enter(e, backend, cache.unwrap_or_else(Cache::in_memory), true, true)
-					});
+					app.saved_session = Some(session);
+					app.enter(email, backend, opened.unwrap_or_else(Cache::in_memory), true, true);
 				},
 				Err(e) => {
 					app.signin.busy = false;
@@ -959,6 +1004,7 @@ impl App {
 		self.cleanup_offer = None;
 		self.background_running = false;
 		self.resuming = false;
+		self.saved_session = None;
 		self.answer_background(BackgroundResult { notices: Vec::new(), summary: None, retry: false });
 	}
 
@@ -969,15 +1015,19 @@ impl App {
 		self.signin.email = email.clone();
 		self.reset_account();
 		self.stack = vec![Screen::SignIn];
-		self.secrets.remove(SESSION.into());
-		if persistent && forget {
-			self.secrets.remove(format!("cache-key:{email}"));
-			let path = settings::cache_path(&email);
-			for suffix in ["", "-wal", "-shm"] {
-				let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-			}
-		}
+		let secrets = self.secrets.clone();
 		self.runtime.spawn(async move {
+			let _ = tokio::task::spawn_blocking(move || {
+				secrets.remove(SESSION.into());
+				if persistent && forget {
+					secrets.remove(format!("cache-key:{email}"));
+					let path = settings::cache_path(&email);
+					for suffix in ["", "-wal", "-shm"] {
+						let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+					}
+				}
+			})
+			.await;
 			let _ = backend.sign_out().await;
 		});
 	}
@@ -1003,20 +1053,18 @@ impl App {
 	fn start_sync(&mut self) {
 		let Some(round) = self.round() else { return };
 		let Some(wake) = self.session.as_ref().map(|s| s.wake.clone()) else { return };
-		self.runtime.spawn(async move {
+		let task = self.runtime.spawn(async move {
 			loop {
-				if round.run().await.is_err() && round.tx.is_closed() {
-					return;
-				}
+				let _ = round.run().await;
 				tokio::select! {
 					_ = tokio::time::sleep(SYNC_EVERY) => {},
 					_ = wake.notified() => {},
 				}
-				if round.tx.is_closed() {
-					return;
-				}
 			}
 		});
+		if let Some(session) = self.session.as_mut() {
+			session.sync = Some(Stops(task.abort_handle()));
+		}
 	}
 
 	// ---- Background checks and what the system says about new mail
@@ -3106,5 +3154,89 @@ impl App {
 
 	pub fn generation(&self) -> u64 {
 		self.generation
+	}
+}
+
+#[cfg(test)]
+mod session_tests {
+	use super::*;
+
+	struct Nobody;
+	impl EngineListener for Nobody {
+		fn on_update(&self, _: Update) {}
+		fn on_effect(&self, _: Effect) {}
+	}
+
+	/// A store that can be told to fail, and remembers what it was asked to keep.
+	#[derive(Default)]
+	struct Store {
+		failing: std::sync::atomic::AtomicBool,
+		kept: Mutex<HashMap<String, Vec<u8>>>,
+	}
+	impl SecretStore for Store {
+		fn get(&self, name: String) -> Result<Option<Vec<u8>>, SecretError> {
+			if self.failing.load(std::sync::atomic::Ordering::Relaxed) {
+				return Err(SecretError::Unavailable);
+			}
+			Ok(self.kept.lock().unwrap().get(&name).cloned())
+		}
+		fn put(&self, name: String, value: Vec<u8>) -> Result<(), SecretError> {
+			if self.failing.load(std::sync::atomic::Ordering::Relaxed) {
+				return Err(SecretError::Unavailable);
+			}
+			self.kept.lock().unwrap().insert(name, value);
+			Ok(())
+		}
+		fn remove(&self, name: String) {
+			self.kept.lock().unwrap().remove(&name);
+		}
+	}
+
+	#[test]
+	fn the_cache_key_is_made_once_and_never_replaced_by_a_failure() {
+		let store = Store::default();
+		let key = cache_key(&store, "me@tuta.com").unwrap();
+		assert_eq!(cache_key(&store, "me@tuta.com"), Some(key), "kept, not made again");
+
+		store.failing.store(true, std::sync::atomic::Ordering::Relaxed);
+		assert_eq!(cache_key(&store, "me@tuta.com"), None, "no cache on disk this time");
+		store.failing.store(false, std::sync::atomic::Ordering::Relaxed);
+		assert_eq!(cache_key(&store, "me@tuta.com"), Some(key), "still the same key afterwards");
+	}
+
+	#[test]
+	fn a_cache_key_that_cannot_be_saved_or_read_is_not_used() {
+		let store = Store::default();
+		store.failing.store(true, std::sync::atomic::Ordering::Relaxed);
+		assert_eq!(cache_key(&store, "new@tuta.com"), None);
+		store.failing.store(false, std::sync::atomic::Ordering::Relaxed);
+
+		store.kept.lock().unwrap().insert("cache-key:bad@tuta.com".into(), vec![1, 2, 3]);
+		assert_eq!(cache_key(&store, "bad@tuta.com"), None);
+		assert_eq!(store.kept.lock().unwrap()["cache-key:bad@tuta.com"], [1, 2, 3], "left as it was");
+	}
+
+	#[test]
+	fn no_saved_session_differs_from_one_that_cannot_be_read() {
+		let store = Store::default();
+		assert_eq!(saved_session(&store).unwrap(), None);
+		store.failing.store(true, std::sync::atomic::Ordering::Relaxed);
+		assert!(saved_session(&store).is_err());
+	}
+
+	#[test]
+	fn signing_out_stops_the_sync() {
+		let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+		// Kept open: the loop must stop because the account went, not because the app did.
+		let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+		let mut app = App::new(tx, Arc::new(Nobody), Arc::new(Store::default()), runtime.handle().clone(), std::env::temp_dir());
+		app.sign_in("demo".into(), String::new());
+		let demo = Arc::downgrade(app.session.as_ref().unwrap().demo.as_ref().unwrap());
+		app.sign_out();
+		let start = std::time::Instant::now();
+		while demo.upgrade().is_some() {
+			assert!(start.elapsed() < Duration::from_secs(5), "something still holds the account signed out of");
+			std::thread::sleep(Duration::from_millis(10));
+		}
 	}
 }

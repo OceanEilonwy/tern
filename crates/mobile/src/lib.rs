@@ -21,9 +21,24 @@ pub use view::*;
 /// Secrets kept by the platform: the session, and the key of the encrypted mail cache.
 #[uniffi::export(with_foreign)]
 pub trait SecretStore: Send + Sync {
-	fn get(&self, name: String) -> Option<Vec<u8>>;
-	fn put(&self, name: String, value: Vec<u8>);
+	/// `None` only when there is no such secret. A store that cannot tell says so with an error:
+	/// taking that for "none" would have a new cache key replace the one the cache needs.
+	fn get(&self, name: String) -> Result<Option<Vec<u8>>, SecretError>;
+	fn put(&self, name: String, value: Vec<u8>) -> Result<(), SecretError>;
 	fn remove(&self, name: String);
+}
+
+/// The platform's store of secrets could not do what was asked, for now at least.
+#[derive(uniffi::Error, thiserror::Error, Debug)]
+pub enum SecretError {
+	#[error("the secret store is unavailable")]
+	Unavailable,
+}
+
+impl From<uniffi::UnexpectedUniFFICallbackError> for SecretError {
+	fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
+		SecretError::Unavailable
+	}
 }
 
 /// Where what is published goes.
