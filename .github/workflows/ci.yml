@@ -31,8 +31,8 @@ jobs:
       # The Tuta SDK brings its own UniFFI, so of that this can only look at what the core asks for itself.
       - name: The core stays free of any toolkit, and of the bridge by default
         run: |
-          ! cargo tree -p tern-app -e normal --prefix none --locked | grep -E '^(gtk4|libadwaita|glib) '
-          ! cargo tree -p tern-app -e normal --prefix none --locked --depth 1 | grep -E '^uniffi '
+          if cargo tree -p tern-app -e normal --prefix none --locked | grep -E '^(gtk4|libadwaita|glib) '; then exit 1; fi
+          if cargo tree -p tern-app -e normal --prefix none --locked --depth 1 | grep -E '^uniffi '; then exit 1; fi
       # GNOME's mutter, headless, drawn in software: the runner has no GPU.
       - name: Window scenes
         env:

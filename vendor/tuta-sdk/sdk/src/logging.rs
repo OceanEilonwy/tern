@@ -12,7 +12,8 @@ pub(crate) fn init_logger() {
 		// We need to use android_log so our logs show up in logcat, as standard output isn't so trivial to access.
 		#[cfg(target_os = "android")]
 		{
-			android_log::init("TutaSDK").expect("failed to load android_log logger");
+			// Tern: the app may already have the process's one logger, and its filter is what keeps mail out of logcat.
+			let _ = android_log::init("TutaSDK");
 			return;
 		}
 

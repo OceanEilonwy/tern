@@ -38,6 +38,12 @@ pub fn init(sink: impl Fn(String) + Send + Sync + 'static) {
 	let verbose = std::env::var_os("TERN_LOG").is_some();
 	if log::set_boxed_logger(Box::new(Logger { sink, verbose })).is_ok() {
 		log::set_max_level(if verbose { LevelFilter::Trace } else { LevelFilter::Warn });
+		// A panic is caught wherever it can be, so its message would go only to stderr, which Android loses.
+		let earlier = std::panic::take_hook();
+		std::panic::set_hook(Box::new(move |panic| {
+			log::error!("{panic}");
+			earlier(panic);
+		}));
 	}
 }
 
