@@ -12,6 +12,7 @@ mod default_app;
 mod format;
 mod grip;
 mod keyring;
+mod layout;
 mod login;
 mod mailbox;
 mod reader;

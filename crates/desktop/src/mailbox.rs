@@ -18,7 +18,7 @@ use tern_compose::{Answer, Fields};
 use crate::reader::Reader;
 use crate::activity::Word;
 use crate::search::{self, Searching};
-use crate::settings::Settings;
+use crate::layout::Layout;
 use crate::{cleanup, composer, format, grip, runtime, spam, window::Ctx};
 
 /// Conversations taken from the cache at a time.
@@ -463,7 +463,7 @@ impl Mailbox {
 	fn connect_grips(self: &Rc<Self>, folders: (&gtk::Box, &gtk::Overlay), list: (&gtk::Box, &gtk::Overlay)) {
 		let save = {
 			let ctx = self.ctx.clone();
-			move || ctx.set_layout(ctx.settings(), true)
+			move || ctx.set_layout(ctx.layout(), true)
 		};
 		let weak = Rc::downgrade(self);
 		let resize = move |w| {
@@ -487,7 +487,7 @@ impl Mailbox {
 		let weak = Rc::downgrade(self);
 		let double = move || {
 			if let Some(this) = weak.upgrade() {
-				this.ctx.set_layout(Settings { list_width: 0, ..this.ctx.settings() }, true);
+				this.ctx.set_layout(Layout { list_width: 0, ..this.ctx.layout() }, true);
 				this.apply_panes();
 			}
 		};
@@ -510,15 +510,15 @@ impl Mailbox {
 
 	/// The folder sidebar's edge is dragged to `w` pixels.
 	pub fn drag_folders(&self, w: i32) {
-		let (folders_width, folders_rail) = folders_drag(w, self.ctx.settings().folders_width);
-		self.ctx.set_layout(Settings { folders_width, folders_rail, ..self.ctx.settings() }, false);
+		let (folders_width, folders_rail) = folders_drag(w, self.ctx.layout().folders_width);
+		self.ctx.set_layout(Layout { folders_width, folders_rail, ..self.ctx.layout() }, false);
 		self.apply_panes();
 	}
 
 	/// The conversation list's edge is dragged to `w` pixels.
 	pub fn drag_list(&self, w: i32) {
 		let list_width = (w.max(0) as u32).clamp(LIST.0, LIST.1);
-		self.ctx.set_layout(Settings { list_width, ..self.ctx.settings() }, false);
+		self.ctx.set_layout(Layout { list_width, ..self.ctx.layout() }, false);
 		self.apply_panes();
 	}
 
@@ -533,14 +533,14 @@ impl Mailbox {
 			self.outer.set_show_sidebar(!self.outer.shows_sidebar());
 			return;
 		}
-		let s = self.ctx.settings();
-		self.ctx.set_layout(Settings { folders_rail: !s.folders_rail, ..s }, true);
+		let s = self.ctx.layout();
+		self.ctx.set_layout(Layout { folders_rail: !s.folders_rail, ..s }, true);
 		self.apply_panes();
 	}
 
 	/// Sizes the panes as last left. Up to a share of the window: a narrower window narrows them.
 	fn apply_panes(&self) {
-		let s = self.ctx.settings();
+		let s = self.ctx.layout();
 		let rail = self.is_rail();
 		self.outer.set_sidebar_width_unit(adw::LengthUnit::Px);
 		let (min, max, fraction) = match (rail, s.folders_width) {
@@ -611,7 +611,7 @@ impl Mailbox {
 
 	/// The folders show as a rail of icons: only beside the list, not over it on a narrow window.
 	pub fn is_rail(&self) -> bool {
-		self.ctx.settings().folders_rail && !self.outer.is_collapsed()
+		self.ctx.layout().folders_rail && !self.outer.is_collapsed()
 	}
 
 	fn connect_signals(self: &Rc<Self>, list_scroll: &gtk::ScrolledWindow) {
