@@ -53,11 +53,12 @@ impl EngineListener for Screen_ {
 struct Secrets(Mutex<HashMap<String, Vec<u8>>>);
 
 impl SecretStore for Secrets {
-	fn get(&self, name: String) -> Option<Vec<u8>> {
-		self.0.lock().unwrap().get(&name).cloned()
+	fn get(&self, name: String) -> Result<Option<Vec<u8>>, SecretError> {
+		Ok(self.0.lock().unwrap().get(&name).cloned())
 	}
-	fn put(&self, name: String, value: Vec<u8>) {
+	fn put(&self, name: String, value: Vec<u8>) -> Result<(), SecretError> {
 		self.0.lock().unwrap().insert(name, value);
+		Ok(())
 	}
 	fn remove(&self, name: String) {
 		self.0.lock().unwrap().remove(&name);
@@ -536,12 +537,12 @@ fn a_saved_account_opens_at_once_from_the_encrypted_cache_with_no_server() {
 	// The session is refused or out of reach: the mailbox still opens, on what is kept here.
 	let secrets: Arc<Secrets> = Arc::default();
 	let session = serde_json::to_vec(&("me@tuta.com", "not a session the server knows")).unwrap();
-	secrets.put("session".into(), session);
+	secrets.put("session".into(), session).unwrap();
 	let h = harness_with(secrets.clone());
 	h.until_screen(Screen::Inbox);
 	h.until("the address", |s| s.shell.as_ref().unwrap().address == "me@tuta.com");
 	// A key was made and kept for the cache, and the cache on disk opens only with it.
-	let key = secrets.get("cache-key:me@tuta.com".into()).expect("a cache key is kept");
+	let key = secrets.get("cache-key:me@tuta.com".into()).unwrap().expect("a cache key is kept");
 	assert_eq!(key.len(), 32);
 	let path = tern_engine::settings::cache_path("me@tuta.com");
 	h.until("the cache file", |_| path.exists());

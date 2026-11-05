@@ -3540,6 +3540,7 @@ dependencies = [
  "tern-core",
  "tern-engine",
  "tern-tuta",
+ "thiserror 2.0.18",
  "tokio",
  "uniffi",
 ]

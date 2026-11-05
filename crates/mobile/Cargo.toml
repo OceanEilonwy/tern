@@ -27,6 +27,7 @@ base64 = { workspace = true }
 libc = "0.2"
 async-trait = "0.1.77"
 uniffi = { workspace = true, features = ["cli"] }
+thiserror = "2.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

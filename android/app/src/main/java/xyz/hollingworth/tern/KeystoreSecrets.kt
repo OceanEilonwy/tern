@@ -10,6 +10,7 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import xyz.hollingworth.tern.core.SecretException
 import xyz.hollingworth.tern.core.SecretStore
 
 /**
@@ -35,22 +36,31 @@ class KeystoreSecrets(context: Context) : SecretStore {
 
     private fun file(name: String): File = dir.resolve(name.toByteArray().joinToString("") { "%02x".format(it) })
 
-    override fun get(name: String): ByteArray? = runCatching {
+    // Absent is null. A failure is an error, never null: Rust would take null for "no key yet" and
+    // replace the key the mail cache needs.
+    override fun get(name: String): ByteArray? {
         val raw = file(name).takeIf { it.exists() }?.readBytes() ?: return null
-        val cipher = Cipher.getInstance(TRANSFORM)
-        cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, raw, 0, IV_BYTES))
-        cipher.doFinal(raw, IV_BYTES, raw.size - IV_BYTES)
-    }.onFailure { Log.w("Tern", "could not read a secret: ${it.javaClass.simpleName}") }.getOrNull()
+        return failingAsUnavailable("read") {
+            val cipher = Cipher.getInstance(TRANSFORM)
+            cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, raw, 0, IV_BYTES))
+            cipher.doFinal(raw, IV_BYTES, raw.size - IV_BYTES)
+        }
+    }
 
     override fun put(name: String, value: ByteArray) {
-        runCatching {
+        failingAsUnavailable("save") {
             val cipher = Cipher.getInstance(TRANSFORM)
             cipher.init(Cipher.ENCRYPT_MODE, key())
             val target = file(name)
             val part = File(target.path + ".part")
             part.writeBytes(cipher.iv + cipher.doFinal(value))
-            part.renameTo(target)
-        }.onFailure { Log.w("Tern", "could not save a secret: ${it.javaClass.simpleName}") }
+            check(part.renameTo(target))
+        }
+    }
+
+    private fun <T> failingAsUnavailable(doing: String, work: () -> T): T = runCatching(work).getOrElse {
+        Log.w("Tern", "could not $doing a secret: ${it.javaClass.simpleName}")
+        throw SecretException.Unavailable()
     }
 
     override fun remove(name: String) {
