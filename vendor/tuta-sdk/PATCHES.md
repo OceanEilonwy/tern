@@ -11,6 +11,8 @@ tag, never to master. GPL-3.0.
   attachments), sending new or saved drafts (TutaCrypt/RSA for Tuta recipients, plain for others),
   loading the contact list, session delete. Ported from the TypeScript MailFacade, BlobFacade,
   BlobAccessTokenFacade, CryptoFacade, LoginFacade and ContactModel at the same tag.
+- `sdk/src/logging.rs`: on Android, not panicking when the process already has a logger: Tern's comes first,
+  and keeps the SDK out of logcat unless asked.
 - `sdk/src/lib.rs`: `LoggedInSdk` keeps the facades `tern.rs` needs (`TernParts`).
 - `sdk/src/folder_system.rs`: `FolderSystem::into_folders`.
 - `sdk/src/crypto/asymmetric_crypto_facade.rs`: `PubEncSymKey` fields readable in the crate.

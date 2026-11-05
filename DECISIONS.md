@@ -10,7 +10,7 @@ attachments must work, KISS, fast, Rust. These are the calls I made, in the orde
 - **Stack: GTK4 + libadwaita via gtk-rs, no WebKit, no relm4.** Mail HTML is parsed with html5ever into
   a small document model and drawn natively (one TextView; pictures and tables embedded). Remote images
   are never fetched. Mails too rich to show get an "Open in Tuta" button to app.tuta.com.
-- **Composer writes plain text.** It is turned into a simple HTML body (`tern_core::text_to_html`).
+- **Composer writes plain text.** It is turned into a simple HTML body (`tern_compose::text_to_html`).
   No rich-text toolbar: KISS, and it reads fine in every client.
 - **Folders only, no labels or "All mail".** Unread counts in the sidebar are 0 for Tuta for now
   (the counter service is not ported); the mail list still shows unread mails in bold.
@@ -250,7 +250,7 @@ Mail is now fetched in batches, and the keys and tokens a batch needs are loaded
   batches of 10, 25, 50, then 100: the first is small so the first bodies land soon and anything that
   ends up waiting on it waits little; the later ones are large because each batch costs about three
   requests whatever its size. Mails the cache has are left out.
-- **Fetcher** (`crates/app/src/fetcher.rs`, on the Tokio runtime): the one place bodies are fetched.
+- **Fetcher** (`crates/sync/src/fetcher.rs`, on the Tokio runtime): the one place bodies are fetched.
   Three requests at most at once: the background may use one, the list two, the reader all three, so a
   conversation being read always has a lane free and the list one besides the background. Most urgent first
   (Reading, Viewing, Background), oldest first within; a mail already queued less urgently moves to the
@@ -311,7 +311,7 @@ Mail is now fetched in batches, and the keys and tokens a batch needs are loaded
 - **One language for rules and Move to Spam**: a rule's line is the same thing the spam dialog's
   search box holds, so what the dialog lists is exactly what a kept rule will catch. `from:`
   (`sender:`), `to:`, `subject:` (`title:`), bare words (subject or sender), `and`, `or`, `not`/`-`,
-  brackets; `@domain` matches the domain and its subdomains. It lives in `tern-core::rules` and is
+  brackets; `@domain` matches the domain and its subdomains. It lives in `tern-rules` and is
   separate from the search syntax: search is ranked full-text over bodies too, rules are a yes/no
   test that must run on what the sync has before bodies are opened.
 - **Rules see what the list sees**: sender, the first recipient and the subject. Tuta's list entries
@@ -521,7 +521,7 @@ Built to the "Cache cleanup" boards on the design canvas.
 
 ## Tern for Android (2026-11-05)
 
-- **All behaviour is Rust.** `crates/mobile` owns the state, the navigation stack and what every action
+- **All behaviour is Rust.** `crates/app` owns the state, the navigation stack and what every action
   does, and publishes view records; Compose draws them and sends actions back. Wording, sorting, what Back
   does, and which screen is on top are all decided there, so the whole app is tested on the host
   against the demo account. Kotlin holds only what typing needs locally and the platform's own work.
@@ -529,11 +529,9 @@ Built to the "Cache cleanup" boards on the design canvas.
   runs in its own task and comes back as a closure over the state, dropped if the account has gone
   meanwhile. The UI thread never waits on Rust, and a view is sent only if it changed.
 - **UniFFI**, the version the vendored SDK already pins, with bindings written from the compiled library
-  at build time. `--crate tern_mobile` keeps the SDK's own UniFFI scaffolding out of them.
-- **`tern-engine`** is what moved out of the GTK app so both share it: writing mail, the HTML document,
-  the fetcher, rules, settings, search by meaning, Clean Up's work. The desktop's sync loop and its
-  dates are not moved yet, so those two exist twice for now: the desktop's dates come from GLib, the
-  engine's from chrono.
+  at build time. `--crate tern_app` keeps the SDK's own UniFFI scaffolding out of them.
+- **The desktop's dates still come from GLib**, and the core's from chrono, so those exist twice for now.
+  See "One core" below for what else the desktop has not moved over yet.
 - **Opens before it connects.** A saved account shows its encrypted cache at once with a stand-in backend
   that answers Offline; the session is resumed behind it and the real backend swapped in. So a cold start
   does not wait on the network, and Tern opens with no network at all.
@@ -590,3 +588,36 @@ Built to the "Cache cleanup" boards on the design canvas.
   for trying on a phone. They go in the one Release job with the Linux downloads, as both come from one tag
   here, and `latest-main` gets them too, unsigned until the secrets exist.
 - **32-bit libraries are excluded** from every APK, or a 32-bit phone would install one and crash.
+
+## One core (2026-11-05)
+
+- **`tern-app` is the one core.** It holds the state, navigation and what each action does, and publishes
+  views. Platforms draw them. Android already does this entirely. The desktop shares the sync, settings,
+  rules, writing mail and the mail document, but its own screens still hold their behaviour, so it
+  does not yet send actions to `Engine`. Moving them over is the rest of this work: settings and rules,
+  then search and Clean Up, then the composer, the reader and finally the mailbox.
+- **"Core" names nothing else.** `tern-mail` is only mail's types and the `Backend` trait. `tern-html`,
+  `tern-compose` and `tern-rules` are pure and do no I/O. `tern-demo` is a backend beside `tern-tuta`.
+  `tern-cache` only stores; `tern-sync` decides what to fetch and when in a round.
+- **One round, with events.** `tern_sync::round` does the steps and reports what it found as `Event`s, so
+  it knows nothing of what is on screen or which thread that runs on. When rounds run stays with the app.
+  A rate limit stops a round as an offline error does; failing rules are logged and tried again; a failure
+  opening mail ahead reaches the connection status.
+- **A connection status on the desktop**, because of that last point: Offline, Server busy or Signed out,
+  where the activity word goes, and only with nothing under way.
+- **Paths are handed down**, not read from the environment wherever needed. Android used to rewrite its own
+  `HOME` and `XDG_*` to steer the crates beneath it. Only `SSL_CERT_DIR` remains, set once before anything
+  reads it, as the TLS library has no other way in. The desktop's `paths()` and `meaning()` are process-wide
+  because its environment never changes; they go when the desktop runs on `Engine`.
+- **One log**, through the `log` crate. Tern's warnings only by default, so that the SDK cannot put anything
+  about mail in the system's log on Android; `TERN_LOG` asks for more. The SDK used to install its own Android
+  logger and panic if one was there, so it is patched not to. Only a real sign-in on a device goes that way:
+  `android/tools/drive.py fake_login` checks it. Panics go to the log too, or Android would lose them.
+- **The bridge is a feature, not a dependency.** `tern-ffi` is three lines that turn on `uniffi` in `tern-app`
+  and re-export its symbols, so there is one namespace and one Kotlin package, `com.tern.engine`. Mirroring
+  the views in `tern-ffi` would be about 600 lines of records and conversions to keep in step. `tern-tuta` still
+  brings UniFFI in through the SDK, so CI can only check that the core does not ask for it itself.
+- **A secret store's failure is an error, never "none".** `get` answers `Result<Option<_>>`, because taking a
+  failed decrypt for "no key yet" would replace the key the cache needs. Secrets are also read off the core's
+  task, as a keyring may wait on an unlock prompt. The desktop keeps its own `keyring.rs` until it runs on `Engine`;
+  its adapter must keep today's oo7 attributes so existing sign-ins survive.

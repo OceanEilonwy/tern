@@ -221,7 +221,16 @@ def notify():
 def fake_login():
     relaunch(clear=True)
     tap('Email address'); type_in('tern-android-test-nonexistent@tuta.com'); tap('Password'); type_in('wrong-password'); tap('Sign in')
-    time.sleep(6); shot('30-login'); print([t for t in texts() if t][:12])
+    for _ in range(40):
+        time.sleep(1)
+        if any('wrong' in t.lower() for t in texts()):
+            break
+    shot('30-login')
+    # Past the SDK and TLS: the server's own refusal, which neither the host's tests nor the demo can show.
+    seen = [t for t in texts() if t][:12]
+    print(seen)
+    if not any('Wrong email address or password' in t for t in seen):
+        raise SystemExit('a real sign-in did not reach the server and back')
 
 def perf():
     relaunch(clear=True)
