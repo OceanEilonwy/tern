@@ -38,7 +38,7 @@ pub async fn store(email: &str, session: &str) {
 	let _ = keyring.delete(&attrs(None)).await;
 	let label = format!("Tern session for {email}");
 	if let Err(e) = keyring.create_item(&label, &attrs(Some(email)), session, true).await {
-		eprintln!("tern: could not save the session: {e}");
+		log::warn!("could not save the session: {e}");
 	}
 }
 

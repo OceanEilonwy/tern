@@ -539,7 +539,6 @@ pub enum Effect {
 	OpenUrl { url: String },
 	/// The app is on screen, so what the system says about new mail has been seen.
 	ClearNotifications,
-	Log { message: String },
 }
 
 /// What the person did.

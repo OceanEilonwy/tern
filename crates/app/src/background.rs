@@ -13,7 +13,7 @@ use tern_core::{Error, FolderKind};
 
 use crate::activity::Word;
 use crate::mailbox::Mailbox;
-use crate::{cleanup, rules, runtime, semantic, window::Ctx};
+use crate::{cleanup, rules, runtime, window::Ctx};
 
 const INTERVAL: Duration = Duration::from_secs(5 * 60);
 
@@ -62,14 +62,14 @@ pub fn start(ctx: &Ctx, mailbox: Weak<Mailbox>) {
 							},
 							Ok(false) => {},
 							Err(e @ (Error::Offline | Error::SessionExpired)) => {
-								eprintln!("tern: sync stopped: {e}");
+								log::warn!("sync stopped: {e}");
 								break;
 							},
-							Err(e) => eprintln!("tern: could not sync {}: {e}", folder.name),
+							Err(e) => log::warn!("could not sync {}: {e}", folder.name),
 						}
 					}
 					// New mail in the Inbox through the rules, before it is opened ahead.
-					let (b, c, rules) = (backend.clone(), cache.clone(), rules::load());
+					let (b, c, rules) = (backend.clone(), cache.clone(), rules::load(crate::paths()));
 					match runtime::run(async move { rules::run_on_new(b.as_ref(), &c, &rules).await }).await {
 						Ok(0) => {},
 						Ok(_) => {
@@ -77,7 +77,7 @@ pub fn start(ctx: &Ctx, mailbox: Weak<Mailbox>) {
 								mb.cache_changed(None);
 							}
 						},
-						Err(e) => eprintln!("tern: could not run the rules: {e}"),
+						Err(e) => log::warn!("could not run the rules: {e}"),
 					}
 					if !contacts_done {
 						let (b, c) = (backend.clone(), cache.clone());
@@ -85,15 +85,15 @@ pub fn start(ctx: &Ctx, mailbox: Weak<Mailbox>) {
 					}
 					let f = fetcher.clone();
 					if let Err(e) = runtime::run(async move { f.ahead(level.bodies()).await }).await {
-						eprintln!("tern: could not open mail ahead: {e}");
+						log::warn!("could not open mail ahead: {e}");
 					}
 					if ctx.settings().semantic {
-						if let Err(e) = runtime::run(semantic::index(cache.clone())).await {
-							eprintln!("tern: could not index mail by meaning: {e}");
+						if let Err(e) = runtime::run(crate::meaning().clone().index(cache.clone())).await {
+							log::warn!("could not index mail by meaning: {e}");
 						}
 						// Turned off meanwhile: what was worked out goes too.
 						if !ctx.settings().semantic {
-							semantic::forget(Some(&cache));
+							crate::meaning().forget(Some(&cache));
 						}
 					}
 				},

@@ -307,7 +307,7 @@ impl Inner {
 			Err(e) => {
 				let first = !std::mem::replace(&mut self.state.lock().unwrap().fell_back, true);
 				if first {
-					tern_tuta::trace(&format!("opening {} mails at once failed ({e}); opening them one by one", batch.ids.len()));
+					log::debug!("opening {} mails at once failed ({e}); opening them one by one", batch.ids.len());
 				}
 				self.one_by_one(&batch, batch.ids.clone(), &mut outcome).await;
 			},
@@ -335,7 +335,7 @@ impl Inner {
 				},
 				Err(e) => {
 					if let Err(e) = self.cache.mark_unopenable(&id) {
-						eprintln!("tern: could not store a mail as unopenable: {e}");
+						log::warn!("could not store a mail as unopenable: {e}");
 					}
 					self.finish(&id, batch.priority, Err(e));
 				},
@@ -347,7 +347,7 @@ impl Inner {
 	fn finish(&self, id: &MailId, priority: Priority, result: Result<Mail>) {
 		if let Ok(mail) = &result {
 			if let Err(e) = self.cache.put_mail(mail) {
-				eprintln!("tern: could not store a mail: {e}");
+				log::warn!("could not store a mail: {e}");
 			}
 		}
 		let mut state = self.state.lock().unwrap();
@@ -376,12 +376,12 @@ impl Inner {
 		}
 		if let Some(seconds) = outcome.pause {
 			let wait = seconds.map_or(self.tuning.default_wait, Duration::from_secs).min(self.tuning.max_wait);
-			tern_tuta::trace(&format!("the server asks for fewer requests; waiting {} s", wait.as_secs()));
+			log::debug!("the server asks for fewer requests; waiting {} s", wait.as_secs());
 			let until = Instant::now() + wait;
 			state.paused_until = Some(state.paused_until.map_or(until, |u| u.max(until)));
 		}
 		if let Some(e) = outcome.halt {
-			tern_tuta::trace(&format!("fetching stopped: {e}"));
+			log::debug!("fetching stopped: {e}");
 			// Waiting cards show the error; the queue keeps its work for the next round.
 			let waiting: Vec<MailId> = state.waiters.keys().filter(|id| !state.in_flight.contains_key(*id)).cloned().collect();
 			for id in waiting {

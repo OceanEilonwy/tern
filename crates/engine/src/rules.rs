@@ -5,32 +5,28 @@
 //! has fetched it; mail already there is moved from the Move to Spam dialog instead. Of the rules
 //! that catch a mail, the first that moves it wins, and every label applies.
 
-use std::path::PathBuf;
-
 use tern_cache::Cache;
 use tern_core::rules::{parse, Action, Rule};
 use tern_core::{Backend, Folder, FolderId, FolderKind, Label, MailId, MailSummary};
 
+use crate::paths::Paths;
+
 /// How far new mail in the Inbox has been through the rules: the newest received time looked at.
 const MARK: &str = "rules";
 
-fn path() -> PathBuf {
-	crate::settings::dir().join("rules.toml")
-}
-
 /// The saved rules; none when there are none or the file does not read. A rule missing a part is
 /// left out; one whose line does not read is kept, to be fixed in Preferences, and catches nothing.
-pub fn load() -> Vec<Rule> {
-	std::fs::read_to_string(path()).map(|raw| from_toml(&raw)).unwrap_or_default()
+pub fn load(paths: &Paths) -> Vec<Rule> {
+	std::fs::read_to_string(paths.rules_file()).map(|raw| from_toml(&raw)).unwrap_or_default()
 }
 
-pub fn save(rules: &[Rule]) {
-	let path = path();
+pub fn save(paths: &Paths, rules: &[Rule]) {
+	let path = paths.rules_file();
 	if let Some(dir) = path.parent() {
 		let _ = std::fs::create_dir_all(dir);
 	}
 	if let Err(e) = std::fs::write(path, to_toml(rules)) {
-		eprintln!("tern: could not save rules: {e}");
+		log::warn!("could not save rules: {e}");
 	}
 }
 

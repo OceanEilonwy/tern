@@ -19,7 +19,7 @@ pub use tern_engine::cleanup::{offer, Pick, Usage};
 
 /// Free and total bytes of the disk the cache is on.
 fn disk() -> Option<(u64, u64)> {
-	let path = crate::window::cache_path("x");
+	let path = crate::paths().mail_cache("x");
 	let dir = path.ancestors().find(|p| p.exists())?;
 	let info = gio::File::for_path(dir).query_filesystem_info("filesystem::free,filesystem::size", gio::Cancellable::NONE).ok()?;
 	Some((info.attribute_uint64("filesystem::free"), info.attribute_uint64("filesystem::size")))
@@ -29,7 +29,7 @@ fn disk() -> Option<(u64, u64)> {
 pub async fn measure(ctx: &Ctx) -> Option<Usage> {
 	let cache = ctx.cache()?;
 	let (level, meaning) = (ctx.settings().offline, ctx.settings().semantic);
-	runtime::run(async move { tokio::task::spawn_blocking(move || tern_engine::cleanup::measure(&cache, level, meaning)).await.ok() }).await
+	runtime::run(async move { tokio::task::spawn_blocking(move || tern_engine::cleanup::measure(&cache, level, meaning, crate::meaning())).await.ok() }).await
 }
 
 /// Measures and shows or takes back the sidebar's offer to clean up.
@@ -52,7 +52,7 @@ enum Part {
 async fn clean(ctx: &Ctx, pick: Pick) -> u64 {
 	let Some(cache) = ctx.cache() else { return 0 };
 	let level = ctx.settings().offline;
-	let freed = runtime::run(async move { tokio::task::spawn_blocking(move || tern_engine::cleanup::clean(&cache, level, pick)).await.unwrap_or(0) }).await;
+	let freed = runtime::run(async move { tokio::task::spawn_blocking(move || tern_engine::cleanup::clean(&cache, level, pick, crate::meaning())).await.unwrap_or(0) }).await;
 	use FolderKind::*;
 	ctx.changed(&[Inbox, Drafts, Sent, Archive, Spam, Trash, Custom]);
 	ctx.sync_now();

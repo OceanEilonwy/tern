@@ -8,6 +8,8 @@ pub mod compose_model;
 pub mod fetcher;
 pub mod format;
 pub mod html_doc;
+pub mod logs;
+pub mod paths;
 pub mod rules;
 pub mod semantic;
 pub mod settings;

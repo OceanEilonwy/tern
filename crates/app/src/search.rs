@@ -43,7 +43,7 @@ pub fn widgets() -> (gtk::ToggleButton, gtk::SearchBar, gtk::SearchEntry) {
 pub async fn find_rule(cache: Arc<Cache>, rule: tern_core::rules::Expr) -> (Vec<ThreadRow>, HashMap<String, FolderId>) {
 	let hits = runtime::run(async move {
 		cache.rule_hits(&rule, RESULTS).unwrap_or_else(|e| {
-			eprintln!("tern: rule search failed: {e}");
+			log::warn!("rule search failed: {e}");
 			Vec::new()
 		})
 	})
@@ -54,11 +54,11 @@ pub async fn find_rule(cache: Arc<Cache>, rule: tern_core::rules::Expr) -> (Vec<
 
 /// Runs `query` on the cache off the UI thread; by meaning too when `semantic` is on and the model is loaded.
 pub async fn find(cache: Arc<Cache>, query: Query, semantic: bool) -> (Vec<ThreadRow>, HashMap<String, FolderId>) {
-	let model = if semantic { semantic::loaded() } else { None };
+	let model = if semantic { crate::meaning().loaded() } else { None };
 	let hits: Vec<SearchHit> = runtime::run(async move {
 		let vector = model.map(|m| m.embed(&query.text()));
 		cache.search(&query, vector.as_deref().map(|v| (semantic::NAME, v)), RESULTS).unwrap_or_else(|e| {
-			eprintln!("tern: search failed: {e}");
+			log::warn!("search failed: {e}");
 			Vec::new()
 		})
 	})

@@ -1,8 +1,8 @@
 //! Tern's few settings, in `~/.config/tern/settings.toml`.
 
-use std::path::PathBuf;
-
 use tern_cache::sync::Level;
+
+use crate::paths::Paths;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -43,35 +43,17 @@ impl Default for Settings {
 	}
 }
 
-pub fn dir() -> PathBuf {
-	let base = std::env::var_os("XDG_CONFIG_HOME")
-		.map(PathBuf::from)
-		.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-		.unwrap_or_else(std::env::temp_dir);
-	base.join("tern")
-}
-
-/// Where an account's mail cache lives.
-pub fn cache_path(email: &str) -> PathBuf {
-	let base = std::env::var_os("XDG_CACHE_HOME")
-		.map(PathBuf::from)
-		.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-		.unwrap_or_else(std::env::temp_dir);
-	let name: String = email.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '@' { c } else { '_' }).collect();
-	base.join("tern").join("mail").join(format!("{name}.db"))
-}
-
 impl Settings {
 	/// The saved settings, or the defaults when there are none or they do not read.
-	pub fn load() -> Settings {
-		if let Ok(raw) = std::fs::read_to_string(dir().join("settings.toml")) {
+	pub fn load(paths: &Paths) -> Settings {
+		if let Ok(raw) = std::fs::read_to_string(paths.settings_file()) {
 			return Self::parse(&raw);
 		}
 		// Settings were JSON before; move them over once.
-		let old = dir().join("settings.json");
+		let old = paths.config_dir().join("settings.json");
 		let Ok(raw) = std::fs::read(&old) else { return Settings::default() };
 		let settings = Self::from_json(&raw);
-		settings.save();
+		settings.save(paths);
 		let _ = std::fs::remove_file(old);
 		settings
 	}
@@ -129,11 +111,10 @@ impl Settings {
 		)
 	}
 
-	pub fn save(self) {
-		let dir = dir();
-		let _ = std::fs::create_dir_all(&dir);
-		if let Err(e) = std::fs::write(dir.join("settings.toml"), self.to_toml()) {
-			eprintln!("tern: could not save settings: {e}");
+	pub fn save(self, paths: &Paths) {
+		let _ = std::fs::create_dir_all(paths.config_dir());
+		if let Err(e) = std::fs::write(paths.settings_file(), self.to_toml()) {
+			log::warn!("could not save settings: {e}");
 		}
 	}
 }
