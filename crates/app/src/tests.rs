@@ -39,7 +39,7 @@ impl EngineListener for Screen_ {
 			Update::List { view } => seen.list = Some(view),
 			Update::Conversation { view } => seen.conversation = view,
 			Update::Composer { view } => seen.composer = view,
-			Update::Composers { views } => seen.composers = views,
+			Update::Composers { view } => seen.composers = view.open,
 			Update::Search { view } => seen.search = Some(view),
 			Update::Settings { view } => seen.settings = Some(view),
 			Update::Rules { view } => seen.rules = Some(view),

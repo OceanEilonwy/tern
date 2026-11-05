@@ -373,7 +373,7 @@ impl Window {
 				},
 				Update::Settings { view } => self.ctx.show_settings(view),
 				Update::Sheet { view } => self.ctx.show_sheet(view),
-				Update::Composers { views } => self.ctx.show_composers(views),
+				Update::Composers { view } => self.ctx.show_composers(view.open),
 				Update::List { view } => self.mailbox.show_list(view),
 				Update::Search { view } => self.mailbox.show_search(view),
 				Update::Conversation { view } => self.mailbox.reader.show(view.as_ref()),

@@ -344,6 +344,14 @@ pub struct ComposerView {
 	pub suggestions: Vec<SuggestionView>,
 }
 
+/// All the composers, for a platform that shows several at once. A record of its own because the
+/// Kotlin bindings read a list inside `Update` as `Update.List`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ComposersView {
+	pub open: Vec<ComposerView>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SearchView {
@@ -533,8 +541,7 @@ pub enum Update {
 	List { view: ListView },
 	Conversation { view: Option<ConversationView> },
 	Composer { view: Option<ComposerView> },
-	/// All of them, for a platform that shows several at once.
-	Composers { views: Vec<ComposerView> },
+	Composers { view: ComposersView },
 	Search { view: SearchView },
 	Settings { view: SettingsView },
 	Rules { view: RulesView },
