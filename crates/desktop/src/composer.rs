@@ -288,7 +288,7 @@ impl Component for Writing {
 						connect_clicked => Input::Send,
 						#[wrap(Some)]
 						set_child = &gtk::Stack {
-							#[watch]
+							#[watch(skip_init)]
 							set_visible_child_name: if model.view.sending { "sending" } else { "send" },
 							add_named[Some("send")] = &gtk::Label {
 								set_label: "Send",

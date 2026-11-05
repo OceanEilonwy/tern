@@ -634,3 +634,22 @@ Built to the "Cache cleanup" boards on the design canvas.
 - **A secret store's failure is an error, never "none".** `get` answers `Result<Option<_>>`, because taking a
   failed decrypt for "no key yet" would replace the key the cache needs. Secrets are also read off the core's
   task, as a keyring may wait on an unlock prompt. The desktop's store keeps its oo7 attributes, so existing sign-ins survive.
+
+## The desktop on Relm4 (2026-11-05)
+
+- **Every screen is a Relm4 component, driven by the core.** `bridge.rs` is the adapter: the core's
+  listener puts each update and effect on the main window's Relm4 channel, and the window hands it to
+  the screen it is about. A screen's model is the core's latest view; `#[watch]` draws it.
+- **Buttons send the core's actions directly.** Inputs exist only for what has to come back to the
+  model, so there is no second list of messages to keep in step with `Action`.
+- **Text fields are set only when the core's `revision` changes**, as before, so nothing being typed
+  is overwritten.
+- **Some things stay by hand, on purpose.** A mail's body is drawn into its text view by `render`. The
+  conversation list stays a GTK list view with its rows changed in place, which is what keeps the
+  keyboard focus and the scroll. A rule's preview, and the Activity word shared by several windows,
+  are also plain GTK.
+- **Inputs arrive a moment later than a signal does.** Where that would matter, the list's selection
+  and the flags saying "this is the core, not the person", the signal handler acts at once rather than
+  sending an input.
+- **A late `sender.input` panics once a component has gone.** Anything that can outlive its component,
+  such as a file being read or a style notification, uses `sender.input_sender().emit`, which does not.
