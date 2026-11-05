@@ -5,3 +5,4 @@ app/build/
 app/src/main/jniLibs/
 *.keystore
 *.jks
+__pycache__/
