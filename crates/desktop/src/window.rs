@@ -12,6 +12,7 @@ use tern_mail::{Backend, Error, FolderKind};
 use tern_sync::Level;
 
 use crate::activity::Activity;
+use crate::layout::Layout;
 use tern_compose::Fields;
 use crate::composer::Composer;
 use tern_sync::fetcher::{Fetcher, Tuning};
@@ -31,6 +32,7 @@ pub struct Ctx {
 	cache: Rc<RefCell<Option<Arc<Cache>>>>,
 	fetcher: Rc<RefCell<Option<Fetcher>>>,
 	settings: Rc<Cell<Settings>>,
+	layout: Rc<Cell<Layout>>,
 	/// Wakes the background sync.
 	wake: Arc<tokio::sync::Notify>,
 	/// The round of the sync under way, which ends when this does.
@@ -68,11 +70,15 @@ impl Ctx {
 		self.sync_now();
 	}
 
+	pub fn layout(&self) -> Layout {
+		self.layout.get()
+	}
+
 	/// Changes how the window is laid out; `save` once the change is done, not on every step of a drag.
-	pub fn set_layout(&self, settings: Settings, save: bool) {
-		self.settings.set(settings);
+	pub fn set_layout(&self, layout: Layout, save: bool) {
+		self.layout.set(layout);
 		if save {
-			settings.save(crate::paths());
+			layout.save(crate::paths().config_dir());
 		}
 	}
 
@@ -160,6 +166,8 @@ impl Window {
 			backend: Rc::default(),
 			cache: Rc::default(),
 			fetcher: Rc::default(),
+			// The layout first: it may still be in the settings' file, which saving them rewrites.
+			layout: Rc::new(Cell::new(Layout::load(crate::paths().config_dir()))),
 			settings: Rc::new(Cell::new(Settings::load(crate::paths()))),
 			wake: Arc::default(),
 			sync: Rc::default(),

@@ -423,8 +423,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			// Dragged narrow, it snaps to the rail; the shot shows it.
 			mailbox.drag_folders(90);
 			wait_for(|| mailbox.is_rail()).await;
-			if !mailbox.is_rail() || win.ctx.settings().folders_width != 300 {
-				return Err(format!("dragged narrow: rail {}, width kept {}", mailbox.is_rail(), win.ctx.settings().folders_width));
+			if !mailbox.is_rail() || win.ctx.layout().folders_width != 300 {
+				return Err(format!("dragged narrow: rail {}, width kept {}", mailbox.is_rail(), win.ctx.layout().folders_width));
 			}
 			Ok(())
 		}
