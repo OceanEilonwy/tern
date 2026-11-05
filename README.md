@@ -12,8 +12,9 @@
 <h1 align="center">Tern</h1>
 
 <p align="center">
-  <strong>A small, fast GNOME mail client for Tuta.</strong><br>
-  Native GTK 4 and libadwaita, written in Rust. Unofficial; not affiliated with Tuta GmbH.
+  <strong>A small, fast mail client for Tuta, on the Linux desktop and Android.</strong><br>
+  One Rust core, drawn natively: GTK 4 and libadwaita on the desktop, Material 3 on Android.<br>
+  Unofficial; not affiliated with Tuta GmbH.
 </p>
 
 <p align="center">
@@ -24,19 +25,20 @@
 </p>
 
 <p align="center">
-  <a href="#install"><b>Install</b></a> ·
+  <a href="#linux-desktop"><b>Linux desktop</b></a> ·
+  <a href="#android"><b>Android</b></a> ·
   <a href="https://github.com/OceanEilonwy/tern/releases/tag/latest-main"><b>Downloads</b></a> ·
   <a href="#build-from-source"><b>Build from source</b></a>
 </p>
 
 ## Why Tern
 
-- **Fast.** Recent mail is kept on your computer in an encrypted database, so folders open at once and work offline.
-- **Private.** No web view: mail is drawn natively, remote images never load, and the cache key lives in your keyring.
-- **Conversations.** Mail is grouped by subject across folders, with pins, read and unread, and spam from a right-click.
-- **Search and rules.** Search everything on this computer, optionally by meaning. Rules sort new mail into folders, labels or Spam.
+- **Fast.** Recent mail is kept on your device in an encrypted database, so folders open at once and work offline.
+- **Private.** No web view: mail is drawn natively, remote images never load, and the cache key lives in your keyring or the Android Keystore.
+- **Conversations.** Mail is grouped by subject across folders, with pins, labels, read and unread, and moving to spam.
+- **Search and rules.** Search everything on your device, optionally by meaning. Rules sort new mail into folders, labels or Spam.
 - **Several addresses.** Send from any alias; a reply starts from the address the mail came to.
-- **Keyboard first.** Every action has a shortcut; press Ctrl+? to see them.
+- **Keyboard first on the desktop.** Every action has a shortcut; press Ctrl+? to see them.
 
 <table>
   <tr>
@@ -52,6 +54,8 @@
 </table>
 
 ## Install
+
+### Linux desktop
 
 Download from [the latest build](https://github.com/OceanEilonwy/tern/releases/tag/latest-main):
 
@@ -71,8 +75,11 @@ Tern as the mail app in your system's Default Applications settings instead.
 
 ### Android
 
-Tern for Android 17 and newer is in [`android/`](android/README.md): the same Rust underneath, drawn with
-Material 3 on true black. It is not published yet; build it from source for now.
+Tern runs on Android 17 and newer, with the same Rust core drawn with Material 3 on true black. It has no
+store listing yet. [The latest build](https://github.com/OceanEilonwy/tern/releases/tag/latest-main) has an
+APK for each kind of phone (`arm64-v8a` for almost all of them), but these are unsigned, and Android will
+not install them until they are signed. For now, [build it from source](android/README.md) or sign the APK
+with your own key.
 
 ## Build from source
 
@@ -97,7 +104,7 @@ make test         # unit tests, plus the window checks on a headless display (mo
 
 Not supported yet: two-factor sign-in, and password-protected mail to people outside Tuta.
 
-`crates/desktop` is the GTK app, `android/` the Compose app, and `crates/app` the core they share.
+`crates/desktop` is the GTK app, built with Relm4, `android/` the Compose app, and `crates/app` the core they share.
 Beneath it, `crates/sync` keeps `crates/cache`, the encrypted cache, up to date from `crates/tuta`, the
 Tuta account. `crates/mail`, `rules`, `html`, `compose` and `demo` are the smaller pieces, and
 `vendor/tuta-sdk` is Tuta's own Rust SDK with Tern's additions (see `PATCHES.md`).
