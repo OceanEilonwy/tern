@@ -218,7 +218,7 @@ impl Ctx {
 			match known {
 				Some(composer) => composer.show(view),
 				None => {
-					let composer = Composer::open(self, view);
+					let composer = Rc::new(Composer::open(self, view));
 					self.composers.borrow_mut().insert(view.id, composer);
 				},
 			}
