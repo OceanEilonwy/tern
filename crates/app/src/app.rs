@@ -3147,7 +3147,7 @@ impl App {
 	fn search_view(&self) -> SearchView {
 		let now = format::now_ms();
 		let Some(search) = self.search.as_ref() else {
-			return SearchView { revision: 0, query: String::new(), searching: false, title: "Search".into(), note: String::new(), empty: false, empty_title: String::new(), empty_detail: String::new(), rows: Vec::new() };
+			return SearchView { revision: 0, query: String::new(), browsing: false, searching: false, title: "Search".into(), note: String::new(), empty: false, empty_title: String::new(), empty_detail: String::new(), rows: Vec::new() };
 		};
 		let rows: Vec<RowView> = search
 			.rows
@@ -3167,10 +3167,11 @@ impl App {
 				(None, Some(_)) => "Mail the rule catches".into(),
 				(None, None) => "Search".into(),
 			},
-			note: format!("Searching the mail kept on this {}", self.device),
+			browsing: search.label.is_some(),
+			note: if search.label.is_some() { format!("The mail with this label kept on this {}", self.device) } else { format!("Searching the mail kept on this {}", self.device) },
 			empty: (asked || search.label.is_some()) && !search.searching && rows.is_empty(),
 			empty_title: if search.label.is_some() { "No mail with this label".into() } else { "No matches".into() },
-			empty_detail: format!("{} in mail on this {}", if search.label.is_some() { "None" } else { "No matches" }, self.device),
+			empty_detail: format!("{} on this {}", if search.label.is_some() { "No mail with this label" } else { "No matches in the mail" }, self.device),
 			rows,
 		}
 	}

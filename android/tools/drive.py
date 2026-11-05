@@ -243,6 +243,21 @@ def fake_login():
     if not any('Wrong email address or password' in t for t in seen):
         raise SystemExit('a real sign-in did not reach the server and back')
 
+def labels():
+    """Puts a label on a conversation, then browses it from the drawer."""
+    relaunch(clear=True)
+    tap('Email address'); type_in('demo'); tap('Sign in'); wait('Photos from Saturday'); time.sleep(2)
+    tap('Accounts', long=True); wait('1 selected')
+    tap('Labels'); wait('New label'); tap('Travel'); time.sleep(0.8); back(); time.sleep(0.5); back(); wait('Open folders')
+    tap('Open folders'); wait('Check for new mail'); shot('60-drawer')
+    tap('Travel'); wait('The mail with this label', exact=False); wait('Your invoice for October'); shot('61-label')
+    seen = texts()
+    if 'Photos from Saturday' in seen or 'Search mail' in seen or 'Travel' not in seen:
+        raise SystemExit(f'browsing a label shows {seen[:10]}')
+    tap('Your invoice for October'); wait('Reply'); shot('62-opened')
+    back(); wait('Your invoice for October'); back(); wait('Photos from Saturday')
+    print('crashes:', crashes())
+
 def perf():
     relaunch(clear=True)
     tap('Email address'); type_in('demo'); tap('Sign in'); wait('Photos from Saturday'); time.sleep(1)

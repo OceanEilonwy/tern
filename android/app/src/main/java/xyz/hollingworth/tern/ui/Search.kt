@@ -52,7 +52,7 @@ fun SearchScreen() {
     val colors = MaterialTheme.colorScheme
     var field by remember(view.revision) { mutableStateOf(TextFieldValue(view.query, TextRange(view.query.length))) }
     val focus = remember { FocusRequester() }
-    LaunchedEffect(view.revision) { runCatching { focus.requestFocus() } }
+    LaunchedEffect(view.revision) { if (!view.browsing) runCatching { focus.requestFocus() } }
     fun change(value: TextFieldValue) {
         val changed = value.text != field.text
         field = value
@@ -63,8 +63,10 @@ fun SearchScreen() {
             Modifier.statusBarsPadding().padding(start = 12.dp, end = 12.dp, top = 8.dp).fillMaxWidth().height(56.dp).background(colors.surfaceContainer, RoundedCornerShape(28.dp)).padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconAction(Icons.Back, "Close search") { Store.send(Action.Back) }
-            Box(Modifier.weight(1f)) {
+            IconAction(Icons.Back, if (view.browsing) "Back" else "Close search") { Store.send(Action.Back) }
+            if (view.browsing) {
+                Text(view.title, Modifier.weight(1f), colors.onSurface, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+            } else Box(Modifier.weight(1f)) {
                 if (field.text.isEmpty()) Text("Search mail", color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyLarge)
                 BasicTextField(
                     field,
@@ -75,9 +77,9 @@ fun SearchScreen() {
                     cursorBrush = SolidColor(colors.primary),
                 )
             }
-            if (field.text.isNotEmpty()) IconAction(Icons.Close, "Clear") { change(TextFieldValue("")) }
+            if (!view.browsing && field.text.isNotEmpty()) IconAction(Icons.Close, "Clear") { change(TextFieldValue("")) }
         }
-        Row(Modifier.padding(horizontal = 12.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (!view.browsing) Row(Modifier.padding(horizontal = 12.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TERMS.forEach { (term, tone) ->
                 Box(
                     Modifier.height(48.dp).clickable {
@@ -98,7 +100,7 @@ fun SearchScreen() {
         Text(view.note, Modifier.padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 8.dp), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
         if (view.empty) {
             Box(Modifier.fillMaxWidth().padding(top = 64.dp), contentAlignment = Alignment.Center) {
-                Text("No matches in the mail on this phone", color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyLarge)
+                Text(view.emptyDetail, color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyLarge)
             }
         }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {

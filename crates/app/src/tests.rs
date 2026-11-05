@@ -889,7 +889,7 @@ fn labels_go_on_a_row_and_its_conversation_and_can_be_browsed_across_folders() {
 	h.until("on the conversation", |s| s.conversation.as_ref().is_some_and(|c| c.labels.iter().any(|l| l == "Travel")));
 
 	h.send(Action::OpenLabel { id: label.id.clone() });
-	h.until("only what carries it", |s| s.search.as_ref().is_some_and(|v| v.title == "Travel" && v.rows.len() == 1 && v.rows[0].key == row.key));
+	h.until("only what carries it", |s| s.search.as_ref().is_some_and(|v| v.browsing && v.title == "Travel" && v.rows.len() == 1 && v.rows[0].key == row.key));
 	h.until("the label marked on show", |s| s.list.as_ref().unwrap().labels.iter().any(|l| l.id == label.id && l.selected) && s.list.as_ref().unwrap().folders.iter().all(|f| !f.selected));
 
 	// Taking it off empties the list it is on.
