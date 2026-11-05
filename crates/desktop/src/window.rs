@@ -23,7 +23,7 @@ use crate::layout::Layout;
 use crate::cleanup::Cleanup;
 use crate::preferences::Preferences;
 use crate::rule_editor::Rules;
-use crate::{attachments, cleanup, labels, login::{self, Login}, mailbox::Mailbox, rule_editor, runtime, screenshot, spam};
+use crate::{attachments, cleanup, labels, reader, login::{self, Login}, mailbox::Mailbox, rule_editor, runtime, screenshot, spam};
 
 type OfferHook = Box<dyn Fn(Option<&str>)>;
 /// The composer last asked to throw its mail away, and the dialog asking.
@@ -405,7 +405,7 @@ impl Window {
 				Update::Composers { view } => self.ctx.show_composers(view.open),
 				Update::List { view } => self.mailbox.show_list(view),
 				Update::Search { view } => self.mailbox.show_search(view),
-				Update::Conversation { view } => self.mailbox.reader.show(view.as_ref()),
+				Update::Conversation { view } => self.mailbox.reader.emit(reader::Input::Show(view.map(Box::new))),
 				Update::Rules { view } => self.ctx.show_rules(view),
 				Update::RuleEditor { view } => self.ctx.show_rule_editor(view),
 				_ => {},
