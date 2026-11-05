@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use tern_app::view::{Action, LabelChoice};
+use tern_app::Engine;
 
 use crate::window::Ctx;
 
@@ -19,42 +20,76 @@ pub struct Picker {
 	ctx: Ctx,
 }
 
+/// Asks the core for a label named what is in `entry`, if anything is.
+fn create(engine: &Engine, entry: &gtk::Entry) {
+	let name = entry.text().trim().to_string();
+	if !name.is_empty() {
+		engine.send(Action::CreateLabel { name });
+		entry.set_text("");
+	}
+}
+
 /// Opens the dialog; [`Picker::show`] then fills it in.
 pub fn open(ctx: &Ctx) -> Rc<Picker> {
-	let subject = gtk::Label::builder().xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["dim-label"]).build();
-	let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).valign(gtk::Align::Start).build();
-	list.update_property(&[gtk::accessible::Property::Label("Labels")]);
-	let scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&list).vexpand(true).min_content_height(120).build();
-	let new_name = gtk::Entry::builder().placeholder_text("New label").hexpand(true).build();
-	new_name.update_property(&[gtk::accessible::Property::Label("New label")]);
-	let add = gtk::Button::builder().label("_Add").use_underline(true).sensitive(false).build();
-	let adding = gtk::Box::builder().spacing(6).build();
-	adding.append(&new_name);
-	adding.append(&add);
-	let column = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_top(6).margin_bottom(18).margin_start(18).margin_end(18).build();
-	column.append(&subject);
-	column.append(&scroll);
-	column.append(&adding);
-	let view = adw::ToolbarView::new();
-	view.add_top_bar(&adw::HeaderBar::new());
-	view.set_content(Some(&column));
-	let dialog = adw::Dialog::builder().title("Labels").content_width(420).content_height(460).child(&view).build();
+	relm4_macros::view! {
+		dialog = adw::Dialog {
+			set_title: "Labels",
+			set_content_width: 420,
+			set_content_height: 460,
+			#[wrap(Some)]
+			set_child = &adw::ToolbarView {
+				add_top_bar = &adw::HeaderBar {},
+				#[wrap(Some)]
+				set_content = &gtk::Box {
+					set_orientation: gtk::Orientation::Vertical,
+					set_spacing: 12,
+					set_margin_top: 6,
+					set_margin_bottom: 18,
+					set_margin_start: 18,
+					set_margin_end: 18,
 
-	let b = add.clone();
-	new_name.connect_changed(move |e| b.set_sensitive(!e.text().trim().is_empty()));
-	let (engine, entry) = (ctx.engine.clone(), new_name.clone());
-	let create = move || {
-		let name = entry.text().trim().to_string();
-		if !name.is_empty() {
-			engine.send(Action::CreateLabel { name });
-			entry.set_text("");
+					#[name = "subject"]
+					append = &gtk::Label {
+						set_xalign: 0.0,
+						set_ellipsize: gtk::pango::EllipsizeMode::End,
+						add_css_class: "dim-label",
+					},
+					append = &gtk::ScrolledWindow {
+						set_hscrollbar_policy: gtk::PolicyType::Never,
+						set_vexpand: true,
+						set_min_content_height: 120,
+						#[wrap(Some)]
+						#[name = "list"]
+						set_child = &gtk::ListBox {
+							set_selection_mode: gtk::SelectionMode::None,
+							add_css_class: "boxed-list",
+							set_valign: gtk::Align::Start,
+							update_property: &[gtk::accessible::Property::Label("Labels")],
+						},
+					},
+					append = &gtk::Box {
+						set_spacing: 6,
+						#[name = "new_name"]
+						append = &gtk::Entry {
+							set_placeholder_text: Some("New label"),
+							set_hexpand: true,
+							update_property: &[gtk::accessible::Property::Label("New label")],
+							connect_changed[add] => move |entry| add.set_sensitive(!entry.text().trim().is_empty()),
+							connect_activate[engine = ctx.engine.clone()] => move |entry| create(&engine, entry),
+						},
+						#[name = "add"]
+						append = &gtk::Button {
+							set_label: "_Add",
+							set_use_underline: true,
+							set_sensitive: false,
+							connect_clicked[engine = ctx.engine.clone(), new_name] => move |_| create(&engine, &new_name),
+						},
+					},
+				},
+			},
+			connect_closed[engine = ctx.engine.clone()] => move |_| engine.send(Action::CloseSheet),
 		}
-	};
-	let c = create.clone();
-	add.connect_clicked(move |_| c());
-	new_name.connect_activate(move |_| create());
-	let engine = ctx.engine.clone();
-	dialog.connect_closed(move |_| engine.send(Action::CloseSheet));
+	}
 	dialog.present(Some(&ctx.window));
 	Rc::new(Picker { dialog, subject, list, new_name, shown: RefCell::default(), filling: Rc::default(), ctx: ctx.clone() })
 }
