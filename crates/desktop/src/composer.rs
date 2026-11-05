@@ -1,381 +1,758 @@
 //! A window for writing one mail. What happens to it is the core's: this draws one composer of those
 //! it publishes, and sends back what is written.
 
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use relm4::factory::FactoryVecDeque;
+use relm4::prelude::*;
+use relm4::RelmWidgetExt;
 use tern_app::view::{Action, AddressField, ComposeText, ComposerAttachment, ComposerView};
+use tern_app::Engine;
 use tern_compose::mime_for;
 
 use crate::activity::Word;
-use crate::suggest::Suggest;
+use crate::suggest::{self, Suggest};
 use crate::{attachments::icon_for, runtime, window::Ctx};
 
-pub struct Composer {
-	ctx: Ctx,
-	pub id: u64,
-	pub window: adw::Window,
-	title: adw::WindowTitle,
-	toasts: adw::ToastOverlay,
-	/// The address to send from, among the account's; shown only when it has more than one.
-	pub from: gtk::DropDown,
-	to: gtk::Entry,
-	cc: gtk::Entry,
-	bcc: gtk::Entry,
-	cc_toggle: gtk::ToggleButton,
-	cc_rows: [gtk::Widget; 4],
-	subject: gtk::Entry,
-	body: gtk::TextView,
-	/// The lines picked in the reader, above the text, with an × to leave them out.
-	picked: gtk::Box,
-	/// The whole earlier mail, under the text: ••• to look at it, and a button to add it or an × to
-	/// leave it out.
-	pill: gtk::Box,
-	whole: gtk::Revealer,
-	send: gtk::Button,
-	files: gtk::ListBox,
-	files_box: gtk::Box,
-	files_summary: gtk::Label,
-	suggestions: [(AddressField, Rc<Suggest>); 3],
-	/// What the core last said.
-	shown: RefCell<Option<ComposerView>>,
-	/// Files being read from disk, on their way to the core.
-	reading: Cell<usize>,
-	/// Drawing what the core said, which is not the person doing anything.
-	drawing: Cell<bool>,
-	/// How many problems have been shown, for the screenshot scenes.
-	toasts_shown: Cell<u32>,
-	/// The core has finished with it, so it may close.
-	done: Cell<bool>,
+/// One of the address lines, with the suggestions under it.
+struct Address {
+	field: AddressField,
+	entry: gtk::Entry,
+	/// Blocked while drawing what the core said, which is not the person typing.
+	typed: glib::SignalHandlerId,
+	suggest: Controller<Suggest>,
 }
 
 /// A label and a frameless entry, as one line of the header.
 fn field(label: &str) -> (gtk::Box, gtk::Entry) {
-	let name = gtk::Label::builder().label(label).xalign(1.0).width_chars(7).css_classes(["dim-label"]).build();
-	let entry = gtk::Entry::builder().has_frame(false).hexpand(true).build();
-	entry.update_property(&[gtk::accessible::Property::Label(label)]);
-	let row = gtk::Box::builder().spacing(12).margin_start(12).margin_end(12).margin_top(4).margin_bottom(4).build();
-	row.append(&name);
-	row.append(&entry);
+	relm4::view! {
+		row = gtk::Box {
+			set_spacing: 12,
+			set_margin_start: 12,
+			set_margin_end: 12,
+			set_margin_top: 4,
+			set_margin_bottom: 4,
+			gtk::Label {
+				set_label: label,
+				set_xalign: 1.0,
+				set_width_chars: 7,
+				add_css_class: "dim-label",
+			},
+			#[name = "entry"]
+			gtk::Entry {
+				set_has_frame: false,
+				set_hexpand: true,
+				update_property: &[gtk::accessible::Property::Label(label)],
+			},
+		}
+	}
 	(row, entry)
+}
+
+/// An attached file, with a button to take it off.
+struct File {
+	attachment: ComposerAttachment,
+	/// Its place among all the composer's attachments, which is how the core knows it.
+	index: u32,
+}
+
+#[relm4::factory]
+impl FactoryComponent for File {
+	type Init = (ComposerAttachment, u32);
+	type Input = ();
+	type Output = u32;
+	type CommandOutput = ();
+	type ParentWidget = gtk::ListBox;
+
+	view! {
+		adw::ActionRow {
+			set_title: &glib::markup_escape_text(&self.attachment.name),
+			set_subtitle: &self.attachment.size,
+			add_prefix = &gtk::Image {
+				set_from_gicon: &icon_for(&self.attachment.mime),
+			},
+			add_suffix = &gtk::Button {
+				set_icon_name: "edit-delete-symbolic",
+				set_valign: gtk::Align::Center,
+				add_css_class: "flat",
+				set_tooltip_text: Some("Remove"),
+				connect_clicked[sender, index = self.index] => move |_| {
+					let _ = sender.output(index);
+				},
+			},
+		}
+	}
+
+	fn init_model((attachment, index): Self::Init, _: &DynamicIndex, _: FactorySender<Self>) -> Self {
+		File { attachment, index }
+	}
+}
+
+pub struct Writing {
+	ctx: Ctx,
+	id: u64,
+	view: ComposerView,
+	/// The subject as written, which titles the window.
+	subject: String,
+	subject_entry: gtk::Entry,
+	cc_shown: bool,
+	addresses: [Address; 3],
+	files: FactoryVecDeque<File>,
+	/// Files being read from disk, on their way to the core.
+	reading: usize,
+	/// How many problems have been shown, for the screenshot scenes.
+	toasts_shown: u32,
+}
+
+#[derive(Debug)]
+pub enum Input {
+	View(Box<ComposerView>),
+	Typed(AddressField, String),
+	Subject(String),
+	Take(AddressField, u32),
+	ShowCc(bool),
+	SubjectDone,
+	DropPicked,
+	IncludeWhole(bool),
+	RemoveFile(u32),
+	Add(Vec<gio::File>),
+	Read(Result<(String, Vec<u8>), String>),
+	PickFiles,
+	Send,
+	Discard,
+	Close,
+	Escape,
+}
+
+impl Writing {
+	fn act(&self, action: Action) {
+		act(&self.ctx.engine, self.id, action);
+	}
+
+	fn address(&self, field: AddressField) -> &Address {
+		match field {
+			AddressField::To => &self.addresses[0],
+			AddressField::Cc => &self.addresses[1],
+			AddressField::Bcc => &self.addresses[2],
+		}
+	}
+
+	fn title(&self) -> &str {
+		match self.subject.trim() {
+			"" => "New Message",
+			subject => subject,
+		}
+	}
+
+	fn can_send(&self) -> bool {
+		!self.view.sending && self.reading == 0 && !self.view.attachments.iter().any(|a| a.pending)
+	}
+
+	/// What is written now.
+	fn text(&self, widgets: &WritingWidgets) -> ComposeText {
+		ComposeText {
+			to: self.addresses[0].entry.text().into(),
+			cc: self.addresses[1].entry.text().into(),
+			bcc: self.addresses[2].entry.text().into(),
+			subject: self.subject_entry.text().into(),
+			body: body_text(&widgets.body),
+			from_index: widgets.from.selected(),
+		}
+	}
+
+	/// The text is the person's while they write; the core only sets it when it changes it itself.
+	fn draw_text(&mut self, widgets: &WritingWidgets, view: &ComposerView) {
+		for (address, text) in self.addresses.iter().zip([&view.text.to, &view.text.cc, &view.text.bcc]) {
+			if address.entry.text() != text.as_str() {
+				address.entry.block_signal(&address.typed);
+				address.entry.set_text(text);
+				address.entry.set_position(-1);
+				address.entry.unblock_signal(&address.typed);
+			}
+		}
+		if self.subject_entry.text() != view.text.subject.as_str() {
+			self.subject_entry.set_text(&view.text.subject);
+			self.subject_entry.set_position(-1);
+		}
+		self.subject.clone_from(&view.text.subject);
+		let buffer = widgets.body.buffer();
+		if body_text(&widgets.body) != view.text.body {
+			buffer.set_text(&view.text.body);
+			buffer.place_cursor(&buffer.start_iter());
+		}
+		widgets.from.set_selected(view.text.from_index);
+	}
+
+	fn draw_files(&mut self, attachments: &[ComposerAttachment]) {
+		let mut files = self.files.guard();
+		files.clear();
+		for (i, attachment) in attachments.iter().enumerate().filter(|(_, a)| !a.pending) {
+			files.push_back((attachment.clone(), i as u32));
+		}
+	}
+
+	/// Whatever a new word from the core changes beyond what the view macro watches.
+	fn draw(&mut self, widgets: &WritingWidgets, view: ComposerView, root: &adw::Window) {
+		let before = std::mem::replace(&mut self.view, view.clone());
+		if before.revision != view.revision {
+			self.draw_text(widgets, &view);
+		}
+		self.cc_shown |= view.show_cc;
+		if before.attachments != view.attachments {
+			self.draw_files(&view.attachments);
+		}
+		let fields = [(AddressField::To, view.bad_to, before.bad_to), (AddressField::Cc, view.bad_cc, before.bad_cc), (AddressField::Bcc, view.bad_bcc, before.bad_bcc)];
+		for (field, bad, was) in fields {
+			if bad && !was {
+				self.address(field).entry.grab_focus();
+			}
+		}
+		// Trying again and getting the same answer is worth saying again.
+		let told = before.error == view.error && before.tries == view.tries;
+		if let Some(error) = view.error.as_ref().filter(|_| !told) {
+			let toast = adw::Toast::new(error);
+			toast.set_timeout(5);
+			widgets.toasts.add_toast(toast);
+			self.toasts_shown += 1;
+		}
+		self.suggest(&view);
+		// Saving goes on behind the screen; it comes back if that fails.
+		if view.saving && !before.saving {
+			root.set_visible(false);
+		} else if before.saving && !view.saving {
+			root.present();
+		}
+	}
+
+	fn suggest(&self, view: &ComposerView) {
+		for address in &self.addresses {
+			let found = if view.suggest_field == Some(address.field) { view.suggestions.clone() } else { Vec::new() };
+			address.suggest.emit(suggest::Input::Found(found));
+		}
+	}
+}
+
+/// Tells the core something about this composer.
+fn act(engine: &Arc<Engine>, id: u64, action: Action) {
+	engine.send(Action::ComposeFocus { id });
+	engine.send(action);
+}
+
+fn body_text(body: &gtk::TextView) -> String {
+	let buffer = body.buffer();
+	buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).into()
+}
+
+#[relm4::component(pub)]
+impl Component for Writing {
+	type Init = (Ctx, ComposerView);
+	type Input = Input;
+	type Output = ();
+	type CommandOutput = ();
+
+	view! {
+		adw::Window {
+			set_default_width: 720,
+			set_default_height: 640,
+			set_size_request: (360, 360),
+			set_transient_for: Some(&ctx.window),
+			set_application: ctx.window.application().as_ref(),
+			#[watch]
+			set_title: Some(model.title()),
+			connect_close_request[sender] => move |_| {
+				// Closing keeps the message, which is the core's to do; it says when this may go.
+				sender.input(Input::Close);
+				glib::Propagation::Stop
+			},
+
+			#[wrap(Some)]
+			set_content = &adw::ToolbarView {
+				add_top_bar = &adw::HeaderBar {
+					#[wrap(Some)]
+					set_title_widget = &adw::WindowTitle {
+						#[watch]
+						set_title: model.title(),
+					},
+					pack_start = &gtk::Button {
+						set_icon_name: "mail-attachment-symbolic",
+						set_tooltip_text: Some("Attach Files… (Ctrl+Shift+A)"),
+						connect_clicked => Input::PickFiles,
+					},
+					pack_end = &gtk::Button {
+						add_css_class: "suggested-action",
+						set_tooltip_text: Some("Send (Ctrl+Enter)"),
+						#[watch]
+						set_sensitive: model.can_send(),
+						connect_clicked => Input::Send,
+						#[wrap(Some)]
+						set_child = &gtk::Stack {
+							#[watch]
+							set_visible_child_name: if model.view.sending { "sending" } else { "send" },
+							add_named[Some("send")] = &gtk::Label {
+								set_label: "Send",
+							},
+							add_named[Some("sending")] = &adw::Spinner {},
+						},
+					},
+					pack_end = &gtk::Button {
+						set_icon_name: "user-trash-symbolic",
+						set_tooltip_text: Some("Discard"),
+						connect_clicked => Input::Discard,
+					},
+					pack_end: &indicator,
+				},
+
+				#[wrap(Some)]
+				#[name = "toasts"]
+				set_content = &adw::ToastOverlay {
+					#[wrap(Some)]
+					#[name = "content"]
+					set_child = &gtk::Box {
+						set_orientation: gtk::Orientation::Vertical,
+						add_css_class: "view",
+
+						// The address to send from, among the account's; shown only when it has more than one.
+						gtk::Box {
+							set_spacing: 12,
+							set_margin_start: 12,
+							set_margin_end: 12,
+							set_margin_top: 4,
+							set_margin_bottom: 4,
+							set_visible: view.addresses.len() > 1,
+							gtk::Label {
+								set_label: "From",
+								set_xalign: 1.0,
+								set_width_chars: 7,
+								add_css_class: "dim-label",
+							},
+							#[name = "from"]
+							gtk::DropDown::from_strings(&view.addresses.iter().map(String::as_str).collect::<Vec<_>>()) {
+								add_css_class: "flat",
+								update_property: &[gtk::accessible::Property::Label("From")],
+							},
+						},
+						gtk::Separator {
+							set_visible: view.addresses.len() > 1,
+						},
+						#[local_ref]
+						to_row -> gtk::Box {
+							#[name = "cc_toggle"]
+							append = &gtk::ToggleButton {
+								set_label: "Cc/Bcc",
+								set_css_classes: &["flat", "caption"],
+								set_valign: gtk::Align::Center,
+								set_tooltip_text: Some("Show Cc and Bcc"),
+								#[watch]
+								#[block_signal(cc_toggled)]
+								set_active: model.cc_shown,
+								connect_toggled[sender] => move |toggle| sender.input(Input::ShowCc(toggle.is_active())) @cc_toggled,
+							},
+						},
+						gtk::Separator {
+							#[watch]
+							set_visible: model.cc_shown,
+						},
+						#[local_ref]
+						cc_row -> gtk::Box {
+							#[watch]
+							set_visible: model.cc_shown,
+						},
+						gtk::Separator {
+							#[watch]
+							set_visible: model.cc_shown,
+						},
+						#[local_ref]
+						bcc_row -> gtk::Box {
+							#[watch]
+							set_visible: model.cc_shown,
+						},
+						gtk::Separator {},
+						#[local_ref]
+						subject_row -> gtk::Box {},
+						gtk::Separator {},
+
+						gtk::ScrolledWindow {
+							set_hscrollbar_policy: gtk::PolicyType::Never,
+							set_vexpand: true,
+							#[wrap(Some)]
+							set_child = &gtk::Box {
+								set_orientation: gtk::Orientation::Vertical,
+
+								// The lines picked in the reader, above the text, with an × to leave them out.
+								gtk::Box {
+									set_orientation: gtk::Orientation::Vertical,
+									add_css_class: "quote-picked",
+									set_margin_top: 18,
+									set_margin_start: 24,
+									set_margin_end: 24,
+									#[watch]
+									set_visible: model.view.picked_text.is_some(),
+									gtk::Box {
+										set_spacing: 6,
+										gtk::Label {
+											set_xalign: 0.0,
+											set_hexpand: true,
+											set_css_classes: &["caption", "quote-who"],
+											#[watch]
+											set_label: model.view.picked_who.as_deref().unwrap_or_default(),
+										},
+										gtk::Button {
+											set_icon_name: "window-close-symbolic",
+											set_tooltip_text: Some("Leave This Quote Out"),
+											set_css_classes: &["circular", "quote-button"],
+											set_valign: gtk::Align::Start,
+											connect_clicked => Input::DropPicked,
+										},
+									},
+									gtk::Label {
+										set_xalign: 0.0,
+										set_wrap: true,
+										set_wrap_mode: gtk::pango::WrapMode::WordChar,
+										set_selectable: true,
+										#[watch]
+										set_label: model.view.picked_text.as_deref().unwrap_or_default(),
+									},
+								},
+
+								#[name = "body"]
+								gtk::TextView {
+									set_wrap_mode: gtk::WrapMode::WordChar,
+									set_top_margin: 18,
+									set_bottom_margin: 18,
+									set_left_margin: 24,
+									set_right_margin: 24,
+									set_vexpand: true,
+									set_accepts_tab: false,
+									update_property: &[gtk::accessible::Property::Label("Message")],
+								},
+
+								// The whole earlier mail, under the text: ••• to look at it, and a button to
+								// add it or an × to leave it out.
+								gtk::Box {
+									add_css_class: "quote-pill",
+									set_halign: gtk::Align::Start,
+									set_margin_start: 24,
+									set_margin_bottom: 12,
+									#[watch]
+									set_visible: model.has_whole(),
+									#[watch]
+									set_class_active: ("included", model.view.whole_included),
+									gtk::ToggleButton {
+										set_label: "•••",
+										set_css_classes: &["quote-button", "quote-dots"],
+										#[watch]
+										set_tooltip_text: Some(if model.view.whole_forward { "Show the Forwarded Mail" } else { "Show the Earlier Mail" }),
+										connect_toggled[whole] => move |dots| whole.set_reveal_child(dots.is_active()),
+									},
+									gtk::Separator {
+										set_orientation: gtk::Orientation::Vertical,
+									},
+									gtk::Label {
+										set_css_classes: &["caption", "quote-label"],
+										set_ellipsize: gtk::pango::EllipsizeMode::End,
+										#[watch]
+										set_visible: model.view.whole_included,
+										#[watch]
+										set_label: model.view.whole_label.as_deref().unwrap_or_default(),
+									},
+									gtk::Separator {
+										set_orientation: gtk::Orientation::Vertical,
+										#[watch]
+										set_visible: model.view.whole_included,
+									},
+									gtk::Button {
+										set_icon_name: "window-close-symbolic",
+										add_css_class: "quote-button",
+										#[watch]
+										set_visible: model.view.whole_included,
+										#[watch]
+										set_tooltip_text: Some(if model.view.whole_forward { "Leave the Forwarded Mail Out" } else { "Leave the Quote Out" }),
+										connect_clicked => Input::IncludeWhole(false),
+									},
+									gtk::Button {
+										set_css_classes: &["flat", "caption", "quote-add"],
+										#[watch]
+										set_visible: !model.view.whole_included,
+										#[watch]
+										set_label: &format!("+ Quote {}", model.view.whole_label.as_deref().unwrap_or_default()),
+										connect_clicked => Input::IncludeWhole(true),
+									},
+								},
+								#[name = "whole"]
+								gtk::Revealer {
+									set_transition_type: gtk::RevealerTransitionType::SlideDown,
+									#[watch]
+									set_visible: model.has_whole(),
+									#[wrap(Some)]
+									set_child = &gtk::Label {
+										set_xalign: 0.0,
+										set_wrap: true,
+										set_wrap_mode: gtk::pango::WrapMode::WordChar,
+										set_selectable: true,
+										add_css_class: "quote-whole",
+										set_margin_start: 24,
+										set_margin_end: 24,
+										set_margin_bottom: 18,
+										#[watch]
+										set_class_active: ("left-out", !model.view.whole_included),
+										#[watch]
+										set_label: model.view.whole_text.as_deref().unwrap_or_default().trim_end(),
+									},
+								},
+							},
+						},
+
+						gtk::ScrolledWindow {
+							set_hscrollbar_policy: gtk::PolicyType::Never,
+							set_propagate_natural_height: true,
+							set_max_content_height: 220,
+							#[wrap(Some)]
+							set_child = &gtk::Box {
+								set_orientation: gtk::Orientation::Vertical,
+								set_spacing: 6,
+								set_margin_start: 12,
+								set_margin_end: 12,
+								set_margin_top: 6,
+								set_margin_bottom: 12,
+								#[watch]
+								set_visible: !model.view.attachments.is_empty(),
+								gtk::Label {
+									set_xalign: 0.0,
+									set_css_classes: &["caption", "dim-label"],
+									#[watch]
+									set_label: &files_summary(&model.view.attachments, model.view.total.as_deref()),
+								},
+								#[local_ref]
+								files -> gtk::ListBox {
+									set_selection_mode: gtk::SelectionMode::None,
+									add_css_class: "boxed-list",
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	fn init(init: Self::Init, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
+		let (ctx, view) = init;
+		let indicator = ctx.activity.indicator();
+		let (to_row, to) = field("To");
+		let (cc_row, cc) = field("Cc");
+		let (bcc_row, bcc) = field("Bcc");
+		let (subject_row, subject_entry) = field("Subject");
+		let addresses = [(AddressField::To, to), (AddressField::Cc, cc), (AddressField::Bcc, bcc)].map(|(field, entry)| {
+			let typing = sender.clone();
+			let typed = entry.connect_changed(move |entry| typing.input(Input::Typed(field, entry.text().to_string())));
+			let suggest = Suggest::builder().launch(entry.clone()).forward(sender.input_sender(), move |suggest::Take(index)| Input::Take(field, index));
+			Address { field, entry, typed, suggest }
+		});
+		let files = FactoryVecDeque::builder().launch(gtk::ListBox::default()).forward(sender.input_sender(), Input::RemoveFile);
+		let mut model = Writing {
+			id: view.id,
+			view: view.clone(),
+			subject: view.text.subject.clone(),
+			subject_entry: subject_entry.clone(),
+			cc_shown: view.show_cc,
+			addresses,
+			files,
+			reading: 0,
+			toasts_shown: 0,
+			ctx: ctx.clone(),
+		};
+		let files = model.files.widget().clone();
+		let widgets = view_output!();
+		subject_entry.connect_changed({
+			let sender = sender.clone();
+			move |entry| sender.input(Input::Subject(entry.text().to_string()))
+		});
+		subject_entry.connect_activate({
+			let sender = sender.clone();
+			move |_| sender.input(Input::SubjectDone)
+		});
+		model.draw_text(&widgets, &view);
+		model.draw_files(&view.attachments);
+		model.suggest(&view);
+		connect_drop(&widgets.content, &sender);
+		connect_keys(&root, &sender);
+
+		root.present();
+		for address in &model.addresses {
+			address.entry.select_region(0, 0);
+		}
+		model.subject_entry.select_region(0, 0);
+		if view.text.to.is_empty() {
+			model.addresses[0].entry.grab_focus();
+		} else {
+			widgets.body.grab_focus();
+		}
+		ComponentParts { model, widgets }
+	}
+
+	fn update_with_view(&mut self, widgets: &mut Self::Widgets, input: Input, sender: ComponentSender<Self>, root: &Self::Root) {
+		let mut focus_cc = false;
+		match input {
+			Input::View(view) => self.draw(widgets, *view, root),
+			Input::Typed(field, text) => {
+				if self.view.error.is_some() || self.view.bad_to || self.view.bad_cc || self.view.bad_bcc {
+					self.act(Action::ComposeEdited);
+				}
+				self.act(Action::ComposeSuggest { field, text });
+			},
+			Input::Subject(subject) => self.subject = subject,
+			Input::Take(field, index) => self.act(Action::ComposeTakeSuggestion { text: self.text(widgets), field, index }),
+			Input::ShowCc(show) => {
+				self.cc_shown = show;
+				focus_cc = show;
+			},
+			Input::SubjectDone => {
+				widgets.body.grab_focus();
+			},
+			Input::DropPicked => self.act(Action::ComposeDropPicked),
+			Input::IncludeWhole(included) => self.act(Action::ComposeIncludeWhole { included }),
+			Input::RemoveFile(index) => self.act(Action::ComposeRemoveAttachment { index }),
+			Input::Add(files) => self.read(files, &sender),
+			Input::Read(result) => {
+				self.reading -= 1;
+				match result {
+					Ok((name, data)) => self.act(Action::ComposeAttach { mime: mime_for(&name).into(), name, data }),
+					Err(name) => self.act(Action::ComposeAttachFailed { name }),
+				}
+			},
+			Input::PickFiles => pick_files(root, &sender),
+			Input::Send => self.act(Action::ComposeSend { text: self.text(widgets) }),
+			Input::Discard => {
+				// Throws the mail away, once the core has asked if it is worth asking.
+				self.ctx.ask_discard_from(self.id, root);
+				self.act(Action::ComposeDiscard { text: self.text(widgets) });
+			},
+			Input::Close => self.act(Action::ComposeClose { text: self.text(widgets) }),
+			// Escape first closes open address suggestions.
+			Input::Escape => {
+				if !self.addresses.iter().any(|a| suggest::dismiss(&a.suggest)) {
+					root.close();
+				}
+			},
+		}
+		self.update_view(widgets, sender);
+		if focus_cc {
+			self.addresses[1].entry.grab_focus();
+		}
+	}
+}
+
+impl Writing {
+	fn has_whole(&self) -> bool {
+		self.view.whole_label.is_some() && self.view.whole_text.is_some()
+	}
+
+	fn read(&mut self, files: Vec<gio::File>, sender: &ComponentSender<Self>) {
+		for file in files {
+			self.reading += 1;
+			let busy = self.ctx.activity.start(Word::Attaching);
+			let sender = sender.clone();
+			runtime::spawn_local(async move {
+				let name = file.basename().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into());
+				let result = file.load_contents_future().await;
+				drop(busy);
+				sender.input(Input::Read(match result {
+					Ok((bytes, _)) => Ok((name, bytes.to_vec())),
+					Err(_) => Err(name),
+				}));
+			});
+		}
+	}
+}
+
+/// What the attachments come to, and how many are still on their way.
+fn files_summary(attachments: &[ComposerAttachment], total: Option<&str>) -> String {
+	let waiting = attachments.iter().filter(|a| a.pending).count();
+	let size = total.unwrap_or_default();
+	let mut summary = match attachments.len() - waiting {
+		0 => String::new(),
+		1 => format!("1 attachment · {size}"),
+		n => format!("{n} attachments · {size}"),
+	};
+	if waiting > 0 {
+		if !summary.is_empty() {
+			summary.push_str(" · ");
+		}
+		summary.push_str(&format!("downloading {waiting}…"));
+	}
+	summary
+}
+
+fn pick_files(root: &adw::Window, sender: &ComponentSender<Writing>) {
+	let (root, sender) = (root.clone(), sender.clone());
+	runtime::spawn_local(async move {
+		let dialog = gtk::FileDialog::builder().title("Attach Files").modal(true).build();
+		let Ok(list) = dialog.open_multiple_future(Some(&root)).await else { return };
+		sender.input(Input::Add((0..list.n_items()).filter_map(|i| list.item(i).and_downcast::<gio::File>()).collect()));
+	});
+}
+
+fn connect_drop(widget: &gtk::Box, sender: &ComponentSender<Writing>) {
+	let target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+	let sender = sender.clone();
+	target.connect_drop(move |_, value, _, _| {
+		let Ok(list) = value.get::<gdk::FileList>() else { return false };
+		sender.input(Input::Add(list.files()));
+		true
+	});
+	widget.add_controller(target);
+}
+
+fn connect_keys(root: &adw::Window, sender: &ComponentSender<Writing>) {
+	let keys = gtk::ShortcutController::new();
+	keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+	for (trigger, input) in [("<Control>Return|<Control>KP_Enter", 0), ("<Control>w|Escape", 1), ("<Control><Shift>a", 2)] {
+		let sender = sender.clone();
+		let action = gtk::CallbackAction::new(move |_, _| {
+			sender.input(match input {
+				0 => Input::Send,
+				1 => Input::Escape,
+				_ => Input::PickFiles,
+			});
+			glib::Propagation::Stop
+		});
+		keys.add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string(trigger), Some(action)));
+	}
+	root.add_controller(keys);
+}
+
+/// A composer on screen: the component, and what the rest of the app and the scenes do with it.
+pub struct Composer {
+	engine: Arc<Engine>,
+	pub id: u64,
+	pub window: adw::Window,
+	pub from: gtk::DropDown,
+	controller: Controller<Writing>,
 }
 
 impl Composer {
 	/// Opens the window for a composer the core has just opened.
-	pub fn open(ctx: &Ctx, view: &ComposerView) -> Rc<Composer> {
-		let title = adw::WindowTitle::new("New Message", "");
-		let send = gtk::Button::builder().label("Send").css_classes(["suggested-action"]).tooltip_text("Send (Ctrl+Enter)").build();
-		let attach = gtk::Button::builder().icon_name("mail-attachment-symbolic").tooltip_text("Attach Files… (Ctrl+Shift+A)").build();
-		let discard = gtk::Button::builder().icon_name("user-trash-symbolic").tooltip_text("Discard").build();
-		let header = adw::HeaderBar::builder().title_widget(&title).build();
-		header.pack_start(&attach);
-		header.pack_end(&send);
-		header.pack_end(&discard);
-		header.pack_end(&ctx.activity.indicator());
-
-		// The account's addresses, and which one this mail goes out from.
-		let addresses = &view.addresses;
-		let from = gtk::DropDown::from_strings(&addresses.iter().map(String::as_str).collect::<Vec<_>>());
-		from.update_property(&[gtk::accessible::Property::Label("From")]);
-		from.add_css_class("flat");
-		let from_name = gtk::Label::builder().label("From").xalign(1.0).width_chars(7).css_classes(["dim-label"]).build();
-		let from_row = gtk::Box::builder().spacing(12).margin_start(12).margin_end(12).margin_top(4).margin_bottom(4).build();
-		from_row.append(&from_name);
-		from_row.append(&from);
-		let from_sep = gtk::Separator::new(gtk::Orientation::Horizontal);
-		from_row.set_visible(addresses.len() > 1);
-		from_sep.set_visible(addresses.len() > 1);
-
-		let (to_row, to) = field("To");
-		let (cc_row, cc) = field("Cc");
-		let (bcc_row, bcc) = field("Bcc");
-		let (subject_row, subject) = field("Subject");
-		let cc_toggle = gtk::ToggleButton::builder().label("Cc/Bcc").css_classes(["flat", "caption"]).valign(gtk::Align::Center).tooltip_text("Show Cc and Bcc").build();
-		to_row.append(&cc_toggle);
-		let cc_sep = gtk::Separator::new(gtk::Orientation::Horizontal);
-		let bcc_sep = gtk::Separator::new(gtk::Orientation::Horizontal);
-		let cc_rows: [gtk::Widget; 4] = [cc_sep.clone().upcast(), cc_row.clone().upcast(), bcc_sep.clone().upcast(), bcc_row.clone().upcast()];
-
-		let fields_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-		for w in [
-			from_row.upcast_ref::<gtk::Widget>(),
-			from_sep.upcast_ref(),
-			to_row.upcast_ref(),
-			cc_sep.upcast_ref(),
-			cc_row.upcast_ref(),
-			bcc_sep.upcast_ref(),
-			bcc_row.upcast_ref(),
-			gtk::Separator::new(gtk::Orientation::Horizontal).upcast_ref(),
-			subject_row.upcast_ref(),
-			gtk::Separator::new(gtk::Orientation::Horizontal).upcast_ref(),
-		] {
-			fields_box.append(w);
-		}
-
-		let body = gtk::TextView::builder()
-			.wrap_mode(gtk::WrapMode::WordChar)
-			.top_margin(18)
-			.bottom_margin(18)
-			.left_margin(24)
-			.right_margin(24)
-			.vexpand(true)
-			.accepts_tab(false)
-			.build();
-		body.update_property(&[gtk::accessible::Property::Label("Message")]);
-		let picked = gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["quote-picked"]).margin_top(18).margin_start(24).margin_end(24).visible(false).build();
-		let pill = gtk::Box::builder().css_classes(["quote-pill"]).halign(gtk::Align::Start).margin_start(24).margin_bottom(12).visible(false).build();
-		let whole = gtk::Revealer::builder().transition_type(gtk::RevealerTransitionType::SlideDown).build();
-		let writing = gtk::Box::new(gtk::Orientation::Vertical, 0);
-		writing.append(&picked);
-		writing.append(&body);
-		writing.append(&pill);
-		writing.append(&whole);
-		let body_scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&writing).vexpand(true).build();
-
-		let files = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
-		let files_summary = gtk::Label::builder().xalign(0.0).css_classes(["caption", "dim-label"]).build();
-		let files_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_start(12).margin_end(12).margin_top(6).margin_bottom(12).visible(false).build();
-		files_box.append(&files_summary);
-		files_box.append(&files);
-		let files_scroll = gtk::ScrolledWindow::builder()
-			.hscrollbar_policy(gtk::PolicyType::Never)
-			.propagate_natural_height(true)
-			.max_content_height(220)
-			.child(&files_box)
-			.build();
-
-		let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-		content.add_css_class("view");
-		content.append(&fields_box);
-		content.append(&body_scroll);
-		content.append(&files_scroll);
-
-		let toasts = adw::ToastOverlay::new();
-		toasts.set_child(Some(&content));
-		let toolbar = adw::ToolbarView::new();
-		toolbar.add_top_bar(&header);
-		toolbar.set_content(Some(&toasts));
-
-		let window = adw::Window::builder().title("New Message").default_width(720).default_height(640).content(&toolbar).build();
-		window.set_size_request(360, 360);
-		window.set_transient_for(Some(&ctx.window));
-		window.set_application(ctx.window.application().as_ref());
-
-		let suggestions = [(AddressField::To, Suggest::new(&to)), (AddressField::Cc, Suggest::new(&cc)), (AddressField::Bcc, Suggest::new(&bcc))];
-		let this = Rc::new(Composer {
-			ctx: ctx.clone(),
-			id: view.id,
-			window,
-			title,
-			toasts,
-			from,
-			to,
-			cc,
-			bcc,
-			cc_toggle: cc_toggle.clone(),
-			cc_rows,
-			subject,
-			body,
-			picked,
-			pill,
-			whole,
-			send,
-			files,
-			files_box,
-			files_summary,
-			suggestions,
-			shown: RefCell::default(),
-			reading: Cell::new(0),
-			drawing: Cell::new(false),
-			toasts_shown: Cell::new(0),
-			done: Cell::new(false),
-		});
-
-		this.show(view);
-		this.update_title();
-
-		let weak = Rc::downgrade(&this);
-		cc_toggle.connect_toggled(move |t| {
-			if let Some(this) = weak.upgrade() {
-				this.show_cc(t.is_active());
-			}
-		});
-		let weak = Rc::downgrade(&this);
-		this.subject.connect_changed(move |_| {
-			if let Some(this) = weak.upgrade() {
-				this.update_title();
-			}
-		});
-		for (field, suggest) in &this.suggestions {
-			let entry = this.entry(*field).clone();
-			let weak = Rc::downgrade(&this);
-			let field = *field;
-			entry.connect_changed(move |entry| {
-				entry.remove_css_class("error");
-				let Some(this) = weak.upgrade().filter(|t| !t.drawing.get()) else { return };
-				if this.shown.borrow().as_ref().is_some_and(|v| v.error.is_some() || v.bad_to || v.bad_cc || v.bad_bcc) {
-					this.act(Action::ComposeEdited);
-				}
-				this.act(Action::ComposeSuggest { field, text: entry.text().to_string() });
-			});
-			let weak = Rc::downgrade(&this);
-			suggest.connect_take(move |index| {
-				if let Some(this) = weak.upgrade() {
-					this.act(Action::ComposeTakeSuggestion { text: this.text(), field, index });
-				}
-			});
-		}
-		let weak = Rc::downgrade(&this);
-		this.subject.connect_activate(move |_| {
-			if let Some(this) = weak.upgrade() {
-				this.body.grab_focus();
-			}
-		});
-		let weak = Rc::downgrade(&this);
-		this.send.connect_clicked(move |_| {
-			if let Some(this) = weak.upgrade() {
-				this.send();
-			}
-		});
-		let weak = Rc::downgrade(&this);
-		attach.connect_clicked(move |_| {
-			if let Some(this) = weak.upgrade() {
-				this.pick_files();
-			}
-		});
-		let weak = Rc::downgrade(&this);
-		discard.connect_clicked(move |_| {
-			if let Some(this) = weak.upgrade() {
-				this.discard();
-			}
-		});
-		this.connect_drop(&content);
-		this.connect_keys();
-		this.connect_close();
-
-		this.window.present();
-		for entry in [&this.to, &this.cc, &this.bcc, &this.subject] {
-			entry.select_region(0, 0);
-		}
-		if view.text.to.is_empty() {
-			this.to.grab_focus();
-		} else {
-			this.body.grab_focus();
-		}
-		this
-	}
-
-	fn entry(&self, field: AddressField) -> &gtk::Entry {
-		match field {
-			AddressField::To => &self.to,
-			AddressField::Cc => &self.cc,
-			AddressField::Bcc => &self.bcc,
-		}
-	}
-
-	/// Tells the core something about this composer.
-	fn act(&self, action: Action) {
-		self.ctx.engine.send(Action::ComposeFocus { id: self.id });
-		self.ctx.engine.send(action);
-	}
-
-	/// What is written now.
-	fn text(&self) -> ComposeText {
-		let buffer = self.body.buffer();
-		ComposeText {
-			to: self.to.text().into(),
-			cc: self.cc.text().into(),
-			bcc: self.bcc.text().into(),
-			subject: self.subject.text().into(),
-			body: buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).into(),
-			from_index: self.from.selected(),
-		}
+	pub fn open(ctx: &Ctx, view: &ComposerView) -> Composer {
+		let controller = Writing::builder().launch((ctx.clone(), view.clone())).detach();
+		let (window, from) = (controller.widget().clone(), controller.widgets().from.clone());
+		Composer { engine: ctx.engine.clone(), id: view.id, window, from, controller }
 	}
 
 	/// Draws what the core says about this composer.
-	pub fn show(self: &Rc<Self>, view: &ComposerView) {
-		self.drawing.set(true);
-		let before = self.shown.borrow_mut().replace(view.clone());
-		// The text is the person's while they write; the core only sets it when it changes it itself.
-		if before.as_ref().map(|b| b.revision) != Some(view.revision) {
-			for (entry, text) in [(&self.to, &view.text.to), (&self.cc, &view.text.cc), (&self.bcc, &view.text.bcc), (&self.subject, &view.text.subject)] {
-				if entry.text() != text.as_str() {
-					entry.set_text(text);
-					entry.set_position(-1);
-				}
-			}
-			let buffer = self.body.buffer();
-			if buffer.text(&buffer.start_iter(), &buffer.end_iter(), false) != view.text.body {
-				buffer.set_text(&view.text.body);
-				buffer.place_cursor(&buffer.start_iter());
-			}
-			self.from.set_selected(view.text.from_index);
-		}
-		if view.show_cc && !self.cc_toggle.is_active() {
-			self.cc_toggle.set_active(true);
-			self.show_cc(true);
-		} else if before.is_none() {
-			self.show_cc(view.show_cc);
-		}
-		let quote = |v: &ComposerView| (v.picked_who.clone(), v.picked_text.clone(), v.whole_label.clone(), v.whole_text.clone(), v.whole_included, v.whole_forward);
-		if before.as_ref().map(quote) != Some(quote(view)) {
-			self.show_quote(view);
-		}
-		if before.as_ref().map(|b| &b.attachments) != Some(&view.attachments) || before.as_ref().map(|b| &b.total) != Some(&view.total) {
-			self.show_files(&view.attachments, view.total.as_deref());
-		}
-		self.update_send();
-		for (entry, bad, was) in [(&self.to, view.bad_to, before.as_ref().is_some_and(|b| b.bad_to)), (&self.cc, view.bad_cc, before.as_ref().is_some_and(|b| b.bad_cc)), (&self.bcc, view.bad_bcc, before.as_ref().is_some_and(|b| b.bad_bcc))] {
-			if bad {
-				entry.add_css_class("error");
-			}
-			if bad && !was {
-				entry.grab_focus();
-			}
-		}
-		// Trying again and getting the same answer is worth saying again.
-		let told = before.as_ref().is_some_and(|b| b.error == view.error && b.tries == view.tries);
-		if let Some(error) = view.error.as_ref().filter(|_| !told) {
-			let toast = adw::Toast::new(error);
-			toast.set_timeout(5);
-			self.toasts.add_toast(toast);
-			self.toasts_shown.set(self.toasts_shown.get() + 1);
-		}
-		for (field, suggest) in &self.suggestions {
-			suggest.show(if view.suggest_field == Some(*field) { &view.suggestions } else { &[] });
-		}
-		// Saving goes on behind the screen; it comes back if that fails.
-		let was_saving = before.as_ref().is_some_and(|b| b.saving);
-		if view.saving && !was_saving {
-			self.window.set_visible(false);
-		} else if was_saving && !view.saving {
-			self.window.present();
-		}
-		self.drawing.set(false);
+	pub fn show(&self, view: &ComposerView) {
+		self.controller.emit(Input::View(Box::new(view.clone())));
 	}
 
 	/// The core has finished with this composer.
 	pub fn finish(&self) {
-		self.done.set(true);
 		// Closing would only close a dialog open over it, such as the one asking to discard.
 		self.window.destroy();
 	}
 
-	fn show_cc(&self, show: bool) {
-		for w in &self.cc_rows {
-			w.set_visible(show);
-		}
-		if show && self.window.is_visible() && !self.drawing.get() {
-			self.cc.grab_focus();
-		}
-	}
-
-	fn update_title(&self) {
-		let subject = self.subject.text();
-		self.title.set_title(if subject.trim().is_empty() { "New Message" } else { subject.trim() });
-		self.window.set_title(Some(&self.title.title()));
+	fn act(&self, action: Action) {
+		act(&self.engine, self.id, action);
 	}
 
 	/// Leaves out the lines picked in the reader.
@@ -388,186 +765,52 @@ impl Composer {
 		self.act(Action::ComposeIncludeWhole { included });
 	}
 
+	pub fn send(&self) {
+		self.controller.emit(Input::Send);
+	}
+
 	/// For the screenshot scenes: what the core says about this composer.
 	pub fn view(&self) -> Option<ComposerView> {
-		self.shown.borrow().clone()
+		Some(self.controller.model().view.clone())
 	}
 
-	/// Shows the picked lines and the whole mail's pill as the core has them.
-	fn show_quote(self: &Rc<Self>, view: &ComposerView) {
-		while let Some(child) = self.picked.first_child() {
-			self.picked.remove(&child);
-		}
-		self.picked.set_visible(view.picked_text.is_some());
-		if let (Some(who), Some(lines)) = (&view.picked_who, &view.picked_text) {
-			let head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-			head.append(&gtk::Label::builder().label(who).xalign(0.0).hexpand(true).css_classes(["caption", "quote-who"]).build());
-			let drop = gtk::Button::builder().icon_name("window-close-symbolic").tooltip_text("Leave This Quote Out").css_classes(["circular", "quote-button"]).valign(gtk::Align::Start).build();
-			let weak = Rc::downgrade(self);
-			drop.connect_clicked(move |_| {
-				if let Some(this) = weak.upgrade() {
-					this.drop_picked();
-				}
-			});
-			head.append(&drop);
-			self.picked.append(&head);
-			self.picked.append(&gtk::Label::builder().label(lines).xalign(0.0).wrap(true).wrap_mode(gtk::pango::WrapMode::WordChar).selectable(true).build());
-		}
-
-		while let Some(child) = self.pill.first_child() {
-			self.pill.remove(&child);
-		}
-		let (Some(label), Some(text)) = (&view.whole_label, &view.whole_text) else {
-			self.pill.set_visible(false);
-			self.whole.set_child(None::<&gtk::Widget>);
-			return;
-		};
-		self.pill.set_visible(true);
-		if view.whole_included {
-			self.pill.add_css_class("included");
-		} else {
-			self.pill.remove_css_class("included");
-		}
-		let dots = gtk::ToggleButton::builder().label("•••").tooltip_text(if view.whole_forward { "Show the Forwarded Mail" } else { "Show the Earlier Mail" }).css_classes(["quote-button", "quote-dots"]).active(self.whole.reveals_child()).build();
-		let w = self.whole.clone();
-		dots.connect_toggled(move |b| w.set_reveal_child(b.is_active()));
-		self.pill.append(&dots);
-		self.pill.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-		if view.whole_included {
-			self.pill.append(&gtk::Label::builder().label(label).css_classes(["caption", "quote-label"]).ellipsize(gtk::pango::EllipsizeMode::End).build());
-			self.pill.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-			let drop = gtk::Button::builder().icon_name("window-close-symbolic").tooltip_text(if view.whole_forward { "Leave the Forwarded Mail Out" } else { "Leave the Quote Out" }).css_classes(["quote-button"]).build();
-			let weak = Rc::downgrade(self);
-			drop.connect_clicked(move |_| {
-				if let Some(this) = weak.upgrade() {
-					this.include_whole(false);
-				}
-			});
-			self.pill.append(&drop);
-		} else {
-			let add = gtk::Button::builder().label(format!("+ Quote {label}")).css_classes(["flat", "caption", "quote-add"]).build();
-			let weak = Rc::downgrade(self);
-			add.connect_clicked(move |_| {
-				if let Some(this) = weak.upgrade() {
-					this.include_whole(true);
-				}
-			});
-			self.pill.append(&add);
-		}
-		let shown = gtk::Label::builder()
-			.label(text.trim_end())
-			.xalign(0.0)
-			.wrap(true)
-			.wrap_mode(gtk::pango::WrapMode::WordChar)
-			.selectable(true)
-			.css_classes(if view.whole_included { vec!["quote-whole"] } else { vec!["quote-whole", "left-out"] })
-			.margin_start(24)
-			.margin_end(24)
-			.margin_bottom(18)
-			.build();
-		self.whole.set_child(Some(&shown));
-	}
-
-	fn update_send(&self) {
-		let view = self.shown.borrow();
-		let pending = view.as_ref().is_some_and(|v| v.attachments.iter().any(|a| a.pending));
-		let sending = view.as_ref().is_some_and(|v| v.sending);
-		self.send.set_sensitive(!sending && !pending && self.reading.get() == 0);
-		if sending {
-			self.send.set_child(Some(&adw::Spinner::new()));
-		} else if self.send.label().as_deref() != Some("Send") {
-			self.send.set_label("Send");
-		}
-	}
-
-	fn show_files(self: &Rc<Self>, attachments: &[ComposerAttachment], total: Option<&str>) {
-		self.files.remove_all();
-		let mut waiting = 0;
-		for (i, att) in attachments.iter().enumerate() {
-			if att.pending {
-				waiting += 1;
-				continue;
-			}
-			let row = adw::ActionRow::builder().title(glib::markup_escape_text(&att.name)).subtitle(&att.size).build();
-			row.add_prefix(&gtk::Image::from_gicon(&icon_for(&att.mime)));
-			let remove = gtk::Button::builder().icon_name("edit-delete-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Remove").build();
-			let weak = Rc::downgrade(self);
-			remove.connect_clicked(move |_| {
-				if let Some(this) = weak.upgrade() {
-					this.act(Action::ComposeRemoveAttachment { index: i as u32 });
-				}
-			});
-			row.add_suffix(&remove);
-			self.files.append(&row);
-		}
-		let ready = attachments.len() - waiting;
-		let size = total.unwrap_or_default();
-		let mut summary = match ready {
-			0 => String::new(),
-			1 => format!("1 attachment · {size}"),
-			n => format!("{n} attachments · {size}"),
-		};
-		if waiting > 0 {
-			if !summary.is_empty() {
-				summary.push_str(" · ");
-			}
-			summary.push_str(&format!("downloading {waiting}…"));
-		}
-		self.files_summary.set_label(&summary);
-		self.files_box.set_visible(!attachments.is_empty());
-	}
-
-	fn add_files(self: &Rc<Self>, files: Vec<gio::File>) {
-		for file in files {
-			let this = self.clone();
-			this.reading.set(this.reading.get() + 1);
-			this.update_send();
-			let busy = this.ctx.activity.start(Word::Attaching);
-			runtime::spawn_local(async move {
-				let name = file.basename().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into());
-				let result = file.load_contents_future().await;
-				drop(busy);
-				this.reading.set(this.reading.get() - 1);
-				this.update_send();
-				match result {
-					Ok((bytes, _)) => this.act(Action::ComposeAttach { mime: mime_for(&name).into(), name, data: bytes.to_vec() }),
-					Err(_) => this.act(Action::ComposeAttachFailed { name }),
-				}
-			});
-		}
+	/// For the screenshot scenes: throws the mail away, as the button does.
+	pub fn discard(&self) {
+		self.controller.emit(Input::Discard);
 	}
 
 	/// For the screenshot scenes: how many problems have been shown.
 	pub fn toasts_shown(&self) -> u32 {
-		self.toasts_shown.get()
+		self.controller.model().toasts_shown
 	}
 
 	/// For the screenshot scenes: types into To.
 	pub fn type_to(&self, text: &str) {
-		self.to.grab_focus();
-		self.to.set_text(text);
-		self.to.set_position(-1);
+		let model = self.controller.model();
+		let to = &model.addresses[0].entry;
+		to.grab_focus();
+		to.set_text(text);
+		to.set_position(-1);
 	}
 
 	/// For the screenshot scenes: how many suggestions are open under To.
 	pub fn suggested(&self) -> usize {
-		self.suggestions[0].1.open_count()
+		suggest::open_count(&self.controller.model().addresses[0].suggest)
 	}
 
 	/// For the screenshot scenes: types `text` as the message.
 	pub fn type_body(&self, text: &str) {
-		self.body.buffer().set_text(text);
+		self.controller.widgets().body.buffer().set_text(text);
 	}
 
 	/// For the screenshot scenes: the message as written, quotes apart.
 	pub fn body_text(&self) -> String {
-		let buffer = self.body.buffer();
-		buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string()
+		body_text(&self.controller.widgets().body)
 	}
 
 	/// For the screenshot scenes: the subject and To as written.
 	pub fn subject_and_to(&self) -> (String, String) {
-		(self.subject.text().into(), self.to.text().into())
+		(self.controller.model().subject_entry.text().into(), self.controller.model().addresses[0].entry.text().into())
 	}
 
 	/// For the screenshot scenes: adds an attachment, as picking a file does.
@@ -575,85 +818,8 @@ impl Composer {
 		self.act(Action::ComposeAttach { name: name.into(), mime: mime.into(), data: data.to_vec() });
 	}
 
-	fn pick_files(self: &Rc<Self>) {
-		let this = self.clone();
-		runtime::spawn_local(async move {
-			let dialog = gtk::FileDialog::builder().title("Attach Files").modal(true).build();
-			let Ok(list) = dialog.open_multiple_future(Some(&this.window)).await else { return };
-			let files = (0..list.n_items()).filter_map(|i| list.item(i).and_downcast::<gio::File>()).collect();
-			this.add_files(files);
-		});
-	}
-
-	fn connect_drop(self: &Rc<Self>, target_widget: &gtk::Box) {
-		let target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
-		let weak = Rc::downgrade(self);
-		target.connect_drop(move |_, value, _, _| {
-			let (Some(this), Ok(list)) = (weak.upgrade(), value.get::<gdk::FileList>()) else { return false };
-			this.add_files(list.files());
-			true
-		});
-		target_widget.add_controller(target);
-	}
-
-	fn connect_keys(self: &Rc<Self>) {
-		let keys = gtk::ShortcutController::new();
-		keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-		let weak = Rc::downgrade(self);
-		let send = gtk::CallbackAction::new(move |_, _| {
-			if let Some(this) = weak.upgrade() {
-				this.send();
-			}
-			glib::Propagation::Stop
-		});
-		keys.add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string("<Control>Return|<Control>KP_Enter"), Some(send)));
-		let weak = Rc::downgrade(self);
-		let close = gtk::CallbackAction::new(move |_, _| {
-			if let Some(this) = weak.upgrade() {
-				// Escape first closes open address suggestions.
-				if !this.suggestions.iter().any(|(_, s)| s.dismiss()) {
-					this.window.close();
-				}
-			}
-			glib::Propagation::Stop
-		});
-		keys.add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string("<Control>w|Escape"), Some(close)));
-		let weak = Rc::downgrade(self);
-		let attach = gtk::CallbackAction::new(move |_, _| {
-			if let Some(this) = weak.upgrade() {
-				this.pick_files();
-			}
-			glib::Propagation::Stop
-		});
-		keys.add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string("<Control><Shift>a"), Some(attach)));
-		self.window.add_controller(keys);
-	}
-
-	fn connect_close(self: &Rc<Self>) {
-		let weak = Rc::downgrade(self);
-		self.window.connect_close_request(move |_| {
-			let Some(this) = weak.upgrade() else { return glib::Propagation::Proceed };
-			if this.done.get() {
-				return glib::Propagation::Proceed;
-			}
-			// Closing keeps the message, which is the core's to do; it says when this may go.
-			this.act(Action::ComposeClose { text: this.text() });
-			glib::Propagation::Stop
-		});
-	}
-
-	pub fn send(&self) {
-		self.act(Action::ComposeSend { text: self.text() });
-	}
-
-	/// Throws the mail away, once the core has asked if it is worth asking.
-	pub fn discard(&self) {
-		self.ctx.ask_discard_from(self.id, &self.window);
-		self.act(Action::ComposeDiscard { text: self.text() });
-	}
-
 	/// For the screenshot scenes: adds files, as dragging them in does.
-	pub fn drop_files(self: &Rc<Self>, files: Vec<gio::File>) {
-		self.add_files(files);
+	pub fn drop_files(&self, files: Vec<gio::File>) {
+		self.controller.emit(Input::Add(files));
 	}
 }
