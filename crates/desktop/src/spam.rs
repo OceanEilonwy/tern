@@ -5,16 +5,17 @@
 //! Subject fill the line in, and it can be edited. The conversation's own mails head the list, ticked.
 //! The line can also be kept as a rule, so new mail like it goes to Spam as it arrives.
 
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::glib;
+use relm4::factory::FactoryVecDeque;
+use relm4::prelude::*;
 use tern_app::view::{Action, ChoiceView, SpamRow};
-
-use crate::window::Ctx;
+use tern_app::Engine;
 
 /// What the core says about the sheet.
+#[derive(Clone, Debug)]
 pub struct Offer {
 	pub revision: u64,
 	pub line: String,
@@ -26,174 +27,225 @@ pub struct Offer {
 	pub choices: Vec<ChoiceView>,
 }
 
-pub struct Picker {
-	ctx: Ctx,
-	pub dialog: adw::Dialog,
-	pub entry: gtk::Entry,
-	problem: gtk::Label,
-	choices: gtk::Box,
-	list: gtk::ListBox,
-	pub all: gtk::CheckButton,
-	count: gtk::Label,
-	pub keep: adw::SwitchRow,
-	pub confirm: gtk::Button,
-	shown: RefCell<Vec<(SpamRow, gtk::CheckButton)>>,
-	revision: Cell<u64>,
-	/// Drawing what the core said, which is not the person doing anything.
-	filling: Cell<bool>,
+/// One mail's tick.
+pub struct Row {
+	view: SpamRow,
+	engine: Arc<Engine>,
 }
 
-/// Opens the dialog; [`Picker::show`] then fills it in.
-pub fn open(ctx: &Ctx) -> Rc<Picker> {
-	let entry = gtk::Entry::builder().css_classes(["monospace"]).hexpand(true).build();
-	entry.update_property(&[gtk::accessible::Property::Label("Mail like this")]);
-	let problem = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["caption", "error"]).visible(false).build();
-	let choices = gtk::Box::builder().css_classes(["linked"]).halign(gtk::Align::Start).build();
-	let all = gtk::CheckButton::builder().label("Select All").build();
-	let count = gtk::Label::builder().xalign(1.0).hexpand(true).css_classes(["dim-label", "caption"]).build();
-	let bar = gtk::Box::builder().spacing(12).build();
-	bar.append(&all);
-	bar.append(&count);
-	let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).valign(gtk::Align::Start).build();
-	list.update_property(&[gtk::accessible::Property::Label("Mail like this")]);
-	let scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&list).vexpand(true).min_content_height(200).build();
-	let keep = adw::SwitchRow::builder().title("Always Move Mail Like This to Spam").subtitle("New mail this line catches goes straight to Spam; rules are in Preferences").build();
-	let keep_list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
-	keep_list.append(&keep);
+#[relm4::factory(pub)]
+impl FactoryComponent for Row {
+	type Init = (SpamRow, Arc<Engine>);
+	type Input = SpamRow;
+	type Output = ();
+	type CommandOutput = ();
+	type ParentWidget = gtk::ListBox;
 
-	let column = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_top(6).margin_bottom(18).margin_start(18).margin_end(18).build();
-	let heading = gtk::Label::builder().label("Find more mail like this").xalign(0.0).css_classes(["heading"]).build();
-	column.append(&heading);
-	column.append(&choices);
-	column.append(&entry);
-	column.append(&problem);
-	column.append(&bar);
-	column.append(&scroll);
-	column.append(&keep_list);
+	view! {
+		adw::ActionRow {
+			set_title: &glib::markup_escape_text(&self.view.who),
+			set_subtitle: &glib::markup_escape_text(&self.view.subject),
+			set_subtitle_lines: 1,
+			set_activatable_widget: Some(&check),
+			#[name = "check"]
+			add_prefix = &gtk::CheckButton {
+				set_valign: gtk::Align::Center,
+				#[watch]
+				#[block_signal(toggled)]
+				set_active: self.view.picked,
+				connect_toggled[engine = self.engine.clone(), id = self.view.id.clone()] => move |_| engine.send(Action::SpamToggle { id: id.clone() }) @toggled,
+			},
+			add_suffix = &gtk::Label {
+				set_label: &self.view.date,
+				set_css_classes: &["dim-label", "caption", "numeric"],
+			},
+		}
+	}
 
-	let confirm = gtk::Button::builder().label("Move to Spam").css_classes(["destructive-action"]).build();
-	let cancel = gtk::Button::builder().label("Cancel").build();
-	let header = adw::HeaderBar::builder().show_end_title_buttons(false).show_start_title_buttons(false).build();
-	header.pack_start(&cancel);
-	header.pack_end(&confirm);
-	let view = adw::ToolbarView::new();
-	view.add_top_bar(&header);
-	view.set_content(Some(&column));
-	let dialog = adw::Dialog::builder().title("Move to Spam").content_width(560).content_height(640).child(&view).default_widget(&confirm).build();
+	fn init_model((view, engine): Self::Init, _: &DynamicIndex, _: FactorySender<Self>) -> Self {
+		Row { view, engine }
+	}
 
-	let this = Rc::new(Picker {
-		ctx: ctx.clone(),
-		dialog,
-		entry,
-		problem,
-		choices,
-		list,
-		all,
-		count,
-		keep,
-		confirm,
-		shown: RefCell::default(),
-		revision: Cell::new(0),
-		filling: Cell::new(false),
-	});
-	let weak = Rc::downgrade(&this);
-	this.entry.connect_changed(move |entry| {
-		if let Some(this) = weak.upgrade().filter(|t| !t.filling.get()) {
-			this.ctx.engine.send(Action::SpamLine { line: entry.text().to_string() });
+	fn update(&mut self, view: SpamRow, _: FactorySender<Self>) {
+		self.view = view;
+	}
+}
+
+pub struct Picker {
+	engine: Arc<Engine>,
+	offer: Offer,
+	/// The core has set the line itself, rather than following what is typed.
+	line_set: bool,
+	rows: FactoryVecDeque<Row>,
+}
+
+#[relm4::component(pub)]
+impl SimpleComponent for Picker {
+	type Init = (Arc<Engine>, Offer);
+	type Input = Offer;
+	type Output = ();
+
+	view! {
+		adw::Dialog {
+			set_title: "Move to Spam",
+			set_content_width: 560,
+			set_content_height: 640,
+			set_default_widget: Some(&confirm),
+			#[wrap(Some)]
+			set_child = &adw::ToolbarView {
+				add_top_bar = &adw::HeaderBar {
+					set_show_end_title_buttons: false,
+					set_show_start_title_buttons: false,
+					pack_start = &gtk::Button {
+						set_label: "Cancel",
+						connect_clicked[root] => move |_| {
+							root.close();
+						},
+					},
+					#[name = "confirm"]
+					pack_end = &gtk::Button {
+						add_css_class: "destructive-action",
+						#[watch]
+						set_label: &model.offer.confirm,
+						#[watch]
+						set_sensitive: model.offer.keep_rule || model.offer.rows.iter().any(|r| r.picked),
+						connect_clicked[engine = model.engine.clone()] => move |_| engine.send(Action::SpamConfirm),
+					},
+				},
+				#[wrap(Some)]
+				set_content = &gtk::Box {
+					set_orientation: gtk::Orientation::Vertical,
+					set_spacing: 12,
+					set_margin_top: 6,
+					set_margin_bottom: 18,
+					set_margin_start: 18,
+					set_margin_end: 18,
+
+					gtk::Label {
+						set_label: "Find more mail like this",
+						set_xalign: 0.0,
+						add_css_class: "heading",
+					},
+					#[local_ref]
+					choices -> gtk::Box {
+						add_css_class: "linked",
+						set_halign: gtk::Align::Start,
+					},
+					#[name = "entry"]
+					gtk::Entry {
+						set_hexpand: true,
+						update_property: &[gtk::accessible::Property::Label("Mail like this")],
+						#[track = "model.line_set"]
+						#[block_signal(typed)]
+						set_text: &model.offer.line,
+						#[watch]
+						set_css_classes: if model.offer.problem.is_some() { &["monospace", "error"] } else { &["monospace"] },
+						connect_changed[engine = model.engine.clone()] => move |entry| engine.send(Action::SpamLine { line: entry.text().to_string() }) @typed,
+					},
+					gtk::Label {
+						set_xalign: 0.0,
+						set_wrap: true,
+						set_css_classes: &["caption", "error"],
+						#[watch]
+						set_visible: model.offer.problem.is_some(),
+						#[watch]
+						set_label: model.offer.problem.as_deref().unwrap_or_default(),
+					},
+					gtk::Box {
+						set_spacing: 12,
+						#[name = "all"]
+						gtk::CheckButton {
+							set_label: Some("Select All"),
+							#[watch]
+							#[block_signal(all_toggled)]
+							set_active: !model.offer.rows.is_empty() && model.offer.rows.iter().all(|r| r.picked),
+							#[watch]
+							set_inconsistent: model.offer.rows.iter().any(|r| r.picked) && !model.offer.rows.iter().all(|r| r.picked),
+							connect_toggled[engine = model.engine.clone()] => move |all| engine.send(Action::SpamSelectAll { on: all.is_active() }) @all_toggled,
+						},
+						gtk::Label {
+							set_xalign: 1.0,
+							set_hexpand: true,
+							set_css_classes: &["dim-label", "caption"],
+							#[watch]
+							set_label: &model.offer.count,
+						},
+					},
+					gtk::ScrolledWindow {
+						set_hscrollbar_policy: gtk::PolicyType::Never,
+						set_vexpand: true,
+						set_min_content_height: 200,
+						#[local_ref]
+						list -> gtk::ListBox {
+							set_selection_mode: gtk::SelectionMode::None,
+							add_css_class: "boxed-list",
+							set_valign: gtk::Align::Start,
+							update_property: &[gtk::accessible::Property::Label("Mail like this")],
+						},
+					},
+					gtk::ListBox {
+						set_selection_mode: gtk::SelectionMode::None,
+						add_css_class: "boxed-list",
+						#[name = "keep"]
+						append = &adw::SwitchRow {
+							set_title: "Always Move Mail Like This to Spam",
+							set_subtitle: "New mail this line catches goes straight to Spam; rules are in Preferences",
+							#[watch]
+							#[block_signal(keep_toggled)]
+							set_active: model.offer.keep_rule,
+							connect_active_notify[engine = model.engine.clone()] => move |keep| engine.send(Action::SpamKeepRule { on: keep.is_active() }) @keep_toggled,
+						},
+					},
+				},
+			},
+			connect_closed[engine = model.engine.clone()] => move |_| engine.send(Action::CloseSheet),
 		}
-	});
-	let weak = Rc::downgrade(&this);
-	this.all.connect_toggled(move |all| {
-		if let Some(this) = weak.upgrade().filter(|t| !t.filling.get()) {
-			this.ctx.engine.send(Action::SpamSelectAll { on: all.is_active() });
+	}
+
+	fn init(init: Self::Init, root: Self::Root, _sender: ComponentSender<Self>) -> ComponentParts<Self> {
+		let (engine, offer) = init;
+		let choices = gtk::Box::default();
+		for choice in &offer.choices {
+			let button = gtk::Button::with_label(&choice.label);
+			let (engine, value) = (engine.clone(), choice.value.clone());
+			button.connect_clicked(move |_| engine.send(Action::SpamUse { value: value.clone() }));
+			choices.append(&button);
 		}
-	});
-	let weak = Rc::downgrade(&this);
-	this.keep.connect_active_notify(move |keep| {
-		if let Some(this) = weak.upgrade().filter(|t| !t.filling.get()) {
-			this.ctx.engine.send(Action::SpamKeepRule { on: keep.is_active() });
-		}
-	});
-	let engine = ctx.engine.clone();
-	this.confirm.connect_clicked(move |_| engine.send(Action::SpamConfirm));
-	let dialog = this.dialog.clone();
-	cancel.connect_clicked(move |_| {
-		dialog.close();
-	});
-	let engine = ctx.engine.clone();
-	this.dialog.connect_closed(move |_| engine.send(Action::CloseSheet));
-	this.dialog.present(Some(&ctx.window));
-	this.entry.grab_focus();
-	this
+		let rows = FactoryVecDeque::builder().launch(gtk::ListBox::default()).detach();
+		let mut model = Picker { engine, offer: Offer { rows: Vec::new(), ..offer.clone() }, line_set: true, rows };
+		model.show_rows(&offer.rows);
+		model.offer = offer;
+		let list = model.rows.widget();
+		let widgets = view_output!();
+		widgets.entry.grab_focus();
+		ComponentParts { model, widgets }
+	}
+
+	fn update(&mut self, offer: Offer, _: ComponentSender<Self>) {
+		self.line_set = offer.revision != self.offer.revision;
+		self.show_rows(&offer.rows);
+		self.offer = offer;
+	}
 }
 
 impl Picker {
-	/// Draws what the core offers.
-	pub fn show(self: &Rc<Self>, offer: Offer) {
-		self.filling.set(true);
-		// The line is the person's while they type; the core only sets it when it changes it itself.
-		if self.revision.replace(offer.revision) != offer.revision {
-			self.entry.set_text(&offer.line);
-		}
-		self.problem.set_visible(offer.problem.is_some());
-		self.problem.set_label(offer.problem.as_deref().unwrap_or_default());
-		if offer.problem.is_some() {
-			self.entry.add_css_class("error");
-		} else {
-			self.entry.remove_css_class("error");
-		}
-		if self.choices.first_child().is_none() {
-			for choice in &offer.choices {
-				let button = gtk::Button::builder().label(&choice.label).build();
-				let (engine, value) = (self.ctx.engine.clone(), choice.value.clone());
-				button.connect_clicked(move |_| engine.send(Action::SpamUse { value: value.clone() }));
-				self.choices.append(&button);
-			}
-		}
-		let same = {
-			let shown = self.shown.borrow();
-			shown.len() == offer.rows.len() && shown.iter().zip(&offer.rows).all(|((a, _), b)| a.id == b.id)
-		};
+	fn show_rows(&mut self, rows: &[SpamRow]) {
+		let same = self.offer.rows.len() == rows.len() && self.offer.rows.iter().zip(rows).all(|(a, b)| a.id == b.id);
 		if same {
-			for ((row, check), new) in self.shown.borrow_mut().iter_mut().zip(&offer.rows) {
-				check.set_active(new.picked);
-				*row = new.clone();
+			for (i, row) in rows.iter().enumerate() {
+				self.rows.send(i, row.clone());
 			}
 		} else {
-			self.fill(&offer.rows);
+			let mut shown = self.rows.guard();
+			shown.clear();
+			for row in rows {
+				shown.push_back((row.clone(), self.engine.clone()));
+			}
 		}
-		let picked = offer.rows.iter().filter(|r| r.picked).count();
-		self.count.set_label(&offer.count);
-		self.all.set_active(picked > 0 && picked == offer.rows.len());
-		self.all.set_inconsistent(picked > 0 && picked < offer.rows.len());
-		self.keep.set_active(offer.keep_rule);
-		self.confirm.set_sensitive(picked > 0 || offer.keep_rule);
-		self.confirm.set_label(&offer.confirm);
-		self.filling.set(false);
-	}
-
-	fn fill(self: &Rc<Self>, rows: &[SpamRow]) {
-		self.list.remove_all();
-		let mut shown = Vec::new();
-		for mail in rows {
-			let check = gtk::CheckButton::builder().active(mail.picked).valign(gtk::Align::Center).build();
-			let row = adw::ActionRow::builder().title(glib::markup_escape_text(&mail.who)).subtitle(glib::markup_escape_text(&mail.subject)).subtitle_lines(1).activatable_widget(&check).build();
-			row.add_prefix(&check);
-			row.add_suffix(&gtk::Label::builder().label(&mail.date).css_classes(["dim-label", "caption", "numeric"]).build());
-			self.list.append(&row);
-			let (weak, id) = (Rc::downgrade(self), mail.id.clone());
-			check.connect_toggled(move |_| {
-				if let Some(this) = weak.upgrade().filter(|t| !t.filling.get()) {
-					this.ctx.engine.send(Action::SpamToggle { id: id.clone() });
-				}
-			});
-			shown.push((mail.clone(), check));
-		}
-		*self.shown.borrow_mut() = shown;
 	}
 
 	/// For the screenshot scenes: the subjects listed, and whether each is ticked.
 	pub fn listed(&self) -> Vec<(String, bool)> {
-		self.shown.borrow().iter().map(|(m, c)| (m.subject.clone(), c.is_active())).collect()
+		self.offer.rows.iter().map(|r| (r.subject.clone(), r.picked)).collect()
 	}
 }

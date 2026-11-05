@@ -1,159 +1,189 @@
 //! The sign-in page.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
+use relm4::prelude::*;
 use tern_app::view::{Action, SignInView};
 use tern_app::Engine;
 use tern_demo::DEMO_LOGIN;
 
-#[derive(Clone)]
 pub struct Login {
-	pub root: adw::ToolbarView,
-	email: adw::EntryRow,
-	password: adw::PasswordEntryRow,
-	button: gtk::Button,
-	error: gtk::Label,
 	engine: Arc<Engine>,
-	/// What the core last said, so typing is not overwritten by what it has not changed.
-	shown: Rc<RefCell<Option<SignInView>>>,
+	view: SignInView,
+	/// The core has given another address, rather than following what is typed.
+	email_set: bool,
+	email: String,
+	password: String,
+}
+
+#[derive(Debug)]
+pub enum Input {
+	View(SignInView),
+	Email(String),
+	Password(String),
+	/// Enter in the address field.
+	EmailDone,
+	Submit,
+	/// The page has gone or come back: nothing typed stays.
+	ClearPassword,
+	Focus,
 }
 
 impl Login {
-	pub fn new(engine: Arc<Engine>) -> Login {
-		let email = adw::EntryRow::builder().title("Email Address").input_purpose(gtk::InputPurpose::Email).build();
-		let password = adw::PasswordEntryRow::builder().title("Password").build();
-		let fields = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
-		fields.append(&email);
-		fields.append(&password);
+	fn is_demo(&self) -> bool {
+		self.email.trim().eq_ignore_ascii_case(DEMO_LOGIN)
+	}
 
-		let error = gtk::Label::builder().wrap(true).justify(gtk::Justification::Center).css_classes(["error"]).visible(false).build();
-		let button = gtk::Button::builder()
-			.label("Sign In")
-			.halign(gtk::Align::Center)
-			.css_classes(["pill", "suggested-action"])
-			.sensitive(false)
-			.build();
-		let hint = gtk::Label::builder()
-			.label("Type “demo” to try Tern without an account")
-			.css_classes(["dim-label", "caption"])
-			.wrap(true)
-			.justify(gtk::Justification::Center)
-			.build();
+	fn ready(&self) -> bool {
+		!self.view.busy && (self.is_demo() || (!self.email.trim().is_empty() && !self.password.is_empty()))
+	}
+}
 
-		let column = gtk::Box::new(gtk::Orientation::Vertical, 24);
-		column.append(&fields);
-		column.append(&error);
-		column.append(&button);
-		column.append(&hint);
-		let clamp = adw::Clamp::builder().maximum_size(360).child(&column).build();
+#[relm4::component(pub)]
+impl Component for Login {
+	type Init = Arc<Engine>;
+	type Input = Input;
+	type Output = ();
+	type CommandOutput = ();
 
-		let status = adw::StatusPage::builder()
-			.icon_name(crate::APP_ID)
-			.title("Welcome to Tern")
-			.description("Sign in with your Tuta account")
-			.child(&clamp)
-			.css_classes(["icon-dropshadow"])
-			.build();
-		let scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&status).build();
+	view! {
+		adw::ToolbarView {
+			add_top_bar = &adw::HeaderBar {
+				set_show_title: false,
+				pack_end = &gtk::MenuButton {
+					set_icon_name: "open-menu-symbolic",
+					set_menu_model: Some(&menu),
+					set_tooltip_text: Some("Main Menu"),
+					set_primary: true,
+				},
+			},
+			#[wrap(Some)]
+			set_content = &gtk::ScrolledWindow {
+				set_hscrollbar_policy: gtk::PolicyType::Never,
+				#[wrap(Some)]
+				set_child = &adw::StatusPage {
+					set_icon_name: Some(crate::APP_ID),
+					set_title: "Welcome to Tern",
+					set_description: Some("Sign in with your Tuta account"),
+					add_css_class: "icon-dropshadow",
+					#[wrap(Some)]
+					set_child = &adw::Clamp {
+						set_maximum_size: 360,
+						#[wrap(Some)]
+						set_child = &gtk::Box {
+							set_orientation: gtk::Orientation::Vertical,
+							set_spacing: 24,
+							gtk::ListBox {
+								set_selection_mode: gtk::SelectionMode::None,
+								add_css_class: "boxed-list",
+								#[name = "email"]
+								append = &adw::EntryRow {
+									set_title: "Email Address",
+									set_input_purpose: gtk::InputPurpose::Email,
+									#[watch]
+									set_sensitive: !model.view.busy,
+									#[track = "model.email_set"]
+									#[block_signal(email_typed)]
+									set_text: &model.view.email,
+									connect_changed[sender] => move |row| sender.input(Input::Email(row.text().to_string())) @email_typed,
+									connect_entry_activated => Input::EmailDone,
+								},
+								#[name = "password"]
+								append = &adw::PasswordEntryRow {
+									set_title: "Password",
+									#[watch]
+									set_sensitive: !model.view.busy,
+									connect_changed[sender] => move |row| sender.input(Input::Password(row.text().to_string())),
+									connect_entry_activated => Input::Submit,
+								},
+							},
+							gtk::Label {
+								set_wrap: true,
+								set_justify: gtk::Justification::Center,
+								add_css_class: "error",
+								#[watch]
+								set_visible: model.view.error.is_some(),
+								#[watch]
+								set_label: model.view.error.as_deref().unwrap_or_default(),
+							},
+							gtk::Button {
+								set_halign: gtk::Align::Center,
+								set_css_classes: &["pill", "suggested-action"],
+								#[watch]
+								set_sensitive: model.ready(),
+								connect_clicked => Input::Submit,
+								#[wrap(Some)]
+								set_child = &gtk::Box {
+									set_halign: gtk::Align::Center,
+									adw::Spinner {
+										#[watch]
+										set_visible: model.view.busy,
+									},
+									gtk::Label {
+										set_label: "Sign In",
+										#[watch]
+										set_visible: !model.view.busy,
+									},
+								},
+							},
+							gtk::Label {
+								set_label: "Type “demo” to try Tern without an account",
+								set_css_classes: &["dim-label", "caption"],
+								set_wrap: true,
+								set_justify: gtk::Justification::Center,
+							},
+						},
+					},
+				},
+			},
+		}
+	}
 
+	fn init(engine: Self::Init, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
 		let menu = gtk::gio::Menu::new();
 		menu.append(Some("_Keyboard Shortcuts"), Some("app.shortcuts"));
 		menu.append(Some("_About Tern"), Some("app.about"));
-		let menu_button = gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).tooltip_text("Main Menu").primary(true).build();
-		let header = adw::HeaderBar::builder().show_title(false).build();
-		header.pack_end(&menu_button);
-		let root = adw::ToolbarView::new();
-		root.add_top_bar(&header);
-		root.set_content(Some(&scroll));
-
-		let login = Login { root, email, password, button, error, engine, shown: Rc::default() };
-		let l = login.clone();
-		login.email.connect_changed(move |_| l.update_button());
-		let l = login.clone();
-		login.password.connect_changed(move |_| l.update_button());
-		let l = login.clone();
-		login.email.connect_entry_activated(move |_| {
-			if l.is_demo() {
-				l.submit();
-			} else {
-				l.password.grab_focus();
-			}
-		});
-		let l = login.clone();
-		login.password.connect_entry_activated(move |_| l.submit());
-		let l = login.clone();
-		login.button.connect_clicked(move |_| l.submit());
-		login
+		let model = Login { engine, view: SignInView { email: String::new(), busy: false, error: None }, email_set: false, email: String::new(), password: String::new() };
+		let widgets = view_output!();
+		ComponentParts { model, widgets }
 	}
 
-
-	/// Types `email` and presses Sign In, for the screenshot scenes.
-	pub fn sign_in_as(&self, email: &str) {
-		self.email.set_text(email);
-		self.submit();
-	}
-
-	fn is_demo(&self) -> bool {
-		self.email.text().trim().eq_ignore_ascii_case(DEMO_LOGIN)
-	}
-
-	fn update_button(&self) {
-		let ready = self.is_demo() || (!self.email.text().trim().is_empty() && !self.password.text().is_empty());
-		self.button.set_sensitive(ready && self.button.child().and_downcast::<adw::Spinner>().is_none());
-	}
-
-	pub fn clear_password(&self) {
-		self.password.set_text("");
-	}
-
-	pub fn focus(&self) {
-		if self.email.text().is_empty() {
-			self.email.grab_focus();
-		} else {
-			self.password.grab_focus();
-		}
-	}
-
-	fn set_busy(&self, busy: bool) {
-		if busy {
-			self.button.set_child(Some(&adw::Spinner::new()));
-		} else {
-			self.button.set_label("Sign In");
-		}
-		self.email.set_sensitive(!busy);
-		self.password.set_sensitive(!busy);
-		self.update_button();
-	}
-
-	fn submit(&self) {
-		if !self.button.is_sensitive() {
-			return;
-		}
-		self.error.set_visible(false);
-		self.engine.send(Action::SignIn { email: self.email.text().trim().to_string(), password: self.password.text().to_string() });
-	}
-
-	/// Draws what the core says about signing in.
-	pub fn update(&self, view: SignInView) {
-		let before = self.shown.borrow_mut().replace(view.clone());
-		if before.as_ref().map(|b| &b.email) != Some(&view.email) {
-			self.email.set_text(&view.email);
-		}
-		if before.as_ref().map(|b| b.busy) != Some(view.busy) {
-			self.set_busy(view.busy);
-		}
-		match &view.error {
-			Some(error) => {
-				self.error.set_label(error);
-				self.error.set_visible(true);
-				if before.as_ref().and_then(|b| b.error.as_ref()) != Some(error) {
-					self.password.grab_focus();
+	fn update_with_view(&mut self, widgets: &mut Self::Widgets, input: Input, sender: ComponentSender<Self>, _: &Self::Root) {
+		self.email_set = false;
+		match input {
+			Input::View(view) => {
+				self.email_set = view.email != self.view.email;
+				if self.email_set {
+					self.email = view.email.clone();
+				}
+				let new_error = view.error.is_some() && view.error != self.view.error;
+				self.view = view;
+				if new_error {
+					widgets.password.grab_focus();
 				}
 			},
-			None => self.error.set_visible(false),
+			Input::Email(email) => self.email = email,
+			Input::Password(password) => self.password = password,
+			Input::EmailDone if self.is_demo() => sender.input(Input::Submit),
+			Input::EmailDone => {
+				widgets.password.grab_focus();
+			},
+			Input::Submit => {
+				if self.ready() {
+					self.view.error = None;
+					self.engine.send(Action::SignIn { email: self.email.trim().to_string(), password: self.password.clone() });
+				}
+			},
+			Input::ClearPassword => widgets.password.set_text(""),
+			Input::Focus => {
+				if self.email.is_empty() {
+					widgets.email.grab_focus();
+				} else {
+					widgets.password.grab_focus();
+				}
+			},
 		}
+		self.update_view(widgets, sender);
 	}
 }
