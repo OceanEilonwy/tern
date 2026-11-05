@@ -2279,7 +2279,8 @@ impl App {
 			},
 		};
 		self.task(async move {
-			let found = cache.matching(&rule, &[], PREVIEW).unwrap_or_default();
+			// Rules look at new mail in the Inbox, so what is already gone says nothing about them.
+			let found = cache.matching(&rule, &SPAM_SKIP, PREVIEW).unwrap_or_default();
 			move |app: &mut App| {
 				let Some(ed) = app.rule_ed.as_mut() else { return };
 				if ed.generation != generation {
@@ -2574,6 +2575,10 @@ impl App {
 			Action::OpenSettings => {
 				self.push(Screen::Settings);
 				self.measure();
+			},
+			Action::CloseSettings => {
+				self.rule_ed = None;
+				self.stack.retain(|s| !matches!(s, Screen::Settings | Screen::Rules | Screen::RuleEditor));
 			},
 			Action::SetKeepReady { value } => {
 				if let Some(level) = Level::from_name(&value) {

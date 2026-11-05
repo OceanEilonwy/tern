@@ -132,6 +132,18 @@ mod tests {
 	use super::*;
 	use tern_mail::Address;
 
+	#[test]
+	fn pieces_go_in_at_the_cursor_with_spaces_around() {
+		assert_eq!(insert("", 0, None, Piece::Field("from")), ("from:".into(), 5));
+		assert_eq!(insert("from:@a.org", 11, None, Piece::Word("or")), ("from:@a.org or ".into(), 15));
+		assert_eq!(insert("from:@a.org or ", 15, None, Piece::Field("subject")), ("from:@a.org or subject:".into(), 23));
+		assert_eq!(insert("lunch", 0, None, Piece::Word("not")), ("not lunch".into(), 4));
+		assert_eq!(insert("a", 1, None, Piece::Brackets), ("a ()".into(), 3), "empty brackets put the cursor inside");
+		assert_eq!(insert("a or b c", 0, Some((0, 6)), Piece::Brackets), ("(a or b) c".into(), 8), "a selection is wrapped");
+		assert_eq!(insert("x", 0, Some((0, 1)), Piece::Brackets), ("(x)".into(), 3));
+		assert_eq!(insert("é", 1, None, Piece::Field("to")), ("é to:".into(), 5), "counted in chars");
+	}
+
 	fn rule(when: &str, action: Action) -> Rule {
 		Rule { when: when.into(), action }
 	}

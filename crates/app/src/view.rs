@@ -604,6 +604,8 @@ pub enum Action {
 	RuleInSearch,
 
 	OpenSettings,
+	/// Leaves the settings, and the rules under them, for where they were opened from.
+	CloseSettings,
 	SetKeepReady { value: String },
 	SetForget { on: bool },
 	SetCleanupLimit { value: String },
