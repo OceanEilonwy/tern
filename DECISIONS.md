@@ -7,12 +7,12 @@ attachments must work, KISS, fast, Rust. These are the calls I made, in the orde
 
 - **Name: Tern** (a small, fast seabird), app id `xyz.hollingworth.Tern`, repo `~/Downloads/tern`.
   The name avoids "Tuta" in the product name; the About dialog says it is an unofficial client.
-- **Stack: GTK4 + libadwaita via gtk-rs, no WebKit, no relm4.** Mail HTML is parsed with html5ever into
+- **Stack: GTK4 + libadwaita via gtk-rs and Relm4, no WebKit.** Mail HTML is parsed with html5ever into
   a small document model and drawn natively (one TextView; pictures and tables embedded). Remote images
   are never fetched. Mails too rich to show get an "Open in Tuta" button to app.tuta.com.
 - **Composer writes plain text.** It is turned into a simple HTML body (`tern_compose::text_to_html`).
   No rich-text toolbar: KISS, and it reads fine in every client.
-- **Folders only, no labels or "All mail".** Unread counts in the sidebar are 0 for Tuta for now
+- **Folders and labels, no "All mail".** Unread counts in the sidebar are 0 for Tuta for now
   (the counter service is not ported); the mail list still shows unread mails in bold.
 - **Login is remembered** in the GNOME keyring (Secret Service via `oo7`). The keyring holds the Tuta
   session (access token + encrypted passphrase key), never the password. Sign out deletes the session

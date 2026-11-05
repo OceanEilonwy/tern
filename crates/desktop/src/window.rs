@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
+use relm4::prelude::*;
 use tern_app::view::{Action, ChoiceView, ConnectionKind, ComposerView, Effect, RuleEditorView, RulesView, Screen, SettingsView, SheetView, ShellView, SnackView, Update};
 use tern_app::{Engine, EngineListener, Options, SecretStore};
 use tern_cache::Cache;
@@ -19,7 +20,8 @@ use crate::activity::{Activity, Busy, Word};
 use crate::composer::Composer;
 use crate::keyring::{InMemory, Keyring};
 use crate::layout::Layout;
-use crate::{attachments, cleanup, default_app, labels, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot, spam};
+use crate::cleanup::Cleanup;
+use crate::{attachments, cleanup, default_app, labels, login::{self, Login}, mailbox::Mailbox, rule_editor, runtime, screenshot, spam};
 
 type OfferHook = Box<dyn Fn(Option<&str>)>;
 /// The composer last asked to throw its mail away, and the dialog asking.
@@ -37,7 +39,7 @@ pub struct Ctx {
 	/// Preferences, when open: what Clean Up opens over, and where it says it is done.
 	preferences: Rc<RefCell<Option<glib::WeakRef<adw::PreferencesDialog>>>>,
 	/// Clean Up, while open, with its tick for all mail.
-	pub cleanup: Rc<RefCell<Option<(adw::AlertDialog, gtk::CheckButton)>>>,
+	pub cleanup: Rc<RefCell<Option<Rc<Controller<Cleanup>>>>>,
 	/// The last message the core gave, so it is said once.
 	said: Rc<Cell<u64>>,
 	/// What the core last said about the settings.
@@ -51,9 +53,9 @@ pub struct Ctx {
 	/// For the screenshot scenes: files that would have gone to another app.
 	pub handed_over: Rc<RefCell<Vec<String>>>,
 	/// The labels dialog, while open.
-	pub label_picker: Rc<RefCell<Option<Rc<labels::Picker>>>>,
+	pub label_picker: Rc<RefCell<Option<Rc<Controller<labels::Labels>>>>>,
 	/// Move to Spam, while open.
-	pub picker: Rc<RefCell<Option<Rc<spam::Picker>>>>,
+	pub picker: Rc<RefCell<Option<Rc<Controller<spam::Picker>>>>>,
 	/// The composers on screen, by the core's id.
 	pub composers: Rc<RefCell<BTreeMap<u64, Rc<Composer>>>>,
 	/// The composer last asked to throw its mail away, and the dialog asking, once it is up.
@@ -130,36 +132,46 @@ impl Ctx {
 	fn show_sheet(&self, view: Option<SheetView>) {
 		match view {
 			Some(SheetView::Spam { revision, line, problem, rows, count, keep_rule, confirm, choices }) => {
-				let picker = self.picker.borrow().clone().unwrap_or_else(|| spam::open(self));
-				picker.show(spam::Offer { revision, line, problem, rows, count, keep_rule, confirm, choices });
-				*self.picker.borrow_mut() = Some(picker);
+				let offer = spam::Offer { revision, line, problem, rows, count, keep_rule, confirm, choices };
+				let open = self.picker.borrow().clone();
+				match open {
+					Some(picker) => picker.emit(offer),
+					None => {
+						let picker = spam::Picker::builder().launch((self.engine.clone(), offer)).detach();
+						picker.widget().present(Some(&self.window));
+						*self.picker.borrow_mut() = Some(Rc::new(picker));
+					},
+				}
 			},
 			Some(SheetView::Discard) => self.ask_discard(),
 			Some(SheetView::Labels { subject, choices }) => {
-				let picker = self.label_picker.borrow().clone().unwrap_or_else(|| labels::open(self));
-				picker.show(&subject, &choices);
+				let picker = self.label_picker.borrow().clone().unwrap_or_else(|| {
+					let picker = labels::Labels::builder().launch(self.engine.clone()).detach();
+					picker.widget().present(Some(&self.window));
+					Rc::new(picker)
+				});
+				picker.emit(labels::Offer { subject, choices });
 				*self.label_picker.borrow_mut() = Some(picker);
 			},
 			Some(SheetView::Cleanup { total, choices }) => {
-				let (dialog, all) = cleanup::dialog(self, &total, &choices);
-				match self.open_preferences() {
-					Some(preferences) => dialog.present(Some(&preferences)),
-					None => dialog.present(Some(&self.window)),
-				}
-				*self.cleanup.borrow_mut() = Some((dialog, all));
+				let controller = match self.open_preferences() {
+					Some(preferences) => cleanup::open(&self.engine, total, choices, &preferences),
+					None => cleanup::open(&self.engine, total, choices, &self.window),
+				};
+				*self.cleanup.borrow_mut() = Some(controller);
 			},
 			_ => {
-				if let Some((dialog, _)) = self.cleanup.borrow_mut().take() {
-					dialog.force_close();
+				if let Some(dialog) = self.cleanup.borrow_mut().take() {
+					dialog.widget().force_close();
 				}
 				if let Some(picker) = self.picker.borrow_mut().take() {
-					picker.dialog.force_close();
+					picker.widget().force_close();
 				}
 				if let Some(dialog) = self.discarding.borrow_mut().1.take() {
 					dialog.force_close();
 				}
 				if let Some(picker) = self.label_picker.borrow_mut().take() {
-					picker.dialog.force_close();
+					picker.widget().force_close();
 				}
 			},
 		}
@@ -259,7 +271,7 @@ impl Ctx {
 pub struct Window {
 	pub ctx: Ctx,
 	stack: gtk::Stack,
-	pub login: Login,
+	pub login: Controller<Login>,
 	pub mailbox: Rc<Mailbox>,
 	/// Mail asked for before there was an account to send it from, to write once signed in.
 	/// The account open now, if any.
@@ -308,8 +320,8 @@ impl Window {
 		starting_page.set_content(Some(&starting));
 		stack.add_named(&starting_page, Some("starting"));
 
-		let login = Login::new(engine.clone());
-		stack.add_named(&login.root, Some("login"));
+		let login = Login::builder().launch(engine.clone()).detach();
+		stack.add_named(login.widget(), Some("login"));
 		let mailbox = Mailbox::new(ctx.clone());
 		stack.add_named(&mailbox.root, Some("mailbox"));
 		toasts.set_child(Some(&stack));
@@ -399,9 +411,9 @@ impl Window {
 			Incoming::Update(update) => match *update {
 				Update::Shell { view } => self.show_shell(view),
 				Update::SignIn { view } => {
-					self.login.update(view);
+					self.login.emit(login::Input::View(view));
 					if self.focus_login.take() {
-						self.login.focus();
+						self.login.emit(login::Input::Focus);
 					}
 				},
 				Update::Settings { view } => self.ctx.show_settings(view),
@@ -430,7 +442,7 @@ impl Window {
 			Some(Screen::Starting) | None => {},
 			Some(Screen::SignIn) => {
 				if self.stack.visible_child_name().as_deref() != Some("login") {
-					self.login.clear_password();
+					self.login.emit(login::Input::ClearPassword);
 					self.stack.set_visible_child_name("login");
 					self.ctx.window.set_title(Some("Tern"));
 					self.focus_login.set(true);
@@ -438,7 +450,7 @@ impl Window {
 			},
 			Some(_) => {
 				if self.stack.visible_child_name().as_deref() != Some("mailbox") {
-					self.login.clear_password();
+					self.login.emit(login::Input::ClearPassword);
 					self.stack.set_visible_child_name("mailbox");
 				}
 				// There is nothing here to sign in again from, so go and do it, as ever.

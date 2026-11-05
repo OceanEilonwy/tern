@@ -20,7 +20,8 @@ use tern_compose::Fields;
 use crate::composer::Composer;
 use crate::mailbox::RAIL;
 use crate::window::Window;
-use crate::{rules, spam};
+use crate::rules;
+use relm4::prelude::*;
 use tern_rules::{Action, Rule};
 use tern_mail::FolderKind;
 
@@ -49,6 +50,13 @@ async fn wait_for(ready: impl Fn() -> bool) {
 		sleep(50).await;
 	}
 	eprintln!("tern: screenshot scene did not get ready");
+}
+
+/// Types `email` and presses Sign In.
+fn sign_in_as(win: &Rc<Window>, email: &str) {
+	let field = win.login.widgets().email.clone();
+	field.set_text(email);
+	win.login.emit(crate::login::Input::Submit);
 }
 
 /// The newest composer's id, so a new one can be told from it.
@@ -91,7 +99,7 @@ fn sign_in(win: std::rc::Weak<Window>, path: PathBuf) {
 	glib::spawn_future_local(async move {
 		sleep(300).await;
 		let Some(w) = win.upgrade() else { return eprintln!("tern: screenshot failed: the window was dropped") };
-		w.login.sign_in_as("demo");
+		sign_in_as(&w, "demo");
 		let window = w.ctx.window.clone();
 		drop(w);
 		wait_for(|| win.upgrade().is_some_and(|w| w.mailbox.store.n_items() > 0)).await;
@@ -141,7 +149,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if app.windows().len() != 1 {
 				return Err("a link opened something before signing in".into());
 			}
-			win.login.sign_in_as("demo");
+			sign_in_as(win, "demo");
 			wait_for(|| titled("Hello there")).await;
 			if !titled("Hello there") {
 				return Err("the link did not open after signing in".into());
@@ -200,7 +208,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			sleep(100).await;
 			app.activate_action("sign-out", None);
 			sleep(800).await;
-			win.login.sign_in_as("demo");
+			sign_in_as(win, "demo");
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			if mailbox.store.n_items() > 0 { Ok(()) } else { Err("signing in again showed no mail".into()) }
 		}
@@ -373,11 +381,13 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			win.ctx.engine.send(tern_app::view::Action::OpenCleanup);
 			wait_for(|| win.ctx.cleanup.borrow().is_some()).await;
-			let (dialog, all) = win.ctx.cleanup.borrow().clone().ok_or("Clean Up did not open")?;
+			let cleanup = win.ctx.cleanup.borrow().clone().ok_or("Clean Up did not open")?;
+			let dialog = cleanup.widget().clone();
 			if !dialog.response_label("clean").starts_with("_Free ") {
 				return Err(format!("the button reads {:?}", dialog.response_label("clean")));
 			}
-			all.set_active(true);
+			cleanup.emit(crate::cleanup::Input::Tick(tern_app::view::CleanupPart::All, true));
+			sleep(100).await;
 			if dialog.response_label("clean") != "_Delete All Mail" || dialog.response_appearance("clean") != adw::ResponseAppearance::Destructive || !dialog.is_response_enabled("clean") {
 				return Err(format!("with All Mail ticked the button reads {:?}", dialog.response_label("clean")));
 			}
@@ -401,7 +411,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				choice(Part::Model, "Language model", "Downloaded again if search by meaning is turned on", "30 MB", 30_000_000),
 				choice(Part::All, "All mail", "Deletes all mail on this computer. It downloads again from Tuta.", "1.3 GB", 1_300_000_000),
 			];
-			crate::cleanup::dialog(&win.ctx, "1.3 GB", &choices).0.present(Some(&win.ctx.window));
+			std::mem::forget(crate::cleanup::open(&win.ctx.engine, "1.3 GB".into(), choices.to_vec(), &win.ctx.window));
 			Ok(())
 		}
 		// Typing in To suggests contacts and people written to.
@@ -590,26 +600,31 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			mailbox.select_by_subject("coupon");
 			wait_for(|| mailbox.reader.opened().is_some()).await;
 			gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.spam", None).map_err(|e| e.to_string())?;
-			wait_for(|| win.ctx.picker.borrow().as_ref().is_some_and(|p| p.listed().len() == 3)).await;
+			wait_for(|| win.ctx.picker.borrow().as_ref().is_some_and(|p| p.model().listed().len() == 3)).await;
 			let picker = win.ctx.picker.borrow().clone().ok_or("Move to Spam did not open")?;
-			let ticked = |p: &spam::Picker| p.listed().iter().filter(|(_, t)| *t).count();
-			if picker.listed().len() != 3 || ticked(&picker) != 1 || picker.listed()[0].0 != "Your exclusive coupon inside" {
-				return Err(format!("the sender's mail listed as {:?}", picker.listed()));
+			let listed = || picker.model().listed();
+			let ticked = || listed().iter().filter(|(_, t)| *t).count();
+			if listed().len() != 3 || ticked() != 1 || listed()[0].0 != "Your exclusive coupon inside" {
+				return Err(format!("the sender's mail listed as {:?}", listed()));
 			}
-			picker.entry.set_text("(from:@deals.example");
-			wait_for(|| picker.listed().len() == 1).await;
-			if picker.listed().len() != 1 || picker.confirm.label().as_deref() != Some("Move to Spam") {
-				return Err(format!("a broken line listed {:?} and says {:?}", picker.listed(), picker.confirm.label()));
+			let (entry, all, keep, confirm) = {
+				let w = picker.widgets();
+				(w.entry.clone(), w.all.clone(), w.keep.clone(), w.confirm.clone())
+			};
+			entry.set_text("(from:@deals.example");
+			wait_for(|| listed().len() == 1).await;
+			if listed().len() != 1 || confirm.label().as_deref() != Some("Move to Spam") {
+				return Err(format!("a broken line listed {:?} and says {:?}", listed(), confirm.label()));
 			}
-			picker.entry.set_text("from:@deals.example");
-			wait_for(|| picker.listed().len() == 3).await;
-			picker.all.set_active(true);
-			picker.keep.set_active(true);
-			wait_for(|| ticked(&picker) == 3 && picker.confirm.label().as_deref() == Some("Move 3 to Spam")).await;
-			if ticked(&picker) != 3 || picker.confirm.label().as_deref() != Some("Move 3 to Spam") {
-				return Err(format!("Select All ticked {:?}", picker.listed()));
+			entry.set_text("from:@deals.example");
+			wait_for(|| listed().len() == 3).await;
+			all.set_active(true);
+			keep.set_active(true);
+			wait_for(|| ticked() == 3 && confirm.label().as_deref() == Some("Move 3 to Spam")).await;
+			if ticked() != 3 || confirm.label().as_deref() != Some("Move 3 to Spam") {
+				return Err(format!("Select All ticked {:?}", listed()));
 			}
-			picker.confirm.emit_clicked();
+			confirm.emit_clicked();
 			let in_spam = || win.ctx.cache().and_then(|c| c.folders().ok()?.into_iter().find(|f| f.kind == FolderKind::Spam).and_then(|f| c.count(&f.id).ok()));
 			wait_for(|| in_spam() == Some(3)).await;
 			if in_spam() != Some(3) {
@@ -635,21 +650,22 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			let i = mailbox.listed().iter().position(|r| r.subject.contains("invoice")).ok_or("no invoice")? as u32;
 			mailbox.open_row_menu(i, None).ok_or("no menu")?.popdown();
 			mailbox.row_action("labels")?;
-			wait_for(|| win.ctx.label_picker.borrow().as_ref().is_some_and(|p| !p.ticks().is_empty())).await;
+			wait_for(|| win.ctx.label_picker.borrow().as_ref().is_some_and(|p| !p.model().ticks().is_empty())).await;
 			let picker = win.ctx.label_picker.borrow().clone().ok_or("no labels dialog")?;
-			picker.toggle("Travel");
+			picker.model().toggle("Travel");
 			let chips = || mailbox.listed().iter().position(|r| r.subject.contains("invoice")).map_or(Vec::new(), |i| mailbox.row_chips(i as u32));
 			wait_for(|| chips() == ["Travel"]).await;
 			if chips() != ["Travel"] {
 				return Err(format!("the row shows {:?}", chips()));
 			}
-			picker.new_name.set_text("Bills");
-			picker.new_name.emit_activate();
-			wait_for(|| picker.ticks().iter().any(|(n, on)| n == "Bills" && *on)).await;
-			if !picker.ticks().iter().any(|(n, on)| n == "Bills" && *on) {
-				return Err(format!("a new label left {:?}", picker.ticks()));
+			let new_name = picker.widgets().new_name.clone();
+			new_name.set_text("Bills");
+			new_name.emit_activate();
+			wait_for(|| picker.model().ticks().iter().any(|(n, on)| n == "Bills" && *on)).await;
+			if !picker.model().ticks().iter().any(|(n, on)| n == "Bills" && *on) {
+				return Err(format!("a new label left {:?}", picker.model().ticks()));
 			}
-			picker.dialog.close();
+			picker.widget().close();
 			wait_for(|| win.ctx.label_picker.borrow().is_none()).await;
 			drop(picker);
 			mailbox.select_by_subject("invoice");
@@ -661,7 +677,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			let open = win.ctx.label_picker.borrow().clone();
 			if let Some(open) = open {
-				open.dialog.close();
+				open.widget().close();
 			}
 			wait_for(|| win.ctx.label_picker.borrow().is_none()).await;
 			wait_for(|| mailbox.select_label("Bills")).await;
@@ -1098,11 +1114,11 @@ pub fn drive(win: Rc<Window>) {
 			mailbox.select_by_subject("invoice");
 			wait_for(|| mailbox.reader.opened().is_some()).await;
 			let _ = gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.labels", None);
-			wait_for(|| win.ctx.label_picker.borrow().as_ref().is_some_and(|p| !p.ticks().is_empty())).await;
+			wait_for(|| win.ctx.label_picker.borrow().as_ref().is_some_and(|p| !p.model().ticks().is_empty())).await;
 			let picker = win.ctx.label_picker.borrow().clone();
 			if let Some(picker) = picker {
-				picker.toggle("Travel");
-				picker.new_name.set_text("Bills");
+				picker.model().toggle("Travel");
+				picker.widgets().new_name.set_text("Bills");
 				sleep(300).await;
 			}
 			win.ctx.window.clone().upcast()
@@ -1110,10 +1126,11 @@ pub fn drive(win: Rc<Window>) {
 			mailbox.select_by_subject("coupon");
 			wait_for(|| mailbox.reader.opened().is_some()).await;
 			let _ = gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.spam", None);
-			wait_for(|| win.ctx.picker.borrow().as_ref().is_some_and(|p| p.listed().len() == 3)).await;
+			wait_for(|| win.ctx.picker.borrow().as_ref().is_some_and(|p| p.model().listed().len() == 3)).await;
 			let picker = win.ctx.picker.borrow().clone();
 			if let Some(picker) = picker {
-				picker.all.set_active(true);
+				let all = picker.widgets().all.clone();
+				all.set_active(true);
 				sleep(200).await;
 			}
 			win.ctx.window.clone().upcast()
