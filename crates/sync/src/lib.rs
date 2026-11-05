@@ -5,8 +5,10 @@ use tern_mail::{Backend, Error, Folder, FolderId, Result};
 
 pub mod fetcher;
 pub mod policy;
+pub mod round;
 mod rules;
 
+pub use round::{round, Event, Finished, Job, Stops};
 pub use rules::run_on_new;
 use tern_cache::{now_ms, Cache, CacheError, FolderState, PAGE};
 

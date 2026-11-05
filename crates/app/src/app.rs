@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tern_cache::search::Query;
-use tern_sync::{self as sync, Level};
+use tern_sync::Level;
 use tern_cache::{Cache, ThreadRow};
 use tern_sync::policy::Want;
 use tern_demo::{DemoBackend, DEMO_LOGIN};
@@ -20,6 +20,7 @@ use tern_mail::{Account, Address, Attachment, Backend, Draft, Error, Folder, Fol
 use crate::cleanup::{self, Pick, Usage};
 use tern_compose::{Answer, Fields, Quote, MAX_TOTAL_BYTES};
 use tern_sync::fetcher::{Fetcher, Tuning};
+use tern_sync::{Event, Job, Stops};
 use tern_html::Doc;
 use crate::rules;
 use tern_rules::Piece;
@@ -177,15 +178,6 @@ struct Session {
 	sync: Option<Stops>,
 }
 
-/// A task that ends when this is dropped.
-struct Stops(tokio::task::AbortHandle);
-
-impl Drop for Stops {
-	fn drop(&mut self) {
-		self.0.abort();
-	}
-}
-
 /// One round of keeping the cache up to date, for a session.
 struct Round {
 	paths: Paths,
@@ -226,87 +218,55 @@ impl Round {
 	}
 
 	async fn go(&self) -> CoreResult<()> {
-		use std::sync::atomic::Ordering;
-		let (backend, cache) = (&self.backend, &self.cache);
 		self.post(Box::new(|app| app.start_work(Word::Fetching)));
-		let level = self.settings.lock().unwrap_or_else(|p| p.into_inner()).offline;
-		let mut outcome = Ok(());
-		match sync::folders(backend.as_ref(), cache).await {
-			Ok(mut folders) => {
-				self.post(Box::new({
-					let folders = folders.clone();
-					move |app| {
-						app.note_fine();
-						app.show_folders(folders);
-					}
-				}));
-				if let Ok(labels) = backend.labels().await {
-					self.post(Box::new(move |app| app.labels = labels));
-				}
-				// The inbox first, then the others in their order.
-				folders.sort_by_key(|f| f.kind != FolderKind::Inbox);
-				for folder in folders {
-					let on_show = self.current.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|f| f.id.clone()) == Some(folder.id.clone());
-					let trim = folder.kind != FolderKind::Drafts && !on_show;
-					match sync::folder(backend.as_ref(), cache, &folder.id, level.headers()).await {
-						Ok(changed) => {
-							let trimmed = if trim { cache.trim(&folder.id, level.headers()).unwrap_or(0) } else { 0 };
-							if changed || trimmed > 0 {
-								let id = folder.id.clone();
-								self.post(Box::new(move |app| app.folder_changed(Some(id))));
-							}
-						},
-						Err(e @ (Error::Offline | Error::SessionExpired | Error::RateLimited(_))) => {
-							outcome = Err(e.clone());
-							self.post(Box::new(move |app| app.note_error(&e)));
-							break;
-						},
-						Err(e) => {
-							log::warn!("could not sync {}: {e}", folder.name);
-						},
-					}
-				}
-				// New mail in the Inbox through the rules, before it is opened ahead.
-				let all = rules::load(&self.paths);
-				if let Ok(moved) = tern_sync::run_on_new(backend.as_ref(), cache, &all).await {
-					if moved > 0 {
-						self.post(Box::new(|app| app.folder_changed(None)));
-					}
-				}
-				if !self.contacts_done.load(Ordering::Relaxed) && sync::contacts(backend.as_ref(), cache).await.is_ok() {
-					self.contacts_done.store(true, Ordering::Relaxed);
-				}
-				if let Err(e) = self.fetcher.ahead(level.bodies()).await {
-					self.post(Box::new(move |app| app.note_error(&e)));
-				}
-				let meaning = self.settings.lock().unwrap_or_else(|p| p.into_inner()).semantic;
-				if meaning {
-					if let Err(e) = self.meaning.clone().index(cache.clone()).await {
-						log::warn!("could not index mail by meaning: {e}");
-					}
-					// Turned off meanwhile: what was worked out goes too.
-					if !self.settings.lock().unwrap_or_else(|p| p.into_inner()).semantic {
-						self.meaning.forget(Some(cache));
-					}
-				}
-			},
-			Err(e) => {
-				outcome = Err(e.clone());
-				self.post(Box::new(move |app| app.sync_failed(e)));
-			},
+		let settings = *self.settings.lock().unwrap_or_else(|p| p.into_inner());
+		let current = self.current.clone();
+		let job = Job {
+			backend: self.backend.clone(),
+			cache: self.cache.clone(),
+			fetcher: self.fetcher.clone(),
+			level: settings.offline,
+			rules: rules::load(&self.paths),
+			on_screen: Arc::new(move || current.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|f| f.id.clone())),
+			labels: true,
+			contacts_done: self.contacts_done.clone(),
+		};
+		let finished = tern_sync::round(&job, &|event| {
+			self.post(Box::new(move |app| match event {
+				Event::Folders(folders) => {
+					app.note_fine();
+					app.show_folders(folders);
+				},
+				Event::Labels(labels) => app.labels = labels,
+				Event::FolderChanged(id) => app.folder_changed(Some(id)),
+				Event::RulesMoved => app.folder_changed(None),
+				Event::Problem(e) => app.note_error(&e),
+				Event::NoFolders(e) => app.sync_failed(e),
+			}));
+		})
+		.await;
+		let cache = &self.cache;
+		if finished.listed && self.settings.lock().unwrap_or_else(|p| p.into_inner()).semantic {
+			if let Err(e) = self.meaning.clone().index(cache.clone()).await {
+				log::warn!("could not index mail by meaning: {e}");
+			}
+			// Turned off meanwhile: what was worked out goes too.
+			if !self.settings.lock().unwrap_or_else(|p| p.into_inner()).semantic {
+				self.meaning.forget(Some(cache));
+			}
 		}
 		let (limit, meaning) = {
 			let s = self.settings.lock().unwrap_or_else(|p| p.into_inner());
 			(s.cleanup_mb, s.semantic)
 		};
-		let usage = cleanup::measure(cache, level, meaning, &self.meaning);
+		let usage = cleanup::measure(cache, settings.offline, meaning, &self.meaning);
 		let shown = cleanup::offer(usage.total, limit, disk(&self.paths));
 		self.post(Box::new(move |app| {
 			app.end_work(Word::Fetching);
 			app.usage = Some(usage);
 			app.cleanup_offer = shown.then_some(usage.total);
 		}));
-		outcome
+		finished.result
 	}
 }
 
@@ -1295,7 +1255,7 @@ impl App {
 		self.start_work(Word::Fetching);
 		let id = folder.clone();
 		self.task(async move {
-			let result = sync::folder(backend.as_ref(), &cache, &id, keep).await;
+			let result = tern_sync::folder(backend.as_ref(), &cache, &id, keep).await;
 			move |app: &mut App| {
 				app.end_work(Word::Fetching);
 				app.in_flight.retain(|f| f != &id);
@@ -1346,7 +1306,7 @@ impl App {
 		self.start_work(Word::Fetching);
 		let id = folder.id;
 		self.task(async move {
-			let result = sync::older(backend.as_ref(), &cache, &id).await;
+			let result = tern_sync::older(backend.as_ref(), &cache, &id).await;
 			move |app: &mut App| {
 				app.fetching_older = false;
 				app.end_work(Word::Fetching);
