@@ -1,7 +1,6 @@
 //! The main window: the sign-in page or the mailbox, and the app-wide actions.
 
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -11,9 +10,11 @@ use tern_cache::{sync::Level, Cache};
 use tern_core::{demo::DemoBackend, Backend, Error, FolderKind};
 
 use crate::activity::Activity;
+use crate::compose_model::Fields;
+use crate::composer::Composer;
 use crate::fetcher::{Fetcher, Tuning};
 use crate::settings::{Settings, CLEANUP_MB};
-use crate::{background, cleanup, format, keyring, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot, semantic};
+use crate::{background, cleanup, default_app, format, keyring, login::Login, mailbox::Mailbox, rule_editor, runtime, screenshot, semantic};
 
 type ChangedHook = Box<dyn Fn(&[FolderKind])>;
 type RuleHook = Box<dyn Fn(&str)>;
@@ -128,21 +129,15 @@ impl Ctx {
 	}
 }
 
-/// Where an account's mail cache lives.
-pub fn cache_path(email: &str) -> PathBuf {
-	let base = std::env::var_os("XDG_CACHE_HOME")
-		.map(PathBuf::from)
-		.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-		.unwrap_or_else(std::env::temp_dir);
-	let name: String = email.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '@' { c } else { '_' }).collect();
-	base.join("tern").join("mail").join(format!("{name}.db"))
-}
+pub use crate::settings::cache_path;
 
 pub struct Window {
 	pub ctx: Ctx,
 	stack: gtk::Stack,
 	pub login: Login,
 	pub mailbox: Rc<Mailbox>,
+	/// Mail asked for before there was an account to send it from, to write once signed in.
+	waiting: RefCell<Vec<Fields>>,
 }
 
 impl Window {
@@ -181,7 +176,7 @@ impl Window {
 			window.add_breakpoint(bp);
 		}
 
-		let this = Rc::new(Window { ctx, stack, login, mailbox });
+		let this = Rc::new(Window { ctx, stack, login, mailbox, waiting: RefCell::default() });
 		// The GTK window owns this struct until it is destroyed; callbacks and actions hold only weak references.
 		let owner = RefCell::new(Some(this.clone()));
 		window.connect_destroy(move |_| drop(owner.take()));
@@ -236,6 +231,17 @@ impl Window {
 		let shortcuts = gio::SimpleAction::new("shortcuts", None);
 		shortcuts.connect_activate(move |_, _| shortcuts_dialog().present(Some(&window)));
 		app.add_action(&shortcuts);
+	}
+
+	/// Writes a mail with these fields: now if an account is open, else as soon as one is, with the
+	/// window up for signing in.
+	pub fn compose(&self, fields: Fields) {
+		if self.ctx.cache().is_some() {
+			Composer::open(&self.ctx, fields, None);
+		} else {
+			self.waiting.borrow_mut().push(fields);
+			self.ctx.window.present();
+		}
 	}
 
 	/// Opens the saved session if there is one, else shows the sign-in page.
@@ -309,6 +315,9 @@ impl Window {
 			*this.ctx.cache.borrow_mut() = Some(cache);
 			this.mailbox.start();
 			background::start(&this.ctx, Rc::downgrade(&this.mailbox));
+			for fields in this.waiting.take() {
+				Composer::open(&this.ctx, fields, None);
+			}
 			tern_tuta::trace("mailbox shown");
 		});
 	}
@@ -385,6 +394,7 @@ pub fn preferences_dialog(ctx: &Ctx) -> (adw::PreferencesDialog, Rc<rule_editor:
 	group.add(&storage_row(ctx, &dialog));
 	page.add(&group);
 	page.add(&search);
+	page.add(&default_app::group());
 	page.add(&rules.group);
 	dialog.add(&page);
 	// The dialog keeps its rules section alive while open.

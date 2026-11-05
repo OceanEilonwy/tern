@@ -49,6 +49,19 @@ pub struct Label {
 	pub name: String,
 }
 
+impl Label {
+	/// `mail` carries this label. A label's id ends in its own id, which is what a mail lists.
+	pub fn on(&self, mail: &MailSummary) -> bool {
+		let own = self.id.0.rsplit('/').next().unwrap_or_default();
+		mail.sets.iter().any(|set| set == own)
+	}
+
+	/// The label's own id, as [`MailSummary::sets`] lists it.
+	pub fn own_id(&self) -> &str {
+		self.id.0.rsplit('/').next().unwrap_or_default()
+	}
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Address {
 	pub name: String,
@@ -87,6 +100,9 @@ pub struct MailSummary {
 	/// Not sent yet: opening it continues writing it.
 	#[serde(default)]
 	pub draft: bool,
+	/// The own ids of the mail sets it is in, labels among them. See [`Label::on`].
+	#[serde(default)]
+	pub sets: Vec<String>,
 }
 
 /// A page of a folder, newest first. Pass `next` back to [`Backend::list`] for the page after.
@@ -227,6 +243,8 @@ pub trait Backend: Send + Sync {
 	async fn create_label(&self, name: &str) -> Result<Label>;
 	/// Adds `label` to mails.
 	async fn add_label(&self, ids: &[MailId], label: &FolderId) -> Result<()>;
+	/// Takes `label` off mails.
+	async fn remove_label(&self, ids: &[MailId], label: &FolderId) -> Result<()>;
 	/// Forget the session on the server too.
 	async fn sign_out(&self) -> Result<()>;
 }

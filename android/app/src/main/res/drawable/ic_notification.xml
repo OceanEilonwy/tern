@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Tern's bird alone: what shows in the status bar. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="128" android:viewportHeight="128">
+    <group android:translateY="24">
+        <path android:fillColor="#FFFFFF" android:pathData="M16,28C34,19 52,22 62,36 72,19 92,10 114,12 96,19 80,28 70,44L76,58 65,49 56,60 58,44C46,33 32,27 16,28Z" />
+    </group>
+</vector>

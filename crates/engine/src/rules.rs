@@ -67,6 +67,35 @@ fn to_toml(rules: &[Rule]) -> String {
 	out
 }
 
+/// What the buttons under a rule's line put in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Piece {
+	Field(&'static str),
+	Word(&'static str),
+	Brackets,
+}
+
+/// `line` with `piece` put in at char `cursor` (around the chars `selected`, for brackets), spaced
+/// from its neighbours, and where the cursor goes after it.
+pub fn insert(line: &str, cursor: usize, selected: Option<(usize, usize)>, piece: Piece) -> (String, usize) {
+	let chars: Vec<char> = line.chars().collect();
+	let (from, to) = selected.filter(|(a, b)| a < b && *b <= chars.len()).unwrap_or((cursor.min(chars.len()), cursor.min(chars.len())));
+	let before: String = chars[..from].iter().collect();
+	let inside: String = chars[from..to].iter().collect();
+	let after: String = chars[to..].iter().collect();
+	let gap_before = if before.is_empty() || before.ends_with(char::is_whitespace) || before.ends_with('(') { "" } else { " " };
+	let gap_after = if after.is_empty() || after.starts_with(char::is_whitespace) || after.starts_with(')') { "" } else { " " };
+	let (text, back) = match piece {
+		// The cursor stays after the colon, ready for what to look for.
+		Piece::Field(name) => (format!("{gap_before}{name}:"), 0),
+		Piece::Word(word) => (format!("{gap_before}{word} "), 0),
+		Piece::Brackets if inside.is_empty() => (format!("{gap_before}()"), 1),
+		Piece::Brackets => (format!("({inside}){gap_after}"), 0),
+	};
+	let at = before.chars().count() + text.chars().count() - back;
+	(format!("{before}{text}{after}"), at)
+}
+
 /// What a rule does, as Preferences shows it.
 pub fn describe(action: &Action) -> String {
 	match action {
@@ -184,6 +213,7 @@ mod tests {
 	fn mail_this_account_sent_is_left_alone() {
 		let folders = [Folder { id: FolderId("spam".into()), name: "Spam".into(), kind: FolderKind::Spam, unread: 0 }];
 		let mut mail = MailSummary {
+			sets: Vec::new(),
 			id: MailId { list: "l".into(), element: "e".into() },
 			from: Address::new("", "you@tuta.com"),
 			subject: "coupon".into(),

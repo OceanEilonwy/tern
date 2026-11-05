@@ -339,6 +339,7 @@ mod tests {
 
 	fn mail(from: (&str, &str), to: &str, subject: &str) -> MailSummary {
 		MailSummary {
+			sets: Vec::new(),
 			id: MailId { list: "l".into(), element: "e".into() },
 			from: Address::new(from.0, from.1),
 			subject: subject.into(),

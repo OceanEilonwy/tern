@@ -172,6 +172,29 @@ impl MailFacade {
 		}
 		Ok(())
 	}
+
+	/// Takes a label off mails, with the same service as [`Self::apply_label`].
+	pub async fn remove_label(
+		&self,
+		mut mails: Vec<IdTupleGenerated>,
+		label: IdTupleGenerated,
+	) -> Result<(), ApiCallError> {
+		mails.dedup();
+		for mail in mails.chunks(MAX_MAIL_UPDATE_LIMIT) {
+			self.service_executor
+				.post::<ApplyLabelService>(
+					ApplyLabelServicePostIn {
+						_format: 0,
+						mails: mail.to_vec(),
+						addedLabels: Vec::new(),
+						removedLabels: vec![label.clone()],
+					},
+					Default::default(),
+				)
+				.await?;
+		}
+		Ok(())
+	}
 }
 
 #[uniffi::export]

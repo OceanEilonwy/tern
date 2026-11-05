@@ -4,6 +4,8 @@ members = [
     "crates/core",
     "crates/tuta",
     "crates/cache",
+    "crates/engine",
+    "crates/mobile",
     "crates/app",
     "vendor/tuta-sdk/sdk",
     "vendor/tuta-sdk/crypto-primitives",
@@ -27,6 +29,7 @@ util = { path = "vendor/tuta-sdk/util", default-features = false }
 tern-core = { path = "crates/core" }
 tern-tuta = { path = "crates/tuta" }
 tern-cache = { path = "crates/cache" }
+tern-engine = { path = "crates/engine" }
 base64 = { version = "0.22.1" }
 log = { version = "0.4.22" }
 serde = { version = "1.0.210", features = ["derive", "rc"] }
@@ -39,3 +42,11 @@ rand = { version = "0.8" }
 # Tuta wrote it so new releases vendor cleanly. Tern's own crates keep clippy's defaults.
 [workspace.lints.clippy]
 all = { level = "allow", priority = -1 }
+
+# The Android library: small and fast. Symbols stay for the bindings, which are read from them;
+# the Android build strips them when it packages the library.
+[profile.mobile]
+inherits = "release"
+lto = "thin"
+codegen-units = 4
+strip = "debuginfo"

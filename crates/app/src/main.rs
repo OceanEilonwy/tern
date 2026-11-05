@@ -7,30 +7,29 @@ mod activity;
 mod attachments;
 mod background;
 mod cleanup;
-mod compose_model;
 mod composer;
-mod fetcher;
+mod default_app;
 mod format;
 mod grip;
-mod html_doc;
 mod keyring;
 mod login;
 mod mailbox;
 mod reader;
 mod render;
 mod rule_editor;
-mod rules;
 mod runtime;
 mod screenshot;
 mod search;
-mod semantic;
-mod settings;
 mod spam;
 mod suggest;
 mod window;
 
+use std::cell::RefCell;
+use std::rc::{Rc, Weak};
+
 use adw::prelude::*;
 use gtk::{gio, glib};
+use tern_engine::{compose_model, fetcher, html_doc, rules, semantic, settings};
 
 pub const APP_ID: &str = "xyz.hollingworth.Tern";
 
@@ -46,15 +45,33 @@ fn quiet_old_dark_setting() {
 	}
 }
 
+/// The main window, opened now if it is not open.
+fn main_window(app: &adw::Application, slot: &RefCell<Weak<window::Window>>) -> Rc<window::Window> {
+	if let Some(win) = slot.borrow().upgrade() {
+		return win;
+	}
+	let win = window::Window::new(app);
+	*slot.borrow_mut() = Rc::downgrade(&win);
+	attachments::clean_old_files();
+	win
+}
+
+/// What to hand GApplication: Tern takes no arguments of its own, only the mailto links the desktop
+/// gives it.
+fn command_line() -> Vec<String> {
+	let links = std::env::args_os().skip(1).filter_map(|arg| arg.into_string().ok()).filter(|arg| compose_model::mailto_fields(arg).is_some());
+	std::iter::once("tern".to_string()).chain(links).collect()
+}
+
 fn main() -> glib::ExitCode {
 	gio::resources_register_include!("tern.gresource").expect("register resources");
 	glib::set_application_name("Tern");
 	quiet_old_dark_setting();
 
-	let app = adw::Application::builder().application_id(APP_ID).resource_base_path("/xyz/hollingworth/Tern").build();
+	let app = adw::Application::builder().application_id(APP_ID).resource_base_path("/xyz/hollingworth/Tern").flags(gio::ApplicationFlags::HANDLES_OPEN).build();
 	if screenshot::scene().is_some() {
 		// Screenshot runs must not hand off to a Tern that is already open.
-		app.set_flags(gio::ApplicationFlags::NON_UNIQUE);
+		app.set_flags(app.flags() | gio::ApplicationFlags::NON_UNIQUE);
 	}
 	app.connect_startup(|app| {
 		gtk::Window::set_default_icon_name(APP_ID);
@@ -79,14 +96,23 @@ fn main() -> glib::ExitCode {
 		let quit = gio::ActionEntry::builder("quit").activate(|app: &adw::Application, _, _| app.quit()).build();
 		app.add_action_entries([quit]);
 	});
-	app.connect_activate(|app| {
-		if let Some(w) = app.active_window() {
-			w.present();
-			return;
+	let main = Rc::new(RefCell::new(Weak::new()));
+	app.connect_activate({
+		let main = main.clone();
+		move |app| {
+			if let Some(w) = app.active_window() {
+				w.present();
+				return;
+			}
+			main_window(app, &main);
 		}
-		window::Window::new(app);
-		attachments::clean_old_files();
 	});
-	// Tern takes no arguments of its own.
-	app.run_with_args::<&str>(&[])
+	// A mailto link, from another program or from a second `tern` passing it on to this one.
+	app.connect_open(move |app, files, _| {
+		let win = main_window(app, &main);
+		for fields in files.iter().filter_map(|file| compose_model::mailto_fields(&file.uri())) {
+			win.compose(fields);
+		}
+	});
+	app.run_with_args(&command_line())
 }

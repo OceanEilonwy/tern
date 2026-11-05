@@ -1,0 +1,32 @@
+[package]
+name = "tern-mobile"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+# The Android app's whole behaviour: its state, its navigation, and what each action does. The
+# Kotlin side draws what this publishes and sends back what the person did.
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "tern_mobile"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+tern-core = { workspace = true }
+tern-tuta = { workspace = true }
+tern-cache = { workspace = true }
+tern-engine = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros"] }
+base64 = { workspace = true }
+libc = "0.2"
+async-trait = "0.1.77"
+uniffi = { workspace = true, features = ["cli"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

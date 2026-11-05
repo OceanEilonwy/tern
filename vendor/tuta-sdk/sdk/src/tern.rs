@@ -723,6 +723,11 @@ impl TernMail {
 		Ok(self.sdk.mail_facade().apply_label(mails, label).await?)
 	}
 
+	/// Takes a label off mails, by the label's own id.
+	pub async fn remove_label(&self, mails: Vec<IdTupleGenerated>, label: IdTupleGenerated) -> Result<(), TernError> {
+		Ok(self.sdk.mail_facade().remove_label(mails, label).await?)
+	}
+
 	/// Makes a label in `account`'s mailbox, as `MailModel.createLabel` does: the label's name is
 	/// encrypted with a new session key, which goes along encrypted with the mailbox key. `color` is
 	/// a CSS hex colour such as `#2196f3`. Returns the new label's id.

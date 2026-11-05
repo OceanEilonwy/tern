@@ -11,5 +11,9 @@ serde_json = { workspace = true }
 # SQLCipher, linked against the system's libcrypto: the cache holds decrypted mail.
 rusqlite = { version = "=0.40.2", features = ["bundled-sqlcipher"] }
 
+# Android has no system libcrypto to link SQLCipher against, so it gets its own.
+[target.'cfg(target_os = "android")'.dependencies]
+rusqlite = { version = "=0.40.2", features = ["bundled-sqlcipher-vendored-openssl"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

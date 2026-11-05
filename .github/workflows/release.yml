@@ -4,6 +4,14 @@
 #                                         distributions; ./install.sh adds the menu entry and icon
 #   tern-<version>-x86_64.flatpak         GNOME 50 runtime, for any distribution with Flatpak,
 #                                         Linux Mint included
+#   tern-<version>-<abi>.apk              Android 17 and newer: one for each ABI (arm64-v8a for phones,
+#                                         x86_64 for the emulator), about half the size, and a universal
+#                                         one holding both, with their SHA-256 in SHA256SUMS. All share
+#                                         one versionCode, so any installs over any other.
+#
+# Android signing secrets: TERN_KEYSTORE_BASE64 (the keystore file, base64), TERN_KEYSTORE_PASSWORD,
+# TERN_KEY_ALIAS, TERN_KEY_PASSWORD. A version tag needs them and must name the version in
+# crates/mobile/Cargo.toml; a build of main without them keeps its APKs unsigned, named so.
 name: Release
 
 on:
@@ -56,8 +64,86 @@ jobs:
           name: flatpak
           path: tern-*.flatpak
 
+  apk:
+    runs-on: ubuntu-latest
+    env:
+      TERN_KEYSTORE_BASE64: ${{ secrets.TERN_KEYSTORE_BASE64 }}
+      TERN_KEYSTORE_PASSWORD: ${{ secrets.TERN_KEYSTORE_PASSWORD }}
+      TERN_KEY_ALIAS: ${{ secrets.TERN_KEY_ALIAS }}
+      TERN_KEY_PASSWORD: ${{ secrets.TERN_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/mobile/Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME doesn't match the version $version in crates/mobile/Cargo.toml"; exit 1
+          fi
+          IFS=. read -r major minor patch <<< "${version%%-*}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "code=$((major * 10000 + minor * 100 + patch))" >> "$GITHUB_OUTPUT"
+      - name: Signing key
+        run: |
+          if [ -n "$TERN_KEYSTORE_BASE64" ]; then
+            echo "$TERN_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/tern.jks"
+            echo "TERN_KEYSTORE=$RUNNER_TEMP/tern.jks" >> "$GITHUB_ENV"
+          elif [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "a release needs the signing secrets"; exit 1
+          fi
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Install Android SDK platform and NDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.2" "ndk;30.0.14904198" > /dev/null
+      - name: Rust for Android
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-linux-android x86_64-linux-android
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/cargo-ndk
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: android-rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: cargo-ndk
+        run: command -v cargo-ndk || cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Build
+        working-directory: android
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          ./gradlew assembleRelease -PternSplits \
+            -PternVersion=${{ steps.version.outputs.version }} \
+            -PternVersionCode=${{ steps.version.outputs.code }}
+      - name: Name and check the APKs
+        run: |
+          out=android/app/build/outputs/apk/release
+          version=${{ steps.version.outputs.version }}
+          mkdir dist
+          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)
+          for abi in universal arm64-v8a x86_64; do
+            if [ -f "$out/app-$abi-release.apk" ]; then
+              apk="dist/tern-$version-$abi.apk"
+              cp "$out/app-$abi-release.apk" "$apk"
+              "$apksigner" verify --print-certs "$apk"
+            else
+              cp "$out/app-$abi-release-unsigned.apk" "dist/tern-$version-$abi-unsigned.apk"
+            fi
+          done
+          cd dist && sha256sum * > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: apk
+          path: dist/*
+          retention-days: 30
+
   publish:
-    needs: [tarball, flatpak]
+    needs: [tarball, flatpak, apk]
     runs-on: ubuntu-latest
     permissions:
       contents: write

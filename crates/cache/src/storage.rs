@@ -150,6 +150,7 @@ mod tests {
 
 	fn mail(n: i64, subject: &str) -> MailSummary {
 		MailSummary {
+			sets: Vec::new(),
 			id: MailId { list: "l".into(), element: format!("e{n:03}") },
 			from: Address::new("Mia", "mia@tuta.com"),
 			subject: subject.into(),

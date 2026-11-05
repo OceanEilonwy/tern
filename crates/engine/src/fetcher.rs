@@ -490,6 +490,9 @@ mod tests {
 		async fn add_label(&self, ids: &[MailId], label: &FolderId) -> Result<()> {
 			self.demo.add_label(ids, label).await
 		}
+		async fn remove_label(&self, _: &[MailId], _: &FolderId) -> Result<()> {
+			unimplemented!()
+		}
 		async fn sign_out(&self) -> Result<()> {
 			Ok(())
 		}

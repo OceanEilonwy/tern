@@ -354,6 +354,68 @@ pub fn draft_fields(draft: &Mail, text: &str, kept_quote: Option<Quote>) -> Fiel
 	}
 }
 
+/// The bytes `text` percent-encodes, as text.
+fn percent_decoded(text: &str) -> String {
+	let bytes = text.as_bytes();
+	let mut out = Vec::with_capacity(bytes.len());
+	let mut i = 0;
+	while i < bytes.len() {
+		let hex = (bytes[i] == b'%').then(|| text.get(i + 1..i + 3)).flatten().and_then(|h| u8::from_str_radix(h, 16).ok());
+		match hex {
+			Some(byte) => {
+				out.push(byte);
+				i += 3;
+			}
+			None => {
+				out.push(bytes[i]);
+				i += 1;
+			}
+		}
+	}
+	String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Text for a field of one line: control characters, which a link can spell, become spaces.
+fn one_line(text: &str) -> String {
+	text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().to_string()
+}
+
+/// Adds addresses to a field of them.
+fn add_addresses(field: &mut String, more: &str) {
+	let more = one_line(more);
+	if !more.is_empty() {
+		if !field.is_empty() {
+			field.push_str(", ");
+		}
+		field.push_str(&more);
+	}
+}
+
+/// The fields for writing the mail a `mailto:` link describes (RFC 6068), or `None` for any other
+/// link. A link can come from any web page, so it only ever fills in text for you to read and send:
+/// `attach=` and the like, which would pick up a file from this computer, are ignored.
+pub fn mailto_fields(link: &str) -> Option<Fields> {
+	let rest = link.get(..7).filter(|scheme| scheme.eq_ignore_ascii_case("mailto:")).map(|_| &link[7..])?;
+	let (to, query) = rest.split_once('?').unwrap_or((rest, ""));
+	let mut fields = Fields::default();
+	add_addresses(&mut fields.to, &percent_decoded(to));
+	for pair in query.split('&') {
+		let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+		let value = percent_decoded(value);
+		match name.to_ascii_lowercase().as_str() {
+			"to" => add_addresses(&mut fields.to, &value),
+			"cc" => add_addresses(&mut fields.cc, &value),
+			"bcc" => add_addresses(&mut fields.bcc, &value),
+			"subject" if fields.subject.is_empty() => fields.subject = one_line(&value),
+			"body" if fields.body.is_empty() => {
+				fields.body = value.replace("\r\n", "\n").replace('\r', "\n").chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect();
+			}
+			_ => {}
+		}
+	}
+	Some(fields)
+}
+
 /// A file name safe to create in a directory of ours: no paths, no hidden files.
 pub fn safe_file_name(name: &str) -> String {
 	let base = name.rsplit(['/', '\\']).next().unwrap_or("");
@@ -456,6 +518,7 @@ mod tests {
 	fn mail() -> Mail {
 		Mail {
 			summary: MailSummary {
+				sets: Vec::new(),
 				id: MailId { list: "l".into(), element: "e".into() },
 				from: Address::new("Mia Chen", "mia@tuta.com"),
 				subject: "Photos".into(),
@@ -580,6 +643,46 @@ mod tests {
 		assert_eq!(err.message(), "Not an email address: nope, also bad");
 		let none = Fields { subject: "x".into(), ..Default::default() }.build_draft().unwrap_err();
 		assert!(none.no_recipients);
+	}
+
+	#[test]
+	fn a_mailto_link_fills_in_the_fields() {
+		let f = mailto_fields("mailto:mia@tuta.com").unwrap();
+		assert_eq!((f.to.as_str(), f.subject.as_str(), f.body.as_str()), ("mia@tuta.com", "", ""));
+
+		let f = mailto_fields("MAILTO:a@x.org,Ann%20Lee%20%3Cann@x.org%3E?SUBJECT=Hello%20there+you&cc=c@x.org&bcc=b@x.org&to=d@x.org&cc=e@x.org&body=Line%20one%0D%0ACaf%C3%A9%0Athree").unwrap();
+		assert_eq!(f.to, "a@x.org,Ann Lee <ann@x.org>, d@x.org");
+		assert_eq!(f.cc, "c@x.org, e@x.org");
+		assert_eq!(f.bcc, "b@x.org");
+		assert_eq!(f.subject, "Hello there+you", "a plus is a plus in a mailto link");
+		assert_eq!(f.body, "Line one\nCafé\nthree");
+		assert_eq!(parse_addresses(&f.to).unwrap().len(), 3);
+
+		// Nothing but the recipients, or nothing at all: still a mail to write.
+		assert!(mailto_fields("mailto:").unwrap().is_empty());
+		assert_eq!(mailto_fields("mailto:?subject=Hi").unwrap().subject, "Hi");
+		for other in ["https://x.org", "", "mail", "file:///etc/passwd", "--help"] {
+			assert!(mailto_fields(other).is_none(), "{other}");
+		}
+	}
+
+	#[test]
+	fn a_mailto_link_cannot_do_more_than_fill_in_text() {
+		// Links come from any web page: no files from this computer, no other headers.
+		let f = mailto_fields("mailto:a@x.org?attach=/etc/passwd&attachment=file:///home/me/.ssh/id_rsa&from=boss@x.org&in-reply-to=x").unwrap();
+		assert!(f.attachments.is_empty() && f.kept.is_empty() && f.from.is_empty() && f.previous.is_none() && f.existing.is_none());
+
+		// GTK's text calls cannot take a NUL, and a subject or address is one line.
+		let f = mailto_fields("mailto:a%00@x.org%0Ab@x.org?subject=Hi%0D%0ABcc:%20c@x.org%00&body=a%00b%09c%0Dd").unwrap();
+		assert_eq!(f.to, "a @x.org b@x.org");
+		assert_eq!(f.subject, "Hi  Bcc: c@x.org");
+		assert_eq!(f.body, "ab\tc\nd");
+
+		// What does not decode is kept as written, and never panics.
+		let f = mailto_fields("mailto:a@x.org?subject=100%&body=%E2%82%ZZ%C3%").unwrap();
+		assert_eq!(f.subject, "100%");
+		assert_eq!(f.body, "\u{fffd}%ZZ\u{fffd}%");
+		assert_eq!(mailto_fields("mailto:é%é?subject=é%é").unwrap().subject, "é%é");
 	}
 
 	#[test]

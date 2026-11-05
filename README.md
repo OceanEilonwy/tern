@@ -66,6 +66,14 @@ first time.
 
 To try it without an account, type `demo` as the address on the sign-in screen.
 
+To have email links open in Tern, press **Use Tern** in Preferences → Email Links. With the Flatpak, choose
+Tern as the mail app in your system's Default Applications settings instead.
+
+### Android
+
+Tern for Android 17 and newer is in [`android/`](android/README.md): the same Rust underneath, drawn with
+Material 3 on true black. It is not published yet; build it from source for now.
+
 ## Build from source
 
 ```bash
