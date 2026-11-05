@@ -4,6 +4,7 @@
 // async_trait marks the boxed futures it returns #[must_use], which clippy on stable Rust 1.99 calls doubled.
 #![allow(clippy::double_must_use)]
 
+#[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();
 
 mod app;
@@ -19,7 +20,7 @@ use app::{App, Msg};
 pub use view::*;
 
 /// Secrets kept by the platform: the session, and the key of the encrypted mail cache.
-#[uniffi::export(with_foreign)]
+#[cfg_attr(feature = "uniffi", uniffi::export(with_foreign))]
 pub trait SecretStore: Send + Sync {
 	/// `None` only when there is no such secret. A store that cannot tell says so with an error:
 	/// taking that for "none" would have a new cache key replace the one the cache needs.
@@ -29,12 +30,14 @@ pub trait SecretStore: Send + Sync {
 }
 
 /// The platform's store of secrets could not do what was asked, for now at least.
-#[derive(uniffi::Error, thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 pub enum SecretError {
 	#[error("the secret store is unavailable")]
 	Unavailable,
 }
 
+#[cfg(feature = "uniffi")]
 impl From<uniffi::UnexpectedUniFFICallbackError> for SecretError {
 	fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
 		SecretError::Unavailable
@@ -42,14 +45,15 @@ impl From<uniffi::UnexpectedUniFFICallbackError> for SecretError {
 }
 
 /// Where what is published goes.
-#[uniffi::export(with_foreign)]
+#[cfg_attr(feature = "uniffi", uniffi::export(with_foreign))]
 pub trait EngineListener: Send + Sync {
 	fn on_update(&self, update: Update);
 	fn on_effect(&self, effect: Effect);
 }
 
 /// Where the app keeps things on this device.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct EngineConfig {
 	pub config_dir: String,
 	pub cache_dir: String,
@@ -70,26 +74,23 @@ fn first_dir(dirs: &str) -> Option<&str> {
 	dirs.split(':').find(|dir| !dir.is_empty() && std::fs::read_dir(dir).is_ok())
 }
 
-#[derive(uniffi::Object)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct Engine {
 	tx: UnboundedSender<Msg>,
 }
 
+// Apart because a constructor's own attribute cannot depend on the feature.
+#[cfg(feature = "uniffi")]
 #[uniffi::export]
 impl Engine {
 	#[uniffi::constructor]
 	pub fn new(config: EngineConfig, secrets: Arc<dyn SecretStore>, listener: Arc<dyn EngineListener>) -> Arc<Engine> {
-		// The shared crates find their directories and the TLS roots through these.
-		std::env::set_var("XDG_CONFIG_HOME", &config.config_dir);
-		std::env::set_var("XDG_CACHE_HOME", &config.cache_dir);
-		std::env::set_var("HOME", &config.cache_dir);
-		// The loader takes one directory, so it gets the first this version of Android has.
-		if let Some(dir) = first_dir(&config.cert_dirs) {
-			std::env::set_var("SSL_CERT_DIR", dir);
-		}
-		Engine::start(config.cache_dir.into(), secrets, listener)
+		Engine::open(config, secrets, listener)
 	}
+}
 
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl Engine {
 	/// What the person did. Returns at once; what follows is published.
 	pub fn send(&self, action: Action) {
 		let _ = self.tx.send(Msg::Action(action));
@@ -104,6 +105,20 @@ impl Engine {
 			return none;
 		}
 		answer.recv_timeout(BACKGROUND_LIMIT).unwrap_or(none)
+	}
+}
+
+impl Engine {
+	pub fn open(config: EngineConfig, secrets: Arc<dyn SecretStore>, listener: Arc<dyn EngineListener>) -> Arc<Engine> {
+		// The shared crates find their directories and the TLS roots through these.
+		std::env::set_var("XDG_CONFIG_HOME", &config.config_dir);
+		std::env::set_var("XDG_CACHE_HOME", &config.cache_dir);
+		std::env::set_var("HOME", &config.cache_dir);
+		// The loader takes one directory, so it gets the first this version of Android has.
+		if let Some(dir) = first_dir(&config.cert_dirs) {
+			std::env::set_var("SSL_CERT_DIR", dir);
+		}
+		Engine::start(config.cache_dir.into(), secrets, listener)
 	}
 }
 

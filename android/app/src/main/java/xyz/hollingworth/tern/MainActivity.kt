@@ -16,8 +16,8 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import xyz.hollingworth.tern.core.Action
-import xyz.hollingworth.tern.core.Effect
+import com.tern.engine.Action
+import com.tern.engine.Effect
 import xyz.hollingworth.tern.ui.Root
 
 /** Hosts the screen and does what only the platform can: intents, and the file pickers. */

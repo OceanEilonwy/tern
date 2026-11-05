@@ -68,14 +68,14 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import xyz.hollingworth.tern.Store
-import xyz.hollingworth.tern.core.Action
-import xyz.hollingworth.tern.core.AnswerKind
-import xyz.hollingworth.tern.core.AttachmentView
-import xyz.hollingworth.tern.core.BlockKind
-import xyz.hollingworth.tern.core.BlockView
-import xyz.hollingworth.tern.core.CardView
-import xyz.hollingworth.tern.core.MailRef
-import xyz.hollingworth.tern.core.SpanView
+import com.tern.engine.Action
+import com.tern.engine.AnswerKind
+import com.tern.engine.AttachmentView
+import com.tern.engine.BlockKind
+import com.tern.engine.BlockView
+import com.tern.engine.CardView
+import com.tern.engine.MailRef
+import com.tern.engine.SpanView
 
 @Composable
 fun ConversationScreen(pane: Boolean) {

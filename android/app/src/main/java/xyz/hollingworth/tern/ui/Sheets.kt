@@ -46,11 +46,11 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import xyz.hollingworth.tern.Store
-import xyz.hollingworth.tern.core.Action
-import xyz.hollingworth.tern.core.CleanupChoice
-import xyz.hollingworth.tern.core.CleanupPart
-import xyz.hollingworth.tern.core.LabelChoice
-import xyz.hollingworth.tern.core.SheetView
+import com.tern.engine.Action
+import com.tern.engine.CleanupChoice
+import com.tern.engine.CleanupPart
+import com.tern.engine.LabelChoice
+import com.tern.engine.SheetView
 
 /** Whatever the engine says is open over the screen. */
 @OptIn(ExperimentalMaterial3Api::class)

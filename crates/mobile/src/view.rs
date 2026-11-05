@@ -4,14 +4,16 @@
 //! their own beyond their labels. A view is published only when it changed.
 
 /// A mail, by the list it lives in and its own id.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct MailRef {
 	pub list: String,
 	pub element: String,
 }
 
 /// Where the person is. The last of the stack is on screen; below it is what Back returns to.
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum Screen {
 	Starting,
 	SignIn,
@@ -24,7 +26,8 @@ pub enum Screen {
 	RuleEditor,
 }
 
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum ConnectionKind {
 	Connected,
 	Working,
@@ -34,13 +37,15 @@ pub enum ConnectionKind {
 }
 
 /// The header's second line: the unread count, or what Tern is doing or kept from doing.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct StatusView {
 	pub kind: ConnectionKind,
 	pub line: String,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SnackView {
 	/// Changes with each message, so the same words shown twice count as two messages.
 	pub id: u64,
@@ -48,7 +53,8 @@ pub struct SnackView {
 	pub action: Option<String>,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ShellView {
 	pub stack: Vec<Screen>,
 	pub address: String,
@@ -63,7 +69,8 @@ pub struct ShellView {
 }
 
 /// New mail for the system to say something about.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct MailNotice {
 	/// Stays the same for a conversation, so news of it replaces what was shown before.
 	pub id: i32,
@@ -75,7 +82,8 @@ pub struct MailNotice {
 }
 
 /// What a check for mail in the background found.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct BackgroundResult {
 	pub notices: Vec<MailNotice>,
 	/// What the group of them says, when there is more than one.
@@ -84,14 +92,16 @@ pub struct BackgroundResult {
 	pub retry: bool,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SignInView {
 	pub email: String,
 	pub busy: bool,
 	pub error: Option<String>,
 }
 
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum FolderIcon {
 	Inbox,
 	Drafts,
@@ -102,7 +112,8 @@ pub enum FolderIcon {
 	Folder,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct FolderView {
 	pub id: String,
 	pub name: String,
@@ -112,7 +123,8 @@ pub struct FolderView {
 }
 
 /// One conversation in a list.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct RowView {
 	pub key: String,
 	pub folder_id: String,
@@ -129,7 +141,8 @@ pub struct RowView {
 	pub open: bool,
 }
 
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum ListState {
 	Loading,
 	Empty,
@@ -137,7 +150,8 @@ pub enum ListState {
 	Failed,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SelectionView {
 	pub count: u32,
 	/// Pin or unpin: unpin only when all of them are pinned.
@@ -146,7 +160,8 @@ pub struct SelectionView {
 	pub mark_read: bool,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ListView {
 	pub folders: Vec<FolderView>,
 	pub title: String,
@@ -159,7 +174,8 @@ pub struct ListView {
 	pub selection: Option<SelectionView>,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SpanView {
 	pub text: String,
 	pub bold: bool,
@@ -170,18 +186,21 @@ pub struct SpanView {
 	pub link: Option<String>,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct CellView {
 	pub header: bool,
 	pub spans: Vec<SpanView>,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct TableRowView {
 	pub cells: Vec<CellView>,
 }
 
-#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum BlockKind {
 	Text { spans: Vec<SpanView> },
 	Heading { level: u8, spans: Vec<SpanView> },
@@ -193,7 +212,8 @@ pub enum BlockKind {
 }
 
 /// One drawn block of a mail. Quotes and lists are flattened into how deep each block sits.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct BlockView {
 	pub index: u32,
 	pub kind: BlockKind,
@@ -204,7 +224,8 @@ pub struct BlockView {
 	pub picked: bool,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AttachmentView {
 	pub id: String,
 	pub name: String,
@@ -212,7 +233,8 @@ pub struct AttachmentView {
 	pub image: bool,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct CardView {
 	pub id: MailRef,
 	pub from: String,
@@ -233,7 +255,8 @@ pub struct CardView {
 	pub notice: Option<String>,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ConversationView {
 	pub key: String,
 	pub subject: String,
@@ -243,14 +266,16 @@ pub struct ConversationView {
 	pub pinned: bool,
 }
 
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum AddressField {
 	To,
 	Cc,
 	Bcc,
 }
 
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum AnswerKind {
 	Reply,
 	ReplyAll,
@@ -258,7 +283,8 @@ pub enum AnswerKind {
 }
 
 /// The text of a composer as the person has it now.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ComposeText {
 	pub to: String,
 	pub cc: String,
@@ -268,20 +294,23 @@ pub struct ComposeText {
 	pub from_index: u32,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SuggestionView {
 	pub name: String,
 	pub address: String,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ComposerAttachment {
 	pub name: String,
 	pub size: String,
 	pub pending: bool,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ComposerView {
 	/// Changes when this side puts new text in the fields; the text fields take it then.
 	pub revision: u64,
@@ -306,7 +335,8 @@ pub struct ComposerView {
 	pub suggestions: Vec<SuggestionView>,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SearchView {
 	pub revision: u64,
 	pub query: String,
@@ -317,14 +347,16 @@ pub struct SearchView {
 	pub rows: Vec<RowView>,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ChoiceView {
 	pub value: String,
 	pub label: String,
 	pub selected: bool,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SettingsView {
 	pub address: String,
 	pub keep_ready: Vec<ChoiceView>,
@@ -344,7 +376,8 @@ pub struct SettingsView {
 	pub notifications_line: String,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct RuleRowView {
 	pub index: u32,
 	pub when: String,
@@ -352,12 +385,14 @@ pub struct RuleRowView {
 	pub broken: bool,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct RulesView {
 	pub rows: Vec<RuleRowView>,
 }
 
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum LinePart {
 	From,
 	To,
@@ -368,14 +403,16 @@ pub enum LinePart {
 }
 
 /// A stretch of a rule's line, by chars.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct LineSpan {
 	pub start: u32,
 	pub end: u32,
 	pub part: LinePart,
 }
 
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum RulePiece {
 	From,
 	To,
@@ -386,27 +423,31 @@ pub enum RulePiece {
 	Brackets,
 }
 
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum RuleDoes {
 	Spam,
 	Folder,
 	Label,
 }
 
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PreviewTone {
 	Neutral,
 	Good,
 	Bad,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct PreviewRow {
 	pub who: String,
 	pub subject: String,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct RuleEditorView {
 	pub revision: u64,
 	pub cursor: u32,
@@ -425,7 +466,8 @@ pub struct RuleEditorView {
 	pub can_save: bool,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct LabelChoice {
 	pub id: String,
 	pub name: String,
@@ -434,7 +476,8 @@ pub struct LabelChoice {
 	pub mixed: bool,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SpamRow {
 	pub id: MailRef,
 	pub who: String,
@@ -443,7 +486,8 @@ pub struct SpamRow {
 	pub picked: bool,
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct CleanupChoice {
 	pub part: CleanupPart,
 	pub title: String,
@@ -451,7 +495,8 @@ pub struct CleanupChoice {
 	pub size: String,
 }
 
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum CleanupPart {
 	Older,
 	Vectors,
@@ -460,7 +505,8 @@ pub enum CleanupPart {
 }
 
 /// What opens over the screen.
-#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum SheetView {
 	Labels { subject: String, choices: Vec<LabelChoice> },
 	Spam { revision: u64, line: String, problem: Option<String>, rows: Vec<SpamRow>, count: String, keep_rule: bool, confirm: String, choices: Vec<ChoiceView> },
@@ -469,7 +515,8 @@ pub enum SheetView {
 }
 
 /// One part of what is on screen, changed.
-#[derive(uniffi::Enum, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum Update {
 	Shell { view: ShellView },
 	SignIn { view: SignInView },
@@ -484,7 +531,8 @@ pub enum Update {
 }
 
 /// Something only the platform can do.
-#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum Effect {
 	OpenFile { path: String, mime: String },
 	SaveFile { path: String, name: String, mime: String },
@@ -495,7 +543,8 @@ pub enum Effect {
 }
 
 /// What the person did.
-#[derive(uniffi::Enum, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum Action {
 	SignIn { email: String, password: String },
 	SignInAgain,

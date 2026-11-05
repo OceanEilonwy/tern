@@ -50,8 +50,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import xyz.hollingworth.tern.Store
-import xyz.hollingworth.tern.core.Action
-import xyz.hollingworth.tern.core.ChoiceView
+import com.tern.engine.Action
+import com.tern.engine.ChoiceView
 
 @Composable
 private fun Group(title: String, content: @Composable () -> Unit) {

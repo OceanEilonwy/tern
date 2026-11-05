@@ -44,7 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.background
 import xyz.hollingworth.tern.R
 import xyz.hollingworth.tern.Store
-import xyz.hollingworth.tern.core.Action
+import com.tern.engine.Action
 
 @Composable
 fun SignInScreen() {

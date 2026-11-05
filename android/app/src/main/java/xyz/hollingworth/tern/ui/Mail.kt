@@ -66,12 +66,12 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import xyz.hollingworth.tern.Store
-import xyz.hollingworth.tern.core.Action
-import xyz.hollingworth.tern.core.ConnectionKind
-import xyz.hollingworth.tern.core.FolderView
-import xyz.hollingworth.tern.core.ListState
-import xyz.hollingworth.tern.core.ListView
-import xyz.hollingworth.tern.core.SelectionView
+import com.tern.engine.Action
+import com.tern.engine.ConnectionKind
+import com.tern.engine.FolderView
+import com.tern.engine.ListState
+import com.tern.engine.ListView
+import com.tern.engine.SelectionView
 
 /** The mailbox: a list with a folder menu on a phone; rail, list and conversation when unfolded. */
 @Composable

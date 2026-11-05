@@ -18,23 +18,23 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import xyz.hollingworth.tern.core.Action
-import xyz.hollingworth.tern.core.ComposerView
-import xyz.hollingworth.tern.core.ConversationView
-import xyz.hollingworth.tern.core.Effect
-import xyz.hollingworth.tern.core.Engine
-import xyz.hollingworth.tern.core.EngineConfig
-import xyz.hollingworth.tern.core.EngineListener
-import xyz.hollingworth.tern.core.ListView
-import xyz.hollingworth.tern.core.Screen
-import xyz.hollingworth.tern.core.RuleEditorView
-import xyz.hollingworth.tern.core.RulesView
-import xyz.hollingworth.tern.core.SearchView
-import xyz.hollingworth.tern.core.SettingsView
-import xyz.hollingworth.tern.core.SheetView
-import xyz.hollingworth.tern.core.ShellView
-import xyz.hollingworth.tern.core.SignInView
-import xyz.hollingworth.tern.core.Update
+import com.tern.engine.Action
+import com.tern.engine.ComposerView
+import com.tern.engine.ConversationView
+import com.tern.engine.Effect
+import com.tern.engine.Engine
+import com.tern.engine.EngineConfig
+import com.tern.engine.EngineListener
+import com.tern.engine.ListView
+import com.tern.engine.Screen
+import com.tern.engine.RuleEditorView
+import com.tern.engine.RulesView
+import com.tern.engine.SearchView
+import com.tern.engine.SettingsView
+import com.tern.engine.SheetView
+import com.tern.engine.ShellView
+import com.tern.engine.SignInView
+import com.tern.engine.Update
 
 /** What the engine last published for each part of the screen. Holds no state of its own. */
 object Store {

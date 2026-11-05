@@ -60,10 +60,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import xyz.hollingworth.tern.Store
-import xyz.hollingworth.tern.core.Action
-import xyz.hollingworth.tern.core.AddressField
-import xyz.hollingworth.tern.core.ComposeText
-import xyz.hollingworth.tern.core.ComposerView
+import com.tern.engine.Action
+import com.tern.engine.AddressField
+import com.tern.engine.ComposeText
+import com.tern.engine.ComposerView
 
 /**
  * What is typed stays in the fields until it is sent or closed, so typing never waits on anything;

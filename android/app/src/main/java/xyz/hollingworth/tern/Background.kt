@@ -14,7 +14,7 @@ import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
 import java.util.concurrent.TimeUnit
-import xyz.hollingworth.tern.core.BackgroundResult
+import com.tern.engine.BackgroundResult
 
 private const val WORK = "check-mail"
 private const val CHANNEL = "new-mail"

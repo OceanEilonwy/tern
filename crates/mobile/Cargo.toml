@@ -7,13 +7,8 @@ publish = false
 
 # The Android app's whole behaviour: its state, its navigation, and what each action does. The
 # Kotlin side draws what this publishes and sends back what the person did.
-[lib]
-crate-type = ["cdylib", "rlib"]
-name = "tern_mobile"
-
-[[bin]]
-name = "uniffi-bindgen"
-path = "src/bin/uniffi-bindgen.rs"
+[features]
+uniffi = ["dep:uniffi"]
 
 [dependencies]
 tern-core = { workspace = true }
@@ -26,7 +21,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macr
 base64 = { workspace = true }
 libc = "0.2"
 async-trait = "0.1.77"
-uniffi = { workspace = true, features = ["cli"] }
+uniffi = { workspace = true, optional = true }
 thiserror = "2.0"
 
 [dev-dependencies]

@@ -10,8 +10,8 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import xyz.hollingworth.tern.core.SecretException
-import xyz.hollingworth.tern.core.SecretStore
+import com.tern.engine.SecretException
+import com.tern.engine.SecretStore
 
 /**
  * The session and the cache's key, encrypted with a key the Android Keystore holds and never hands

@@ -1,0 +1,18 @@
+[package]
+name = "tern-ffi"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+name = "tern_ffi"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+tern-mobile = { path = "../mobile", features = ["uniffi"] }
+uniffi = { workspace = true, features = ["cli"] }
