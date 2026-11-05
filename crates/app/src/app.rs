@@ -397,7 +397,7 @@ struct Published {
 	list: Option<ListView>,
 	conversation: Option<Option<ConversationView>>,
 	composer: Option<Option<ComposerView>>,
-	composers: Option<Vec<ComposerView>>,
+	composers: Option<ComposersView>,
 	search: Option<SearchView>,
 	settings: Option<SettingsView>,
 	rules: Option<RulesView>,
@@ -3289,7 +3289,7 @@ impl App {
 		send!(list, self.list_view(), |view| Update::List { view });
 		send!(conversation, self.conversation_view(), |view| Update::Conversation { view });
 		send!(composer, self.composer_view(), |view| Update::Composer { view });
-		send!(composers, self.comps.iter().map(Self::view_of_composer).collect::<Vec<_>>(), |views| Update::Composers { views });
+		send!(composers, ComposersView { open: self.comps.iter().map(Self::view_of_composer).collect() }, |view| Update::Composers { view });
 		send!(search, self.search_view(), |view| Update::Search { view });
 		send!(settings, self.settings_view(), |view| Update::Settings { view });
 		send!(rules, self.rules_view(), |view| Update::Rules { view });
