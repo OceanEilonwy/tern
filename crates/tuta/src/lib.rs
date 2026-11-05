@@ -360,6 +360,7 @@ fn sender(account: &TernAccount, from: Option<&str>) -> Result<TernAccount> {
 
 fn summary(mail: &TutaMail, me: &TernAccount) -> Option<MailSummary> {
 	Some(MailSummary {
+		sets: mail.sets.iter().map(|set| set.element_id.to_string()).collect(),
 		to: mail.firstRecipient.as_ref().map(|a| Address::new(a.name.clone(), a.address.clone())),
 		outgoing: std::iter::once(&me.mail_address).chain(&me.aliases).any(|a| mail.sender.address.eq_ignore_ascii_case(a)),
 		id: id_string(mail._id.as_ref()?),
@@ -437,6 +438,7 @@ impl Backend for TutaBackend {
 			.filter_map(|item| match item {
 				PageItem::Mail(mail) => summary(mail, me),
 				PageItem::Unreadable { id, received_ms } => Some(MailSummary {
+					sets: Vec::new(),
 					id: id_string(id),
 					from: Address::new("Tuta", ""),
 					subject: "Open this message in Tuta".into(),
@@ -530,6 +532,11 @@ impl Backend for TutaBackend {
 	async fn add_label(&self, ids: &[MailId], label: &FolderId) -> Result<()> {
 		let (mail, ids, label) = (self.mail.clone(), ids.iter().map(id_tuple).collect(), self.set_id(label).await?);
 		guarded(async move { mail.apply_label(ids, label).await.map_err(to_error) }).await
+	}
+
+	async fn remove_label(&self, ids: &[MailId], label: &FolderId) -> Result<()> {
+		let (mail, ids, label) = (self.mail.clone(), ids.iter().map(id_tuple).collect(), self.set_id(label).await?);
+		guarded(async move { mail.remove_label(ids, label).await.map_err(to_error) }).await
 	}
 
 	async fn sign_out(&self) -> Result<()> {

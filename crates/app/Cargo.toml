@@ -9,15 +9,13 @@ publish = false
 tern-core = { workspace = true }
 tern-tuta = { workspace = true }
 tern-cache = { workspace = true }
+tern-engine = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = "=1.1.8"
 gtk = { package = "gtk4", version = "0.11", features = ["v4_22"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_8"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync", "macros"] }
 oo7 = { version = "0.6", default-features = false, features = ["tokio", "native_crypto"] }
-scraper = { version = "0.29", default-features = false }
-ego-tree = "0.11"
 base64 = { workspace = true }
 async-trait = "0.1.77"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

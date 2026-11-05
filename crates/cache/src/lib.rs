@@ -485,6 +485,16 @@ impl Cache {
 	}
 
 	/// Pins the conversation `key` to the top of the lists it is in, or unpins it.
+	pub fn set_mail_sets(&self, id: &MailId, sets: &[String]) -> Result<()> {
+		let conn = self.conn();
+		let summary: Option<String> = conn.query_row("SELECT summary FROM mails WHERE list = ?1 AND element = ?2", params![id.list, id.element], |r| r.get(0)).optional()?;
+		let Some(summary) = summary else { return Ok(()) };
+		let mut summary: MailSummary = serde_json::from_str(&summary)?;
+		summary.sets = sets.to_vec();
+		conn.execute("UPDATE mails SET summary = ?3 WHERE list = ?1 AND element = ?2", params![id.list, id.element, serde_json::to_string(&summary)?])?;
+		Ok(())
+	}
+
 	pub fn set_pinned(&self, key: &str, pinned: bool) -> Result<()> {
 		let sql = if pinned { "INSERT OR IGNORE INTO pins (thread) VALUES (?1)" } else { "DELETE FROM pins WHERE thread = ?1" };
 		self.conn().execute(sql, [key])?;
@@ -833,6 +843,7 @@ mod tests {
 
 	fn summary(n: u32, subject: &str, received_ms: i64) -> MailSummary {
 		MailSummary {
+			sets: Vec::new(),
 			id: MailId { list: "l".into(), element: format!("e{n}") },
 			from: Address::new("Mia", "mia@tuta.com"),
 			subject: subject.into(),

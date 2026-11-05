@@ -68,6 +68,7 @@ impl DemoBackend {
 		let mut add = |n: usize, folder: FolderKind, from: Address, subject: &str, ago: i64, unread: bool, body: &str, files: Vec<(Attachment, Vec<u8>)>| {
 			let id = MailId { list: "demo".into(), element: format!("m{n:03}") };
 			let summary = MailSummary {
+				sets: Vec::new(),
 				id: id.clone(),
 				from: from.clone(),
 				subject: subject.into(),
@@ -195,6 +196,7 @@ impl DemoBackend {
 			folder,
 			mail: Mail {
 				summary: MailSummary {
+					sets: Vec::new(),
 					id: id.clone(),
 					from: Address::new(ME.0, draft.from.as_deref().unwrap_or(ME.1)),
 					subject: draft.subject,
@@ -214,6 +216,42 @@ impl DemoBackend {
 				web_url: format!("https://app.tuta.com/mail/demo/{}", id.element),
 			},
 			files: data,
+			labels: Vec::new(),
+		});
+		id
+	}
+
+	/// New mail comes to the Inbox, so the demo account can show what that looks like.
+	pub fn deliver(&self, from: (&str, &str), subject: &str, body: &str) -> MailId {
+		let mut mails = self.mails.lock().unwrap();
+		let id = MailId { list: "arrivals".into(), element: format!("arrival-{}", mails.len()) };
+		// Now, and always the newest.
+		let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+		let received_ms = now.max(mails.iter().map(|m| m.mail.summary.received_ms).max().unwrap_or(0) + 1);
+		mails.push(Stored {
+			folder: FolderKind::Inbox,
+			mail: Mail {
+				summary: MailSummary {
+					sets: Vec::new(),
+					id: id.clone(),
+					from: Address::new(from.0, from.1),
+					subject: subject.into(),
+					received_ms,
+					unread: true,
+					has_attachments: false,
+					to: Some(Address::new(ME.0, ME.1)),
+					outgoing: false,
+					draft: false,
+				},
+				to: vec![Address::new(ME.0, ME.1)],
+				cc: vec![],
+				bcc: vec![],
+				reply_to: vec![],
+				body_html: body.into(),
+				attachments: vec![],
+				web_url: format!("https://app.tuta.com/mail/demo/{}", id.element),
+			},
+			files: vec![],
 			labels: Vec::new(),
 		});
 		id
@@ -329,7 +367,18 @@ impl Backend for DemoBackend {
 			self.find(id, |m| {
 				if !m.labels.contains(label) {
 					m.labels.push(label.clone());
+					m.mail.summary.sets.push(label.0.clone());
 				}
+			})?;
+		}
+		Ok(())
+	}
+
+	async fn remove_label(&self, ids: &[MailId], label: &FolderId) -> Result<()> {
+		for id in ids {
+			self.find(id, |m| {
+				m.labels.retain(|l| l != label);
+				m.mail.summary.sets.retain(|set| set != &label.0);
 			})?;
 		}
 		Ok(())

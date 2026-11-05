@@ -115,6 +115,7 @@ mod tests {
 		let inbox = tern_core::Folder { id: tern_core::FolderId("in".into()), name: "Inbox".into(), kind: tern_core::FolderKind::Inbox, unread: 0 };
 		cache.set_folders(std::slice::from_ref(&inbox)).unwrap();
 		let mail = |n: u32, subject: &str| tern_core::MailSummary {
+			sets: Vec::new(),
 			id: tern_core::MailId { list: "l".into(), element: format!("e{n}") },
 			from: tern_core::Address::new("Mia", "mia@tuta.com"),
 			subject: subject.into(),

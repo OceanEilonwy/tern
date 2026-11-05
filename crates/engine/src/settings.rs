@@ -20,14 +20,26 @@ pub struct Settings {
 	pub forget_on_sign_out: bool,
 	/// The sidebar offers to clean up once the cache passes this many megabytes; 0 for never.
 	pub cleanup_mb: u32,
+	/// Android's dark theme uses true black, for OLED screens.
+	pub pure_black: bool,
+	/// Android takes its colours from the wallpaper instead of Tern's blue.
+	pub match_wallpaper: bool,
+	/// Android checks for new mail in the background this often, in minutes; 0 for never.
+	pub background_minutes: u32,
+	/// Android says when new mail comes to the Inbox. Needs the background checks.
+	pub notifications: bool,
 }
+
+/// How often the background checks can run, in minutes, with 0 for Off first. Android runs periodic
+/// work 15 minutes apart at the closest.
+pub const BACKGROUND_MINUTES: [u32; 4] = [0, 15, 30, 60];
 
 /// The sizes "Offer Cleanup Past" can be, in megabytes, with 0 for Never last.
 pub const CLEANUP_MB: [u32; 6] = [500, 1000, 2000, 5000, 10000, 0];
 
 impl Default for Settings {
 	fn default() -> Settings {
-		Settings { offline: Level::default(), folders_width: 0, folders_rail: false, list_width: 0, semantic: false, forget_on_sign_out: false, cleanup_mb: 1000 }
+		Settings { offline: Level::default(), folders_width: 0, folders_rail: false, list_width: 0, semantic: false, forget_on_sign_out: false, cleanup_mb: 1000, pure_black: true, match_wallpaper: false, background_minutes: 0, notifications: false }
 	}
 }
 
@@ -37,6 +49,16 @@ pub fn dir() -> PathBuf {
 		.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
 		.unwrap_or_else(std::env::temp_dir);
 	base.join("tern")
+}
+
+/// Where an account's mail cache lives.
+pub fn cache_path(email: &str) -> PathBuf {
+	let base = std::env::var_os("XDG_CACHE_HOME")
+		.map(PathBuf::from)
+		.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+		.unwrap_or_else(std::env::temp_dir);
+	let name: String = email.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '@' { c } else { '_' }).collect();
+	base.join("tern").join("mail").join(format!("{name}.db"))
 }
 
 impl Settings {
@@ -71,6 +93,10 @@ impl Settings {
 				.and_then(|mb| u32::try_from(mb).ok())
 				.filter(|mb| CLEANUP_MB.contains(mb))
 				.unwrap_or(Settings::default().cleanup_mb),
+			pure_black: table.get("pure_black").and_then(|v| v.as_bool()).unwrap_or(true),
+			match_wallpaper: table.get("match_wallpaper").and_then(|v| v.as_bool()).unwrap_or(false),
+			background_minutes: table.get("background_minutes").and_then(|v| v.as_integer()).and_then(|m| u32::try_from(m).ok()).filter(|m| BACKGROUND_MINUTES.contains(m)).unwrap_or(0),
+			notifications: table.get("notifications").and_then(|v| v.as_bool()).unwrap_or(false),
 		}
 	}
 
@@ -88,14 +114,18 @@ impl Settings {
 
 	fn to_toml(self) -> String {
 		format!(
-			"offline = \"{}\"\nfolders_width = {}\nfolders_rail = {}\nlist_width = {}\nsemantic = {}\nforget_on_sign_out = {}\ncleanup_mb = {}\n",
+			"offline = \"{}\"\nfolders_width = {}\nfolders_rail = {}\nlist_width = {}\nsemantic = {}\nforget_on_sign_out = {}\ncleanup_mb = {}\npure_black = {}\nmatch_wallpaper = {}\nbackground_minutes = {}\nnotifications = {}\n",
 			self.offline.name(),
 			self.folders_width,
 			self.folders_rail,
 			self.list_width,
 			self.semantic,
 			self.forget_on_sign_out,
-			self.cleanup_mb
+			self.cleanup_mb,
+			self.pure_black,
+			self.match_wallpaper,
+			self.background_minutes,
+			self.notifications
 		)
 	}
 
@@ -114,14 +144,16 @@ mod tests {
 
 	#[test]
 	fn settings_round_trip_and_bad_values_fall_back() {
-		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480, semantic: true, forget_on_sign_out: true, cleanup_mb: 0 };
+		let s = Settings { offline: Level::High, folders_width: 240, folders_rail: true, list_width: 480, semantic: true, forget_on_sign_out: true, cleanup_mb: 0, pure_black: false, match_wallpaper: true, background_minutes: 30, notifications: true };
 		assert_eq!(Settings::parse(&s.to_toml()), s);
-		assert_eq!(s.to_toml(), "offline = \"high\"\nfolders_width = 240\nfolders_rail = true\nlist_width = 480\nsemantic = true\nforget_on_sign_out = true\ncleanup_mb = 0\n");
+		assert_eq!(s.to_toml(), "offline = \"high\"\nfolders_width = 240\nfolders_rail = true\nlist_width = 480\nsemantic = true\nforget_on_sign_out = true\ncleanup_mb = 0\npure_black = false\nmatch_wallpaper = true\nbackground_minutes = 30\nnotifications = true\n");
 		assert_eq!(Settings::parse("not = [toml"), Settings::default());
 		assert!(!Settings::parse("").forget_on_sign_out, "signing out keeps the mail unless asked");
 		assert_eq!(Settings::parse("").cleanup_mb, 1000);
 		assert_eq!(Settings::parse("cleanup_mb = 5000").cleanup_mb, 5000);
 		assert_eq!(Settings::parse("cleanup_mb = 3").cleanup_mb, 1000, "only the sizes offered");
+		assert_eq!(Settings::parse("background_minutes = 5").background_minutes, 0, "only the times offered");
+		assert!(!Settings::parse("").notifications, "off until asked for");
 		assert_eq!(Settings::parse("offline = \"huge\""), Settings::default());
 		// One bad value leaves the others.
 		assert_eq!(Settings::parse("offline = \"low\"\nfolders_width = -5\nlist_width = \"wide\""), Settings { offline: Level::Low, ..Settings::default() });

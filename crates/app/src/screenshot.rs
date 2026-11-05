@@ -1,7 +1,7 @@
 //! A hidden debug path that builds a scene, saves a PNG of it and quits.
 //!
-//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|folders-fail|refresh-race|sign-out-race|draft|suggest|keys|arrows|busy|panes|search|focus-first|spam|rules|inbox|reading|invoice|newsletter|compose|spam-dialog|rule-edit|narrow|narrow-reading`
-//! (with `TERN_DEMO=1` for all but login and sign-in; sign-in types "demo" on the sign-in page). For dark mode add `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
+//! `TERN_SCREENSHOT=/path/out.png TERN_SCREENSHOT_SCENE=login|sign-in|mailto|default-app|folders-fail|refresh-race|sign-out-race|draft|suggest|keys|arrows|busy|panes|search|focus-first|spam|rules|inbox|reading|invoice|newsletter|compose|spam-dialog|rule-edit|narrow|narrow-reading`
+//! (with `TERN_DEMO=1` for all but login, sign-in and mailto; these two type "demo" on the sign-in page). For dark mode add `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -95,6 +95,48 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 	let mailbox = win.mailbox.clone();
 	let app = win.ctx.window.application().ok_or("no application")?;
 	match scene {
+		// A mailto link waits for signing in, opens a composer then, and opens one at once after that;
+		// any other link does nothing.
+		"mailto" => {
+			let open = |link: &str| app.open(&[gtk::gio::File::for_commandline_arg(link)], "");
+			let titled = |title: &str| app.windows().iter().any(|w| w.title().as_deref() == Some(title));
+			sleep(300).await;
+			open("mailto:mia@tuta.com?subject=Hello%20there&body=Hi");
+			open("https://example.org/");
+			sleep(300).await;
+			if app.windows().len() != 1 {
+				return Err("a link opened something before signing in".into());
+			}
+			win.login.sign_in_as("demo");
+			wait_for(|| titled("Hello there")).await;
+			if !titled("Hello there") {
+				return Err("the link did not open after signing in".into());
+			}
+			open("mailto:sam@tuta.com?subject=Second");
+			wait_for(|| titled("Second")).await;
+			if !titled("Second") || app.windows().len() != 3 {
+				return Err(format!("expected the main window and two composers, got {} windows", app.windows().len()));
+			}
+			Ok(())
+		}
+		// Use Tern makes Tern the default for email links. This changes the real default, so it runs
+		// only with settings kept apart, as `make test-ui` keeps them.
+		"default-app" => {
+			let apart = std::env::var_os("XDG_CONFIG_HOME").is_some_and(|dir| std::env::var_os("HOME").is_none_or(|home| std::path::Path::new(&dir) != std::path::Path::new(&home).join(".config")));
+			if !apart {
+				return Err("set XDG_CONFIG_HOME to a directory for this test".into());
+			}
+			let (row, button) = crate::default_app::row();
+			if !button.is_visible() {
+				return Err(format!("no button to press: {:?}", row.subtitle()));
+			}
+			button.emit_clicked();
+			let said = row.subtitle().unwrap_or_default();
+			if button.is_visible() || said != "Email links open in Tern." {
+				return Err(format!("still not the default: {said}"));
+			}
+			Ok(())
+		}
 		// Folders that fail to load say so instead of spinning.
 		"folders-fail" => {
 			wait_for(|| mailbox.status().is_some()).await;
@@ -724,7 +766,7 @@ pub fn drive(win: Rc<Window>) {
 	if scene == "sign-in" {
 		return sign_in(Rc::downgrade(&win), path);
 	}
-	if matches!(scene.as_str(), "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first" | "spam" | "rules" | "menu" | "from" | "rule-edit" | "quote" | "cleanup") {
+	if matches!(scene.as_str(), "mailto" | "default-app" | "folders-fail" | "refresh-race" | "sign-out-race" | "draft" | "suggest" | "keys" | "arrows" | "busy" | "panes" | "search" | "focus-first" | "spam" | "rules" | "menu" | "from" | "rule-edit" | "quote" | "cleanup") {
 		glib::spawn_future_local(async move {
 			if let Err(e) = check(&win, &scene).await {
 				// No picture, so the check fails.
@@ -939,6 +981,9 @@ impl Backend for Staged {
 	}
 	async fn add_label(&self, ids: &[tern_core::MailId], label: &tern_core::FolderId) -> tern_core::Result<()> {
 		self.demo.add_label(ids, label).await
+	}
+	async fn remove_label(&self, ids: &[tern_core::MailId], label: &tern_core::FolderId) -> tern_core::Result<()> {
+		self.demo.remove_label(ids, label).await
 	}
 	async fn sign_out(&self) -> tern_core::Result<()> {
 		self.demo.sign_out().await

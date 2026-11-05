@@ -13,34 +13,9 @@ use gtk::{gio, glib};
 use tern_core::FolderKind;
 
 use crate::window::Ctx;
-use crate::{runtime, semantic};
+use crate::runtime;
 
-/// What Tern takes on disk, in bytes, and what each choice in the dialog would free.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Usage {
-	/// The cache with its log, and the language model.
-	pub total: u64,
-	/// Mail past Keep Ready, the text of older mail opened, and room already free in the file.
-	pub older: u64,
-	/// The mails' meanings for search; 0 when search by meaning is off, as they are gone then.
-	pub vectors: u64,
-	/// The language model, counted only while search by meaning is off: in use, it would only be
-	/// downloaded again.
-	pub model: u64,
-}
-
-/// With the disk this full (free below 1/20 of it), the sidebar offers to clean up whatever the
-/// setting says, once Tern takes at least `LOW_DISK_MIN`.
-const LOW_DISK_SHARE: u64 = 20;
-const LOW_DISK_MIN: u64 = 100_000_000;
-
-/// Whether the sidebar offers to clean up: Tern takes more than `limit_mb` megabytes (0 for never),
-/// or the disk is nearly full and Tern takes enough to matter. `disk` is (free, size) in bytes.
-pub fn offer(total: u64, limit_mb: u32, disk: Option<(u64, u64)>) -> bool {
-	let past = limit_mb > 0 && total > u64::from(limit_mb) * 1_000_000;
-	let low = disk.is_some_and(|(free, size)| size > 0 && free * LOW_DISK_SHARE < size);
-	past || (low && total >= LOW_DISK_MIN)
-}
+pub use tern_engine::cleanup::{offer, Pick, Usage};
 
 /// Free and total bytes of the disk the cache is on.
 fn disk() -> Option<(u64, u64)> {
@@ -54,20 +29,7 @@ fn disk() -> Option<(u64, u64)> {
 pub async fn measure(ctx: &Ctx) -> Option<Usage> {
 	let cache = ctx.cache()?;
 	let (level, meaning) = (ctx.settings().offline, ctx.settings().semantic);
-	runtime::run(async move {
-		tokio::task::spawn_blocking(move || {
-			let model = semantic::model_bytes();
-			Usage {
-				total: cache.disk_bytes() + model,
-				older: cache.older_bytes(level.headers(), level.bodies()).unwrap_or(0),
-				vectors: cache.vector_bytes().unwrap_or(0),
-				model: if meaning { 0 } else { model },
-			}
-		})
-		.await
-		.ok()
-	})
-	.await
+	runtime::run(async move { tokio::task::spawn_blocking(move || tern_engine::cleanup::measure(&cache, level, meaning)).await.ok() }).await
 }
 
 /// Measures and shows or takes back the sidebar's offer to clean up.
@@ -85,50 +47,17 @@ enum Part {
 	Model,
 }
 
-/// What to clear.
-#[derive(Clone, Copy, Debug, Default)]
-struct Pick {
-	older: bool,
-	vectors: bool,
-	model: bool,
-	all: bool,
-}
-
 /// Clears what was picked, gives the room back to the disk, and has the lists fetch again.
 /// Returns the bytes freed.
 async fn clean(ctx: &Ctx, pick: Pick) -> u64 {
 	let Some(cache) = ctx.cache() else { return 0 };
 	let level = ctx.settings().offline;
-	let freed = runtime::run(async move {
-		tokio::task::spawn_blocking(move || {
-			let before = cache.disk_bytes();
-			let done = if pick.all {
-				cache.clear_all()
-			} else {
-				(if pick.older { cache.clear_older(level.headers(), level.bodies()) } else { Ok(()) })
-					.and_then(|()| if pick.vectors { cache.clear_vectors() } else { Ok(()) })
-			};
-			if let Err(e) = done.and_then(|()| cache.compact()) {
-				eprintln!("tern: could not clean up: {e}");
-			}
-			before.saturating_sub(cache.disk_bytes())
-		})
-		.await
-		.unwrap_or(0)
-	})
-	.await;
-	let model = if pick.model {
-		let bytes = semantic::model_bytes();
-		semantic::remove_model();
-		bytes
-	} else {
-		0
-	};
+	let freed = runtime::run(async move { tokio::task::spawn_blocking(move || tern_engine::cleanup::clean(&cache, level, pick)).await.unwrap_or(0) }).await;
 	use FolderKind::*;
 	ctx.changed(&[Inbox, Drafts, Sent, Archive, Spam, Trash, Custom]);
 	ctx.sync_now();
 	check(ctx).await;
-	freed + model
+	freed
 }
 
 /// A choice in the dialog: a tick, a name with what it means, and its size.
@@ -251,26 +180,4 @@ pub fn storage_text(usage: Usage) -> String {
 /// What the toast says once done.
 pub fn freed_toast(bytes: u64) -> String {
 	format!("Freed {}", glib::format_size(bytes))
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn the_offer_shows_past_the_limit_or_on_a_nearly_full_disk() {
-		const GB: u64 = 1_000_000_000;
-		let roomy = Some((500 * GB, 1000 * GB));
-		assert!(!offer(GB, 1000, roomy), "at the limit is not past it");
-		assert!(offer(GB + 1, 1000, roomy));
-		assert!(offer(600_000_000, 500, roomy));
-		assert!(!offer(9 * GB, 10000, roomy));
-		assert!(!offer(50 * GB, 0, roomy), "never");
-		// Nearly full: offered whatever the setting, once Tern takes enough to matter.
-		let full = Some((40 * GB, 1000 * GB));
-		assert!(offer(200_000_000, 0, full));
-		assert!(offer(200_000_000, 10000, full));
-		assert!(!offer(50_000_000, 1000, full), "too little to help");
-		assert!(!offer(200_000_000, 1000, None), "disk unknown");
-	}
 }

@@ -495,3 +495,98 @@ Built to the "Cache cleanup" boards on the design canvas.
   headless backend crashes on the composer's popups; under Broadway the panes size differently. Locally `make test-ui` still prefers kwin. Clippy on stable 1.99 calls
   async_trait's generated `#[must_use]` doubled, so that lint is allowed in each Tern crate; clippy is
   off altogether for the vendored Tuta SDK.
+
+## The default mail app (2026-11-05)
+
+- **The menu entry says Tern takes `mailto:` links** (`MimeType=x-scheme-handler/mailto;`, `Exec=tern %u`),
+  which lists it among the desktop's mail apps. GApplication's `HANDLES_OPEN` passes a link from a second
+  `tern` to the one already open, so a link opens a composer in the running app. Every other argument is
+  still dropped, as Tern takes none of its own.
+- **Preferences → Email Links has a Use Tern button**, which sets the default through GIO
+  (`mimeapps.list`, as the desktop's own settings do) and checks it took: a desktop-specific list such as
+  `kde-mimeapps.list` wins over the one GIO writes. It never asks at start-up, as nothing here should nag.
+- **The Flatpak only says where to choose it.** No portal sets a default, and GIO in the sandbox would write
+  a `mimeapps.list` the desktop never reads. Reaching the real one would need write access to the host's
+  config, more than this is worth given the sandbox has network, display and GPU only. The exported menu
+  entry does list Tern in the system's settings. Run without being installed, as from `cargo run`, there is
+  no menu entry to make default, and the row says so.
+- **A link only fills in text.** It can come from any web page, so To, Cc, Bcc, Subject and Body are read
+  and everything else ignored, `attach=` above all, which would let a page pick up a file from this
+  computer. Nothing is sent until you press Send. Control characters go too; a NUL would make GTK's text
+  calls panic.
+- **A link arriving before sign-in waits** in the window and opens once the account is ready, so a link can
+  start Tern cold.
+- A link in a mail still goes through the desktop's default, as other links do: it reaches Tern's composer
+  when Tern is the default, and whichever app is otherwise.
+
+## Tern for Android (2026-11-05)
+
+- **All behaviour is Rust.** `crates/mobile` owns the state, the navigation stack and what every action
+  does, and publishes view records; Compose draws them and sends actions back. Wording, sorting, what Back
+  does, and which screen is on top are all decided there, so the whole app is tested on the host
+  against the demo account. Kotlin holds only what typing needs locally and the platform's own work.
+- **One task owns the state.** Actions and the results of background work come through one channel; work
+  runs in its own task and comes back as a closure over the state, dropped if the account has gone
+  meanwhile. The UI thread never waits on Rust, and a view is sent only if it changed.
+- **UniFFI**, the version the vendored SDK already pins, with bindings written from the compiled library
+  at build time. `--crate tern_mobile` keeps the SDK's own UniFFI scaffolding out of them.
+- **`tern-engine`** is what moved out of the GTK app so both share it: writing mail, the HTML document,
+  the fetcher, rules, settings, search by meaning, Clean Up's work. The desktop's sync loop and its
+  dates are not moved yet, so those two exist twice for now: the desktop's dates come from GLib, the
+  engine's from chrono.
+- **Opens before it connects.** A saved account shows its encrypted cache at once with a stand-in backend
+  that answers Offline; the session is resumed behind it and the real backend swapped in. So a cold start
+  does not wait on the network, and Tern opens with no network at all.
+- **Connection status lives in the header's second line**, mapped from the real errors (`Offline`,
+  `RateLimited`, `SessionExpired`) and the desktop's activity words. Connected shows only the unread
+  count. Signed out keeps saved mail readable until you sign in again, which differs from the desktop.
+- **Pull to refresh shows a disc only while dragging**; on release the list springs back and the header
+  says Fetching. Offered as a menu item too, for those who cannot do the gesture.
+- **Labels are real now.** A mail lists its mail sets (`MailSummary.sets`), `Backend::remove_label` is new
+  (ApplyLabelService with `removedLabels`), and rows show label names without colours, as Tern has
+  always ignored label colours. Old cached rows show labels once a sync fetches them again.
+- **Quoting by long press.** Compose does not expose a text selection, so a long press picks a whole block
+  of the mail for the reply to quote, rather than lines as on the desktop. The cost is that mail text
+  cannot be selected for copying.
+- **There is no default-mail-app role to ask for.** `android.app.role.EMAIL` is not available and Default
+  apps has no email entry; the default is whatever "Always" chose in the picker, per action and per
+  set of candidates. Settings shows who answers `SENDTO mailto:`, which is how apps send mail, and offers
+  the picker. `VIEW mailto:someone`, as browsers usually open, also has Contacts as a candidate, so it stays
+  a separate choice made in that picker.
+- **Certificates** come from the platform's directories by way of `SSL_CERT_DIR`, as `rustls-native-certs`
+  does not know Android's. It takes one directory, so the engine picks the first that exists. User-added
+  CAs are not trusted.
+- **SQLCipher** links a vendored OpenSSL on Android, which has no system libcrypto to link.
+- **Not there yet**: notifications and background sync (sync runs only while the process is alive), a
+  light theme, and Move to Spam's and Clean Up's dialogs were built without a mockup.
+- **Android 17 only** (minSdk 37), as asked. The `mobile` Cargo profile keeps symbols for the bindings;
+  AGP strips them when packaging.
+
+## Background checks and notifications (2026-11-05)
+
+- **Off until asked for, in one place.** Settings has a pace (Off, 15, 30 or 60 minutes) and a Notifications
+  switch. Notifications need the checks, so turning them on turns on the checks and turning off the checks
+  turns them off; both rules are the engine's. Tern is a privacy-minded app and this spends battery, so
+  neither starts on its own, and Android asks for the permission only when the switch is turned on.
+- **WorkManager**, as the system's own scheduler: runs only with a network, survives restarts, and costs
+  nothing between runs. It cannot be closer than 15 minutes, and Doze can delay it, so news can be late. A
+  foreground service would be prompter and would show a permanent notification. Tuta's own push has not
+  been looked into for Tern, and would be the way to instant news.
+- **The check is the same round as the foreground sync**, shared as `Round`, with a lock so two never run at
+  once, and rules run first so mail a rule moves is never announced. A process started only for a check
+  resumes the saved session first, and retries on its next turn if it cannot.
+- **What is new** is mail in the Inbox received after a mark in the cache, unread and not this account's. The
+  first look only sets the mark, so turning this on does not announce the whole Inbox. While Tern is on
+  screen nothing is announced; leaving the screen moves the mark past what was there.
+- **One notification per conversation**, with an id from its key so news replaces what was shown, grouped with
+  a count past one. Opening Tern clears them. On the lock screen they say only "New mail".
+- **The demo account has mail arrive on each check**, as it has no server, so all this can be tried without
+  an account.
+
+## Publishing Android (2026-11-05)
+
+- **As in Fob:** `-PternSplits` gives APKs per ABI and a universal one sharing a versionCode, signed only when
+  CI's secrets exist; a tag must match the version and has the secrets or fails. The `profile` build type is
+  for trying on a phone. They go in the one Release job with the Linux downloads, as both come from one tag
+  here, and `latest-main` gets them too, unsigned until the secrets exist.
+- **32-bit libraries are excluded** from every APK, or a 32-bit phone would install one and crash.
