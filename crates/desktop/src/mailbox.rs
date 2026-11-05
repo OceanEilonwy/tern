@@ -9,11 +9,12 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use relm4::prelude::*;
 use tern_app::view::{Action, AnswerKind, FolderIcon, FolderView, ListState, ListView, RowView, SearchView};
 use tern_mail::FolderKind;
 
 use crate::layout::Layout;
-use crate::reader::Reader;
+use crate::reader::{self, Reader};
 use crate::{grip, search, window::Ctx};
 
 /// The folder sidebar's width bounds, in pixels, and its width as a rail of icons. Dragged narrower
@@ -74,7 +75,7 @@ pub struct Mailbox {
 	writing_search: Cell<bool>,
 	/// The conversation whose menu was opened last, which the menu's actions act on.
 	menu_row: RefCell<Option<RowView>>,
-	pub reader: Rc<Reader>,
+	pub reader: Rc<Controller<Reader>>,
 }
 
 /// The sidebar's offer to clean up: a broom with a dot, "Clean Up" and how much Tern takes; on the
@@ -350,10 +351,11 @@ impl Mailbox {
 		let (list_pane, list_grip) = grip::wrap(&list_view_tb);
 		let list_page = adw::NavigationPage::builder().title("Inbox").tag("list").child(&list_pane).build();
 
-		let reader = Reader::new(ctx.clone());
+		let (current, told) = relm4::channel();
+		let reader = Rc::new(Reader::builder().launch(ctx.clone()).forward(&current, |c| c));
 		let inner = adw::NavigationSplitView::builder()
 			.sidebar(&list_page)
-			.content(&reader.page)
+			.content(reader.widget())
 			.min_sidebar_width(300.0)
 			.max_sidebar_width(420.0)
 			.sidebar_width_fraction(0.38)
@@ -412,15 +414,17 @@ impl Mailbox {
 		this.connect_search();
 		this.apply_panes();
 		let weak = Rc::downgrade(&this);
-		this.reader.connect_current(move || {
-			if let Some(this) = weak.upgrade() {
-				this.update_actions();
-			}
-		});
-		let weak = Rc::downgrade(&this);
 		this.ctx.connect_offer_cleanup(move |bytes| {
 			if let Some(this) = weak.upgrade() {
 				this.broom.offer(bytes);
+			}
+		});
+		let weak = Rc::downgrade(&this);
+		relm4::spawn_local(async move {
+			while told.recv().await.is_some() {
+				if let Some(this) = weak.upgrade() {
+					this.update_actions();
+				}
 			}
 		});
 		this.add_actions();
@@ -434,7 +438,7 @@ impl Mailbox {
 		let narrow = adw::Breakpoint::new(adw::BreakpointCondition::new_length(adw::BreakpointConditionLengthType::MaxWidth, 600.0, adw::LengthUnit::Sp));
 		narrow.add_setter(&self.outer, "collapsed", Some(&true.to_value()));
 		narrow.add_setter(&self.inner, "collapsed", Some(&true.to_value()));
-		let (wide_only, more) = self.reader.narrow_setters();
+		let (wide_only, more) = reader::narrow_setters(&self.reader);
 		for widget in wide_only.iter().chain(&self.list_wide_only) {
 			narrow.add_setter(widget, "visible", Some(&false.to_value()));
 		}
@@ -704,11 +708,11 @@ impl Mailbox {
 		let weak = Rc::downgrade(self);
 		self.list_view.connect_activate(move |_, _| {
 			let Some(this) = weak.upgrade() else { return };
-			if this.reader.edit_current_draft() {
+			if this.reader.model().edit_current_draft() {
 				return;
 			}
 			this.inner.set_show_content(true);
-			this.reader.focus();
+			this.reader.model().focus();
 		});
 		// Going back in the narrow layout drops the selection, so tapping the same mail opens it again.
 		let weak = Rc::downgrade(self);
@@ -733,7 +737,7 @@ impl Mailbox {
 			}
 			glib::Propagation::Proceed
 		});
-		self.reader.page.add_controller(keys);
+		self.reader.widget().add_controller(keys);
 
 		let weak = Rc::downgrade(self);
 		list_scroll.connect_edge_reached(move |_, pos| {
@@ -763,7 +767,7 @@ impl Mailbox {
 				m.focus_list();
 			}),
 			("open-in-tuta", |m| {
-				if let Some(url) = m.reader.web_url() {
+				if let Some(url) = m.reader.model().web_url() {
 					crate::render::open_uri(&m.ctx.window, &url);
 				}
 			}),
@@ -901,13 +905,13 @@ impl Mailbox {
 
 	/// Mail actions work only while a conversation is open.
 	fn update_actions(&self) {
-		let open = self.reader.current().is_some();
-		let answerable = self.reader.opened().is_some_and(|c| !c.draft);
+		let open = self.reader.model().current().is_some();
+		let answerable = self.reader.model().opened().is_some_and(|c| !c.draft);
 		for name in ["reply", "reply-all", "forward"] {
 			self.action(name).set_enabled(answerable);
 		}
 		for name in ["trash", "spam", "labels", "mark-unread", "open-in-tuta"] {
-			self.action(name).set_enabled(open || self.reader.thread().is_some());
+			self.action(name).set_enabled(open || self.reader.model().thread().is_some());
 		}
 	}
 
@@ -927,7 +931,7 @@ impl Mailbox {
 		self.hold.set(true);
 		self.store.remove_all();
 		self.hold.set(false);
-		self.reader.show(None);
+		self.reader.emit(reader::Input::Show(None));
 		self.set_enabled(false);
 	}
 
@@ -939,13 +943,13 @@ impl Mailbox {
 	/// The conversation was left: back in a narrow layout, or nothing selected.
 	fn close_conversation(&self) {
 		*self.asked.borrow_mut() = None;
-		if self.reader.thread().is_some() {
+		if self.reader.model().thread().is_some() {
 			self.ctx.engine.send(Action::Back);
 		}
 	}
 
 	fn answer(&self, kind: AnswerKind) {
-		self.reader.answer(kind);
+		self.reader.model().answer(kind);
 	}
 
 	/// The core says whether a search is on show instead of the folder.
