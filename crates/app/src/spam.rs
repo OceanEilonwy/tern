@@ -274,9 +274,9 @@ impl Picker {
 		let line = self.entry.text().trim().to_string();
 		let ruled = self.keep.is_active() && parse(&line).is_ok();
 		if ruled {
-			let mut all = rules::load();
+			let mut all = rules::load(crate::paths());
 			all.push(Rule { when: line, action: Action::Spam });
-			rules::save(&all);
+			rules::save(crate::paths(), &all);
 		}
 		self.dialog.close();
 		if ids.is_empty() {

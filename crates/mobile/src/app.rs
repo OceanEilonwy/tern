@@ -22,8 +22,10 @@ use tern_engine::compose_model::{self, Answer, Fields, Quote, MAX_TOTAL_BYTES};
 use tern_engine::fetcher::{Fetcher, Tuning};
 use tern_engine::html_doc::Doc;
 use tern_engine::rules::{self, Piece};
-use tern_engine::settings::{self, Settings, BACKGROUND_MINUTES, CLEANUP_MB};
-use tern_engine::{format, semantic};
+use tern_engine::settings::{Settings, BACKGROUND_MINUTES, CLEANUP_MB};
+use tern_engine::paths::Paths;
+use tern_engine::semantic::{self, Meaning};
+use tern_engine::format;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Notify;
 
@@ -185,6 +187,8 @@ impl Drop for Stops {
 
 /// One round of keeping the cache up to date, for a session.
 struct Round {
+	paths: Paths,
+	meaning: Arc<Meaning>,
 	backend: Arc<dyn Backend>,
 	cache: Arc<Cache>,
 	fetcher: Fetcher,
@@ -257,13 +261,12 @@ impl Round {
 							break;
 						},
 						Err(e) => {
-							let message = format!("could not sync {}: {e}", folder.name);
-							self.post(Box::new(move |app| app.log(message)));
+							log::warn!("could not sync {}: {e}", folder.name);
 						},
 					}
 				}
 				// New mail in the Inbox through the rules, before it is opened ahead.
-				let all = rules::load();
+				let all = rules::load(&self.paths);
 				if let Ok(moved) = rules::run_on_new(backend.as_ref(), cache, &all).await {
 					if moved > 0 {
 						self.post(Box::new(|app| app.folder_changed(None)));
@@ -277,13 +280,12 @@ impl Round {
 				}
 				let meaning = self.settings.lock().unwrap_or_else(|p| p.into_inner()).semantic;
 				if meaning {
-					if let Err(e) = semantic::index(cache.clone()).await {
-						let message = format!("could not index mail by meaning: {e}");
-						self.post(Box::new(move |app| app.log(message)));
+					if let Err(e) = self.meaning.clone().index(cache.clone()).await {
+						log::warn!("could not index mail by meaning: {e}");
 					}
 					// Turned off meanwhile: what was worked out goes too.
 					if !self.settings.lock().unwrap_or_else(|p| p.into_inner()).semantic {
-						semantic::forget(Some(cache));
+						self.meaning.forget(Some(cache));
 					}
 				}
 			},
@@ -296,8 +298,8 @@ impl Round {
 			let s = self.settings.lock().unwrap_or_else(|p| p.into_inner());
 			(s.cleanup_mb, s.semantic)
 		};
-		let usage = cleanup::measure(cache, level, meaning);
-		let shown = cleanup::offer(usage.total, limit, disk());
+		let usage = cleanup::measure(cache, level, meaning, &self.meaning);
+		let shown = cleanup::offer(usage.total, limit, disk(&self.paths));
 		self.post(Box::new(move |app| {
 			app.end_work(Word::Fetching);
 			app.usage = Some(usage);
@@ -485,6 +487,8 @@ pub struct App {
 	resuming: bool,
 	/// The session to ask the server for again, for an account not yet connected.
 	saved_session: Option<String>,
+	paths: Paths,
+	meaning: Arc<Meaning>,
 	/// A conversation asked for, from a notification, before the account was open.
 	open_when_ready: Option<(String, FolderId)>,
 	open_dir: PathBuf,
@@ -589,8 +593,8 @@ fn current_word(text: &str) -> (usize, &str) {
 }
 
 /// Free and total bytes of the disk the cache is on.
-fn disk() -> Option<(u64, u64)> {
-	let path = settings::cache_path("x");
+fn disk(paths: &Paths) -> Option<(u64, u64)> {
+	let path = paths.mail_cache("x");
 	let dir = path.ancestors().find(|p| p.exists())?;
 	let dir = std::ffi::CString::new(dir.to_str()?).ok()?;
 	let mut info: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -637,8 +641,12 @@ fn cache_key(secrets: &dyn SecretStore, email: &str) -> Option<[u8; 32]> {
 }
 
 impl App {
-	pub fn new(tx: UnboundedSender<Msg>, listener: Arc<dyn EngineListener>, secrets: Arc<dyn SecretStore>, runtime: tokio::runtime::Handle, cache_dir: PathBuf) -> App {
+	pub fn new(tx: UnboundedSender<Msg>, listener: Arc<dyn EngineListener>, secrets: Arc<dyn SecretStore>, runtime: tokio::runtime::Handle, paths: Paths) -> App {
 		App {
+			settings: Arc::new(Mutex::new(Settings::load(&paths))),
+			meaning: Meaning::new(&paths),
+			open_dir: paths.opened_dir(),
+			paths,
 			tx,
 			listener,
 			secrets,
@@ -647,7 +655,6 @@ impl App {
 			session: None,
 			stack: vec![Screen::Starting],
 			signin: SignInView { email: String::new(), busy: false, error: None },
-			settings: Arc::new(Mutex::new(Settings::load())),
 			folders: Vec::new(),
 			labels: Vec::new(),
 			current: Arc::default(),
@@ -683,7 +690,6 @@ impl App {
 			resuming: false,
 			saved_session: None,
 			open_when_ready: None,
-			open_dir: cache_dir.join("tern").join("open"),
 			published: Published::default(),
 			revision: 1,
 		}
@@ -697,7 +703,7 @@ impl App {
 		let mut settings = self.settings();
 		change(&mut settings);
 		*self.settings.lock().unwrap_or_else(|p| p.into_inner()) = settings;
-		settings.save();
+		settings.save(&self.paths);
 		if let Some(session) = &self.session {
 			session.wake.notify_one();
 		}
@@ -785,16 +791,16 @@ impl App {
 	pub fn start(&mut self) {
 		if let Err(e) = std::fs::remove_dir_all(&self.open_dir) {
 			if e.kind() != std::io::ErrorKind::NotFound {
-				self.log(format!("could not clear opened files: {e}"));
+				log::warn!("could not clear opened files: {e}");
 			}
 		}
-		let secrets = self.secrets.clone();
+		let (secrets, paths) = (self.secrets.clone(), self.paths.clone());
 		self.task(async move {
 			// The platform may take its time over secrets, and the cache over its first read.
 			let found = tokio::task::spawn_blocking(move || {
 				let saved = saved_session(secrets.as_ref())?;
 				Ok::<_, SecretError>(saved.map(|(email, session)| {
-					let cache = cache_key(secrets.as_ref(), &email).and_then(|key| Cache::open(&settings::cache_path(&email), &key).ok());
+					let cache = cache_key(secrets.as_ref(), &email).and_then(|key| Cache::open(&paths.mail_cache(&email), &key).ok());
 					(email, session, cache)
 				}))
 			})
@@ -827,8 +833,9 @@ impl App {
 	fn resume(&mut self, saved: String) {
 		let again = saved.clone();
 		self.resuming = true;
+		let sdk_dir = self.paths.sdk_dir();
 		self.task(async move {
-			let result = tern_tuta::resume(&saved).await;
+			let result = tern_tuta::resume(&saved, sdk_dir).await;
 			move |app: &mut App| match result {
 				Ok(backend) => {
 					app.resuming = false;
@@ -909,10 +916,10 @@ impl App {
 		self.stack = vec![Screen::Inbox];
 		self.signin.busy = false;
 		self.signin.error = None;
-		self.rules = rules::load();
+		self.rules = rules::load(&self.paths);
 		match cache.folders() {
 			Ok(folders) => self.show_folders(folders),
-			Err(e) => self.log(format!("could not read folders: {e}")),
+			Err(e) => log::warn!("could not read folders: {e}"),
 		}
 		if connected {
 			self.start_sync();
@@ -941,18 +948,18 @@ impl App {
 			return;
 		}
 		self.signin.busy = true;
-		let secrets = self.secrets.clone();
+		let (secrets, paths) = (self.secrets.clone(), self.paths.clone());
 		self.task(async move {
-			let result = tern_tuta::login(&email, &password).await;
+			let result = tern_tuta::login(&email, &password, paths.sdk_dir()).await;
 			let opened = match &result {
 				Ok((_, session)) => {
-					let (email, session) = (email.clone(), session.clone());
+					let (email, session, paths) = (email.clone(), session.clone(), paths.clone());
 					tokio::task::spawn_blocking(move || {
 						if let Ok(raw) = serde_json::to_vec(&(&email, &session)) {
 							// Not remembered is not fatal: the next start asks again.
 							let _ = secrets.put(SESSION.into(), raw);
 						}
-						cache_key(secrets.as_ref(), &email).and_then(|key| Cache::open(&settings::cache_path(&email), &key).ok())
+						cache_key(secrets.as_ref(), &email).and_then(|key| Cache::open(&paths.mail_cache(&email), &key).ok())
 					})
 					.await
 					.unwrap_or(None)
@@ -1015,13 +1022,13 @@ impl App {
 		self.signin.email = email.clone();
 		self.reset_account();
 		self.stack = vec![Screen::SignIn];
-		let secrets = self.secrets.clone();
+		let (secrets, paths) = (self.secrets.clone(), self.paths.clone());
 		self.runtime.spawn(async move {
 			let _ = tokio::task::spawn_blocking(move || {
 				secrets.remove(SESSION.into());
 				if persistent && forget {
 					secrets.remove(format!("cache-key:{email}"));
-					let path = settings::cache_path(&email);
+					let path = paths.mail_cache(&email);
 					for suffix in ["", "-wal", "-shm"] {
 						let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
 					}
@@ -1037,6 +1044,8 @@ impl App {
 	fn round(&self) -> Option<Round> {
 		let session = self.session.as_ref()?;
 		Some(Round {
+			paths: self.paths.clone(),
+			meaning: self.meaning.clone(),
 			backend: session.backend.clone(),
 			cache: session.cache.clone(),
 			fetcher: session.fetcher.clone(),
@@ -1830,9 +1839,9 @@ impl App {
 		let Some(Sheet::Spam(sheet)) = self.sheet.take() else { return };
 		let ruled = sheet.keep_rule && parse(sheet.line.trim()).is_ok();
 		if ruled {
-			self.rules = rules::load();
+			self.rules = rules::load(&self.paths);
 			self.rules.push(Rule { when: sheet.line.trim().to_string(), action: rule_lang::Action::Spam });
-			rules::save(&self.rules);
+			rules::save(&self.paths, &self.rules);
 		}
 		let ids: Vec<MailId> = sheet.mails.iter().map(|m| m.id.clone()).filter(|id| sheet.picked.contains(id)).collect();
 		self.selection.clear();
@@ -2175,11 +2184,12 @@ impl App {
 			return;
 		}
 		search.searching = true;
+		let model = self.meaning.clone();
 		self.task(async move {
 			let hits = match rule {
 				Some(rule) => cache.rule_hits(&rule, RESULTS).unwrap_or_default(),
 				None => {
-					let model = if meaning { semantic::loaded() } else { None };
+					let model = if meaning { model.loaded() } else { None };
 					let vector = model.map(|m| m.embed(&query.text()));
 					cache.search(&query, vector.as_deref().map(|v| (semantic::NAME, v)), RESULTS).unwrap_or_default()
 				},
@@ -2199,7 +2209,7 @@ impl App {
 	// ---- Rules
 
 	fn open_rule(&mut self, index: Option<usize>) {
-		self.rules = rules::load();
+		self.rules = rules::load(&self.paths);
 		let rule = index.and_then(|i| self.rules.get(i).cloned());
 		let folder_names = self.rule_folders();
 		let first_folder = folder_names.first().cloned().unwrap_or_default();
@@ -2339,7 +2349,7 @@ impl App {
 			Some(i) => self.rules[i] = rule,
 			None => self.rules.push(rule),
 		}
-		rules::save(&self.rules);
+		rules::save(&self.paths, &self.rules);
 		self.rule_ed = None;
 		self.remove_screen(Screen::RuleEditor);
 	}
@@ -2348,7 +2358,7 @@ impl App {
 		let Some(ed) = self.rule_ed.take() else { return };
 		if let Some(i) = ed.index.filter(|i| *i < self.rules.len()) {
 			self.rules.remove(i);
-			rules::save(&self.rules);
+			rules::save(&self.paths, &self.rules);
 		}
 		self.remove_screen(Screen::RuleEditor);
 	}
@@ -2388,9 +2398,6 @@ impl App {
 		}
 	}
 
-	fn log(&self, message: String) {
-		self.listener.on_effect(Effect::Log { message });
-	}
 
 	// ---- Actions
 
@@ -2589,7 +2596,7 @@ impl App {
 			},
 			Action::RunCleanup { older, vectors, model, all } => self.run_cleanup(Pick { older, vectors, model, all }),
 			Action::OpenRules => {
-				self.rules = rules::load();
+				self.rules = rules::load(&self.paths);
 				self.push(Screen::Rules);
 			},
 			Action::OpenRule { index } => self.open_rule(index.map(|i| i as usize)),
@@ -2706,9 +2713,10 @@ impl App {
 		let Some(session) = self.session.as_ref() else { return };
 		let cache = session.cache.clone();
 		let settings = self.settings();
+		let (meaning, paths) = (self.meaning.clone(), self.paths.clone());
 		self.task(async move {
-			let usage = cleanup::measure(&cache, settings.offline, settings.semantic);
-			let shown = cleanup::offer(usage.total, settings.cleanup_mb, disk());
+			let usage = cleanup::measure(&cache, settings.offline, settings.semantic, &meaning);
+			let shown = cleanup::offer(usage.total, settings.cleanup_mb, disk(&paths));
 			move |app: &mut App| {
 				app.usage = Some(usage);
 				app.cleanup_offer = shown.then_some(usage.total);
@@ -2721,8 +2729,9 @@ impl App {
 		let Some(session) = self.session.as_ref() else { return };
 		let cache = session.cache.clone();
 		let level = self.settings().offline;
+		let meaning = self.meaning.clone();
 		self.task(async move {
-			let freed = cleanup::clean(&cache, level, pick);
+			let freed = cleanup::clean(&cache, level, pick, &meaning);
 			move |app: &mut App| {
 				app.say(format!("Freed {}", format::size(freed)));
 				app.measure();
@@ -2741,13 +2750,14 @@ impl App {
 		self.change_settings(|s| s.semantic = on);
 		if !on {
 			self.semantic_note = None;
-			semantic::forget(self.session.as_ref().map(|s| s.cache.as_ref()));
+			self.meaning.forget(self.session.as_ref().map(|s| s.cache.as_ref()));
 			return;
 		}
 		// Fetch the model now and say so; the sync then works out each mail's meaning.
 		self.semantic_note = Some("Downloading the language model…".into());
+		let meaning = self.meaning.clone();
 		self.task(async move {
-			let result = semantic::ensure().await;
+			let result = meaning.ensure().await;
 			move |app: &mut App| match result {
 				Ok(_) => {
 					app.semantic_note = None;
@@ -3165,6 +3175,7 @@ mod session_tests {
 	impl EngineListener for Nobody {
 		fn on_update(&self, _: Update) {}
 		fn on_effect(&self, _: Effect) {}
+		fn on_log(&self, _: String) {}
 	}
 
 	/// A store that can be told to fail, and remembers what it was asked to keep.
@@ -3229,7 +3240,7 @@ mod session_tests {
 		let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
 		// Kept open: the loop must stop because the account went, not because the app did.
 		let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-		let mut app = App::new(tx, Arc::new(Nobody), Arc::new(Store::default()), runtime.handle().clone(), std::env::temp_dir());
+		let mut app = App::new(tx, Arc::new(Nobody), Arc::new(Store::default()), runtime.handle().clone(), Paths::new(std::env::temp_dir(), std::env::temp_dir()));
 		app.sign_in("demo".into(), String::new());
 		let demo = Arc::downgrade(app.session.as_ref().unwrap().demo.as_ref().unwrap());
 		app.sign_out();

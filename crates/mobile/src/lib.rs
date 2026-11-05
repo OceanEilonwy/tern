@@ -14,6 +14,7 @@ pub mod view;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, OnceLock};
 
+use tern_engine::paths::Paths;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 use app::{App, Msg};
@@ -49,6 +50,8 @@ impl From<uniffi::UnexpectedUniFFICallbackError> for SecretError {
 pub trait EngineListener: Send + Sync {
 	fn on_update(&self, update: Update);
 	fn on_effect(&self, effect: Effect);
+	/// Something for the system's log. Comes from any thread.
+	fn on_log(&self, message: String);
 }
 
 /// Where the app keeps things on this device.
@@ -110,15 +113,15 @@ impl Engine {
 
 impl Engine {
 	pub fn open(config: EngineConfig, secrets: Arc<dyn SecretStore>, listener: Arc<dyn EngineListener>) -> Arc<Engine> {
-		// The shared crates find their directories and the TLS roots through these.
-		std::env::set_var("XDG_CONFIG_HOME", &config.config_dir);
-		std::env::set_var("XDG_CACHE_HOME", &config.cache_dir);
-		std::env::set_var("HOME", &config.cache_dir);
-		// The loader takes one directory, so it gets the first this version of Android has.
+		// The system's log, for what is wrong and has nowhere on screen to go.
+		let log_to = listener.clone();
+		tern_engine::logs::init(move |message| log_to.on_log(message));
+		// The TLS library takes its roots from here and no other way, and only one directory:
+		// the first this version of Android has. Set before anything can read it.
 		if let Some(dir) = first_dir(&config.cert_dirs) {
 			std::env::set_var("SSL_CERT_DIR", dir);
 		}
-		Engine::start(config.cache_dir.into(), secrets, listener)
+		Engine::start(Paths::new(&config.config_dir, &config.cache_dir), secrets, listener)
 	}
 }
 
@@ -136,9 +139,9 @@ fn step(app: &mut App, msg: Msg) {
 }
 
 impl Engine {
-	fn start(cache_dir: std::path::PathBuf, secrets: Arc<dyn SecretStore>, listener: Arc<dyn EngineListener>) -> Arc<Engine> {
+	fn start(paths: Paths, secrets: Arc<dyn SecretStore>, listener: Arc<dyn EngineListener>) -> Arc<Engine> {
 		let (tx, mut rx) = unbounded_channel();
-		let mut app = App::new(tx.clone(), listener, secrets, runtime().handle().clone(), cache_dir);
+		let mut app = App::new(tx.clone(), listener, secrets, runtime().handle().clone(), paths);
 		runtime().spawn(async move {
 			app.start();
 			while let Some(msg) = rx.recv().await {

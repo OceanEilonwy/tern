@@ -2,9 +2,10 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tern_engine::paths::Paths;
 use tern_engine::settings::Settings;
 
 use super::*;
@@ -47,6 +48,7 @@ impl EngineListener for Screen_ {
 	fn on_effect(&self, effect: Effect) {
 		self.0.lock().unwrap().effects.push(effect);
 	}
+	fn on_log(&self, _: String) {}
 }
 
 #[derive(Default)]
@@ -65,14 +67,11 @@ impl SecretStore for Secrets {
 	}
 }
 
-/// Settings and rules live in files named by the environment, shared by the whole test process.
-static FILES: Mutex<()> = Mutex::new(());
-
 struct Harness {
 	engine: Arc<Engine>,
 	seen: Arc<Mutex<Seen>>,
-	_files: MutexGuard<'static, ()>,
 	dir: std::path::PathBuf,
+	paths: Paths,
 }
 
 impl Drop for Harness {
@@ -87,14 +86,12 @@ fn harness() -> Harness {
 
 fn harness_with(secrets: Arc<Secrets>) -> Harness {
 	static NEXT: AtomicU32 = AtomicU32::new(0);
-	let files = FILES.lock().unwrap_or_else(|p| p.into_inner());
 	let dir = std::env::temp_dir().join(format!("tern-mobile-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
 	std::fs::create_dir_all(&dir).unwrap();
-	std::env::set_var("XDG_CONFIG_HOME", &dir);
-	std::env::set_var("XDG_CACHE_HOME", &dir);
+	let paths = Paths::new(&dir, &dir);
 	let seen: Arc<Mutex<Seen>> = Arc::default();
-	let engine = Engine::start(dir.clone(), secrets, Arc::new(Screen_(seen.clone())));
-	Harness { engine, seen, _files: files, dir }
+	let engine = Engine::start(paths.clone(), secrets, Arc::new(Screen_(seen.clone())));
+	Harness { engine, seen, dir, paths }
 }
 
 impl Harness {
@@ -483,7 +480,7 @@ fn settings_are_saved_and_published() {
 		let v = s.settings.as_ref().unwrap();
 		v.keep_ready_line.starts_with("High") && v.cleanup_limit_line == "5.0 GB" && v.forget_on_sign_out && !v.pure_black && v.match_wallpaper && !s.shell.as_ref().unwrap().pure_black
 	});
-	let saved = Settings::load();
+	let saved = Settings::load(&h.paths);
 	assert_eq!(saved.cleanup_mb, 5000, "a size not offered is ignored");
 	assert!(saved.forget_on_sign_out && !saved.pure_black && saved.match_wallpaper);
 }
@@ -544,7 +541,7 @@ fn a_saved_account_opens_at_once_from_the_encrypted_cache_with_no_server() {
 	// A key was made and kept for the cache, and the cache on disk opens only with it.
 	let key = secrets.get("cache-key:me@tuta.com".into()).unwrap().expect("a cache key is kept");
 	assert_eq!(key.len(), 32);
-	let path = tern_engine::settings::cache_path("me@tuta.com");
+	let path = h.paths.mail_cache("me@tuta.com");
 	h.until("the cache file", |_| path.exists());
 	let key: [u8; 32] = key.try_into().unwrap();
 	assert!(tern_cache::Cache::open(&path, &key).is_ok(), "opens with its key");
@@ -585,7 +582,7 @@ fn notifications_and_background_checks_are_off_until_asked_for_and_depend_on_eac
 	// Turning off the checks turns off what depends on them.
 	h.send(Action::SetBackground { value: "0".into() });
 	h.until("both off", |s| !s.settings.as_ref().unwrap().notifications && s.shell.as_ref().unwrap().background_minutes == 0);
-	let saved = Settings::load();
+	let saved = Settings::load(&h.paths);
 	assert_eq!((saved.background_minutes, saved.notifications), (0, false));
 	// Signed out there is nothing to check.
 	h.send(Action::SetNotifications { on: true });

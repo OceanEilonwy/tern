@@ -6,7 +6,7 @@
 
 use tern_cache::{sync::Level, Cache};
 
-use crate::semantic;
+use crate::semantic::Meaning;
 
 /// What Tern takes on disk, in bytes, and what each choice would free.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -45,8 +45,8 @@ pub fn offer(total: u64, limit_mb: u32, disk: Option<(u64, u64)>) -> bool {
 }
 
 /// Measures what Tern takes now. Reads the disk, so it does not belong on a UI thread.
-pub fn measure(cache: &Cache, level: Level, meaning: bool) -> Usage {
-	let model = semantic::model_bytes();
+pub fn measure(cache: &Cache, level: Level, meaning: bool, model: &Meaning) -> Usage {
+	let model = model.model_bytes();
 	Usage {
 		total: cache.disk_bytes() + model,
 		older: cache.older_bytes(level.headers(), level.bodies()).unwrap_or(0),
@@ -57,7 +57,7 @@ pub fn measure(cache: &Cache, level: Level, meaning: bool) -> Usage {
 
 /// Clears what was picked and gives the room back to the disk. Returns the bytes freed. Reads and
 /// writes the disk, so it does not belong on a UI thread.
-pub fn clean(cache: &Cache, level: Level, pick: Pick) -> u64 {
+pub fn clean(cache: &Cache, level: Level, pick: Pick, meaning: &Meaning) -> u64 {
 	let before = cache.disk_bytes();
 	let done = if pick.all {
 		cache.clear_all()
@@ -65,12 +65,12 @@ pub fn clean(cache: &Cache, level: Level, pick: Pick) -> u64 {
 		(if pick.older { cache.clear_older(level.headers(), level.bodies()) } else { Ok(()) }).and_then(|()| if pick.vectors { cache.clear_vectors() } else { Ok(()) })
 	};
 	if let Err(e) = done.and_then(|()| cache.compact()) {
-		eprintln!("tern: could not clean up: {e}");
+		log::warn!("could not clean up: {e}");
 	}
 	let freed = before.saturating_sub(cache.disk_bytes());
 	let model = if pick.model {
-		let bytes = semantic::model_bytes();
-		semantic::remove_model();
+		let bytes = meaning.model_bytes();
+		meaning.remove_model();
 		bytes
 	} else {
 		0

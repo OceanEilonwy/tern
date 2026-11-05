@@ -39,14 +39,14 @@ struct SavedSession {
 
 /// Signs in with an email address and password. Returns the account and a saved session
 /// to keep in the keyring, which [`resume`] turns back into the account without the password.
-pub async fn login(email: &str, password: &str) -> Result<(Arc<dyn Backend>, String)> {
+pub async fn login(email: &str, password: &str, sdk_dir: PathBuf) -> Result<(Arc<dyn Backend>, String)> {
 	let (email, password) = (email.trim().to_lowercase(), password.to_string());
-	guarded(async move { login_inner(&email, &password).await }).await
+	guarded(async move { login_inner(&email, &password, sdk_dir).await }).await
 }
 
-async fn login_inner(email: &str, password: &str) -> Result<(Arc<dyn Backend>, String)> {
-	let (sdk, credentials) = sdk()?.tern_sign_in(email, password, CLIENT_IDENTIFIER).await.map_err(to_error)?;
-	trace("session open, loading the account");
+async fn login_inner(email: &str, password: &str, sdk_dir: PathBuf) -> Result<(Arc<dyn Backend>, String)> {
+	let (sdk, credentials) = sdk(sdk_dir)?.tern_sign_in(email, password, CLIENT_IDENTIFIER).await.map_err(to_error)?;
+	log::debug!("session open, loading the account");
 	let saved = serde_json::to_string(&SavedSession {
 		login: credentials.login.clone(),
 		user_id: credentials.user_id.to_string(),
@@ -55,24 +55,17 @@ async fn login_inner(email: &str, password: &str) -> Result<(Arc<dyn Backend>, S
 	})
 	.map_err(|e| Error::Other(e.to_string()))?;
 	let backend = TutaBackend::new(sdk.tern(), &credentials.login).await?;
-	trace("signed in");
+	log::debug!("signed in");
 	Ok((Arc::new(backend), saved))
 }
 
-/// A step on stderr when `TERN_LOG` is set.
-pub fn trace(step: &str) {
-	if std::env::var_os("TERN_LOG").is_some() {
-		eprintln!("tern: {step}");
-	}
-}
-
 /// Reopens a session saved by [`login`].
-pub async fn resume(saved: &str) -> Result<Arc<dyn Backend>> {
+pub async fn resume(saved: &str, sdk_dir: PathBuf) -> Result<Arc<dyn Backend>> {
 	let saved = saved.to_string();
-	guarded(async move { resume_inner(&saved).await }).await
+	guarded(async move { resume_inner(&saved, sdk_dir).await }).await
 }
 
-async fn resume_inner(saved: &str) -> Result<Arc<dyn Backend>> {
+async fn resume_inner(saved: &str, sdk_dir: PathBuf) -> Result<Arc<dyn Backend>> {
 	let saved: SavedSession = serde_json::from_str(saved).map_err(|_| Error::SessionExpired)?;
 	let credentials = Credentials {
 		login: saved.login.clone(),
@@ -81,13 +74,13 @@ async fn resume_inner(saved: &str) -> Result<Arc<dyn Backend>> {
 		encrypted_passphrase_key: BASE64_STANDARD.decode(saved.encrypted_passphrase_key).map_err(|_| Error::SessionExpired)?,
 		credential_type: CredentialType::Internal,
 	};
-	let sdk = sdk()?.login(credentials).await.map_err(|e| to_error(e.into()))?;
+	let sdk = sdk(sdk_dir)?.login(credentials).await.map_err(|e| to_error(e.into()))?;
 	Ok(Arc::new(TutaBackend::new(sdk.tern(), &saved.login).await?))
 }
 
-fn sdk() -> Result<Sdk> {
+fn sdk(sdk_dir: PathBuf) -> Result<Sdk> {
 	let rest = NativeRestClient::try_new().map_err(|e| Error::Other(format!("cannot set up TLS: {e}")))?;
-	Ok(Sdk::new(BASE_URL.to_string(), Arc::new(TimedRestClient::new(rest)), Arc::new(CacheFileClient::new())))
+	Ok(Sdk::new(BASE_URL.to_string(), Arc::new(TimedRestClient::new(rest)), Arc::new(CacheFileClient { dir: sdk_dir })))
 }
 
 /// How long a download may take: the search model is 30 MB.
@@ -141,7 +134,7 @@ struct TimedRestClient {
 
 impl TimedRestClient {
 	fn new(inner: NativeRestClient) -> Self {
-		Self { inner, log: std::env::var_os("TERN_LOG").is_some() }
+		Self { inner, log: log::log_enabled!(log::Level::Debug) }
 	}
 }
 
@@ -150,10 +143,10 @@ impl RestClient for TimedRestClient {
 	async fn request_binary(&self, url: String, method: HttpMethod, options: RestClientOptions) -> std::result::Result<RestResponse, RestClientError> {
 		let what = format!("{method:?} {}", log_path(&url));
 		if self.log {
-			eprintln!("tern: {what} ...");
+			log::debug!("{what} ...");
 			if what.ends_with("draftservice") {
 				if let Some(shape) = options.body.as_deref().and_then(request_shape) {
-					eprintln!("tern: {what} sends {shape}");
+					log::debug!("{what} sends {shape}");
 				}
 			}
 		}
@@ -167,11 +160,11 @@ impl RestClient for TimedRestClient {
 					let mut headers: Vec<_> = response.headers.iter().filter(|(k, _)| !k.contains("cookie")).collect();
 					headers.sort();
 					let body = response.body.as_deref().map(|b| String::from_utf8_lossy(&b[..b.len().min(300)]).into_owned());
-					eprintln!("tern: {what} -> {} ({ms} ms) headers {headers:?} body {body:?}", response.status);
+					log::debug!("{what} -> {} ({ms} ms) headers {headers:?} body {body:?}", response.status);
 				},
-				Ok(Ok(response)) => eprintln!("tern: {what} -> {} ({ms} ms)", response.status),
-				Ok(Err(e)) => eprintln!("tern: {what} -> {e:?} ({ms} ms)"),
-				Err(_) => eprintln!("tern: {what} -> timed out ({ms} ms)"),
+				Ok(Ok(response)) => log::debug!("{what} -> {} ({ms} ms)", response.status),
+				Ok(Err(e)) => log::debug!("{what} -> {e:?} ({ms} ms)"),
+				Err(_) => log::debug!("{what} -> timed out ({ms} ms)"),
 			}
 		}
 		result.unwrap_or(Err(RestClientError::NetworkError))
@@ -205,7 +198,7 @@ fn log_path(url: &str) -> &str {
 async fn guarded<T: Send + 'static>(work: impl std::future::Future<Output = Result<T>> + Send + 'static) -> Result<T> {
 	match tokio::spawn(work).await {
 		Ok(Err(e)) => {
-			trace(&format!("failed: {e:?}"));
+			log::debug!("failed: {e:?}");
 			Err(e)
 		},
 		Ok(result) => result,
@@ -239,8 +232,8 @@ struct TutaBackend {
 impl TutaBackend {
 	async fn new(mail: TernMail, login: &str) -> Result<Self> {
 		let account = mail.account(login).await.map_err(to_error)?;
-		trace(&format!("account has {} other addresses", account.aliases.len()));
-		trace("account loaded");
+		log::debug!("account has {} other addresses", account.aliases.len());
+		log::debug!("account loaded");
 		Ok(Self { mail: Arc::new(mail), account: Arc::new(account), sets: Mutex::default() })
 	}
 
@@ -555,14 +548,6 @@ struct CacheFileClient {
 }
 
 impl CacheFileClient {
-	fn new() -> Self {
-		let base = std::env::var_os("XDG_CACHE_HOME")
-			.map(PathBuf::from)
-			.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-			.unwrap_or_else(std::env::temp_dir);
-		Self { dir: base.join("tern").join("sdk") }
-	}
-
 	fn path(&self, name: &str) -> PathBuf {
 		// Names come from the SDK; keep them inside the cache directory regardless.
 		self.dir.join(name.replace(['/', '\\'], "_"))
@@ -584,6 +569,10 @@ impl FileClient for CacheFileClient {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn test_dir() -> PathBuf {
+		std::env::temp_dir().join("tern-sdk-test")
+	}
 
 	#[test]
 	fn redirects_stay_on_https() {
@@ -655,7 +644,7 @@ mod tests {
 		if std::env::var_os("TERN_OFFLINE").is_some() {
 			return;
 		}
-		match login("tern-no-such-user-7f3a@tutamail.com", "wrong").await {
+		match login("tern-no-such-user-7f3a@tutamail.com", "wrong", test_dir()).await {
 			Err(Error::BadLogin) => {},
 			Err(other) => panic!("expected BadLogin, got {other:?}"),
 			Ok(_) => panic!("signed in to an account that should not exist"),
@@ -668,7 +657,7 @@ mod tests {
 	async fn live_batch_open_matches_single_opens_over_http() {
 		let email = std::env::var("TERN_TEST_EMAIL").unwrap();
 		let password = std::env::var("TERN_TEST_PASSWORD").unwrap();
-		let (backend, _) = login(&email, &password).await.unwrap();
+		let (backend, _) = login(&email, &password, test_dir()).await.unwrap();
 		let folders = backend.folders().await.unwrap();
 		let mut ids = Vec::new();
 		for kind in [FolderKind::Inbox, FolderKind::Sent, FolderKind::Drafts] {
@@ -701,7 +690,7 @@ mod tests {
 	async fn live_move_and_label_round_trip_over_http() {
 		let email = std::env::var("TERN_TEST_EMAIL").unwrap();
 		let password = std::env::var("TERN_TEST_PASSWORD").unwrap();
-		let (backend, _) = login(&email, &password).await.unwrap();
+		let (backend, _) = login(&email, &password, test_dir()).await.unwrap();
 		let folders = backend.folders().await.unwrap();
 		let folder = |kind| folders.iter().find(|f| f.kind == kind).unwrap().id.clone();
 		let (inbox, archive) = (folder(FolderKind::Inbox), folder(FolderKind::Archive));
@@ -733,8 +722,8 @@ mod tests {
 	async fn live_round_trip_with_attachment_over_http() {
 		let email = std::env::var("TERN_TEST_EMAIL").unwrap();
 		let password = std::env::var("TERN_TEST_PASSWORD").unwrap();
-		let (backend, saved) = login(&email, &password).await.unwrap();
-		let resumed = resume(&saved).await.unwrap();
+		let (backend, saved) = login(&email, &password, test_dir()).await.unwrap();
+		let resumed = resume(&saved, test_dir()).await.unwrap();
 		assert_eq!(backend.account(), resumed.account());
 		let folders = backend.folders().await.unwrap();
 		let inbox = folders.iter().find(|f| f.kind == FolderKind::Inbox).unwrap();

@@ -81,7 +81,6 @@ class MainActivity : ComponentActivity() {
                 saver.launch(effect.name)
             }
             Effect.ClearNotifications -> clearNotices(this)
-            is Effect.Log -> {}
         }
     }
 

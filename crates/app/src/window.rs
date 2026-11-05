@@ -58,7 +58,7 @@ impl Ctx {
 
 	pub fn set_settings(&self, settings: Settings) {
 		self.settings.set(settings);
-		settings.save();
+		settings.save(crate::paths());
 		self.sync_now();
 	}
 
@@ -66,7 +66,7 @@ impl Ctx {
 	pub fn set_layout(&self, settings: Settings, save: bool) {
 		self.settings.set(settings);
 		if save {
-			settings.save();
+			settings.save(crate::paths());
 		}
 	}
 
@@ -129,7 +129,6 @@ impl Ctx {
 	}
 }
 
-pub use crate::settings::cache_path;
 
 pub struct Window {
 	pub ctx: Ctx,
@@ -151,7 +150,7 @@ impl Window {
 			backend: Rc::default(),
 			cache: Rc::default(),
 			fetcher: Rc::default(),
-			settings: Rc::new(Cell::new(Settings::load())),
+			settings: Rc::new(Cell::new(Settings::load(crate::paths()))),
 			wake: Arc::default(),
 			changed: Rc::default(),
 			show_rule: Rc::default(),
@@ -261,7 +260,7 @@ impl Window {
 			let saved = runtime::run(keyring::load()).await;
 			let Some(saved) = saved else { return self.show_login(None) };
 			let session = saved.session.clone();
-			match runtime::run(async move { tern_tuta::resume(&session).await }).await {
+			match runtime::run(async move { tern_tuta::resume(&session, crate::paths().sdk_dir()).await }).await {
 				Ok(backend) => self.signed_in(backend, None, true),
 				Err(err) => {
 					if err != Error::SessionExpired {
@@ -283,7 +282,7 @@ impl Window {
 	/// `saved` is the session to remember, with the address it belongs to. A `persistent` account
 	/// keeps its mail in an encrypted cache on disk; the demo's lives in memory.
 	fn signed_in(self: &Rc<Self>, backend: Arc<dyn Backend>, saved: Option<(String, String)>, persistent: bool) {
-		tern_tuta::trace("opening the mailbox");
+		log::debug!("opening the mailbox");
 		*self.ctx.backend.borrow_mut() = Some(backend.clone());
 		if let Some((email, session)) = saved {
 			runtime::spawn_local(async move { runtime::run(async move { keyring::store(&email, &session).await }).await });
@@ -298,7 +297,7 @@ impl Window {
 					async move { keyring::cache_key(&email).await }
 				})
 				.await;
-				let path = cache_path(&email);
+				let path = crate::paths().mail_cache(&email);
 				match key {
 					Some(key) => runtime::run(async move { Cache::open(&path, &key).ok() }).await,
 					None => None,
@@ -318,7 +317,7 @@ impl Window {
 			for fields in this.waiting.take() {
 				Composer::open(&this.ctx, fields, None);
 			}
-			tern_tuta::trace("mailbox shown");
+			log::debug!("mailbox shown");
 		});
 	}
 
@@ -342,7 +341,7 @@ impl Window {
 				if !forget {
 					return;
 				}
-				let path = cache_path(&email);
+				let path = crate::paths().mail_cache(&email);
 				for suffix in ["", "-wal", "-shm"] {
 					let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
 				}
@@ -462,13 +461,13 @@ fn search_group(ctx: &Ctx) -> adw::PreferencesGroup {
 		}
 		ctx.set_settings(Settings { semantic: on, ..ctx.settings() });
 		if !on {
-			return semantic::forget(ctx.cache().as_deref());
+			return crate::meaning().forget(ctx.cache().as_deref());
 		}
 		// Fetch the model now and say so; the background sync then works out each mail's meaning.
 		row.set_subtitle("Downloading the language model…");
 		let (row, about) = (row.clone(), about.clone());
 		runtime::spawn_local(async move {
-			match runtime::run(semantic::ensure()).await {
+			match runtime::run(crate::meaning().clone().ensure()).await {
 				Ok(_) => row.set_subtitle(&about),
 				Err(e) => {
 					row.set_subtitle(&format!("Could not download the model: {e}"));

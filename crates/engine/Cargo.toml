@@ -12,6 +12,7 @@ tern-core = { workspace = true }
 tern-tuta = { workspace = true }
 tern-cache = { workspace = true }
 serde = { workspace = true }
+log = { workspace = true, features = ["std"] }
 serde_json = { workspace = true }
 toml = "=1.1.8"
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync", "macros"] }

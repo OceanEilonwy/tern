@@ -11,6 +11,8 @@ use tern_cache::embed::Model;
 use tern_cache::{sync, Cache};
 use tern_core::Error;
 
+use crate::paths::Paths;
+
 /// The model's name with each vector, so vectors from another model are worked out again.
 pub const NAME: &str = "potion-base-8M@bf8b056";
 /// What Preferences says the download is.
@@ -22,80 +24,83 @@ const FILES: [(&str, &str); 2] = [
 	("model.safetensors", "f65d0f325faadc1e121c319e2faa41170d3fa07d8c89abd48ca5358d9a223de2"),
 ];
 
-static MODEL: Mutex<Option<Arc<Model>>> = Mutex::new(None);
-/// Held while the model is read or fetched, so it is not downloaded twice at once.
-static LOADING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-fn dir() -> PathBuf {
-	let base = std::env::var_os("XDG_CACHE_HOME")
-		.map(PathBuf::from)
-		.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-		.unwrap_or_else(std::env::temp_dir);
-	base.join("tern").join("models").join("potion-base-8M")
+/// The language model, for one set of folders.
+#[derive(Default)]
+pub struct Meaning {
+	dir: PathBuf,
+	model: Mutex<Option<Arc<Model>>>,
+	/// Held while the model is read or fetched, so it is not downloaded twice at once.
+	loading: tokio::sync::Mutex<()>,
 }
 
-/// The model, if it has been loaded.
-pub fn loaded() -> Option<Arc<Model>> {
-	MODEL.lock().unwrap_or_else(|p| p.into_inner()).clone()
-}
-
-/// Loads the model, downloading it first if it is not on disk (or does not read). Runs on the Tokio runtime.
-pub async fn ensure() -> Result<Arc<Model>, Error> {
-	let _one_at_a_time = LOADING.lock().await;
-	if let Some(model) = loaded() {
-		return Ok(model);
+impl Meaning {
+	pub fn new(paths: &Paths) -> Arc<Meaning> {
+		Arc::new(Meaning { dir: paths.model_dir(), ..Meaning::default() })
 	}
-	let dir = dir();
-	let read = |dir: PathBuf| {
-		tokio::task::spawn_blocking(move || {
-			let file = |name: &str| std::fs::read(dir.join(name)).map_err(|e| e.to_string());
-			Model::load(&file(FILES[0].0)?, &file(FILES[1].0)?)
-		})
-	};
-	let model = match read(dir.clone()).await.map_err(|e| Error::Other(e.to_string()))? {
-		Ok(model) => model,
-		Err(_) => {
-			std::fs::create_dir_all(&dir).map_err(|e| Error::Other(e.to_string()))?;
-			for (name, sha256) in FILES {
-				let data = tern_tuta::download(&format!("{REPO}/{name}"), sha256).await?;
-				// Written whole, then renamed, so a half-written file is never read.
-				let part = dir.join(format!("{name}.part"));
-				std::fs::write(&part, data).and_then(|_| std::fs::rename(&part, dir.join(name))).map_err(|e| Error::Other(e.to_string()))?;
-			}
-			read(dir).await.map_err(|e| Error::Other(e.to_string()))?.map_err(Error::Other)?
-		},
-	};
-	let model = Arc::new(model);
-	*MODEL.lock().unwrap_or_else(|p| p.into_inner()) = Some(model.clone());
-	Ok(model)
-}
 
-/// Search by meaning was turned off: the vectors go, the model leaves memory. The download stays
-/// on disk, so turning it on again needs no network.
-pub fn forget(cache: Option<&Cache>) {
-	*MODEL.lock().unwrap_or_else(|p| p.into_inner()) = None;
-	if let Some(cache) = cache {
-		let _ = cache.clear_vectors();
+	/// The model, if it has been loaded.
+	pub fn loaded(&self) -> Option<Arc<Model>> {
+		self.model.lock().unwrap_or_else(|p| p.into_inner()).clone()
 	}
-}
 
-/// Bytes the downloaded model takes on disk; 0 when it is not there.
-pub fn model_bytes() -> u64 {
-	FILES.iter().filter_map(|(name, _)| std::fs::metadata(dir().join(name)).ok()).map(|m| m.len()).sum()
-}
+	/// Loads the model, downloading it first if it is not on disk (or does not read). Runs on the Tokio runtime.
+	pub async fn ensure(self: Arc<Self>) -> Result<Arc<Model>, Error> {
+		let _one_at_a_time = self.loading.lock().await;
+		if let Some(model) = self.loaded() {
+			return Ok(model);
+		}
+		let dir = self.dir.clone();
+		let read = |dir: PathBuf| {
+			tokio::task::spawn_blocking(move || {
+				let file = |name: &str| std::fs::read(dir.join(name)).map_err(|e| e.to_string());
+				Model::load(&file(FILES[0].0)?, &file(FILES[1].0)?)
+			})
+		};
+		let model = match read(dir.clone()).await.map_err(|e| Error::Other(e.to_string()))? {
+			Ok(model) => model,
+			Err(_) => {
+				std::fs::create_dir_all(&dir).map_err(|e| Error::Other(e.to_string()))?;
+				for (name, sha256) in FILES {
+					let data = tern_tuta::download(&format!("{REPO}/{name}"), sha256).await?;
+					// Written whole, then renamed, so a half-written file is never read.
+					let part = dir.join(format!("{name}.part"));
+					std::fs::write(&part, data).and_then(|_| std::fs::rename(&part, dir.join(name))).map_err(|e| Error::Other(e.to_string()))?;
+				}
+				read(dir).await.map_err(|e| Error::Other(e.to_string()))?.map_err(Error::Other)?
+			},
+		};
+		let model = Arc::new(model);
+		*self.model.lock().unwrap_or_else(|p| p.into_inner()) = Some(model.clone());
+		Ok(model)
+	}
 
-/// Deletes the downloaded model; turning search by meaning on fetches it again.
-pub fn remove_model() {
-	let _ = std::fs::remove_dir_all(dir());
-}
+	/// Search by meaning was turned off: the vectors go, the model leaves memory. The download stays
+	/// on disk, so turning it on again needs no network.
+	pub fn forget(&self, cache: Option<&Cache>) {
+		*self.model.lock().unwrap_or_else(|p| p.into_inner()) = None;
+		if let Some(cache) = cache {
+			let _ = cache.clear_vectors();
+		}
+	}
 
-/// Works out the meaning of the mails that lack it, off the UI thread. Returns how many.
-pub async fn index(cache: Arc<Cache>) -> Result<usize, Error> {
-	let model = ensure().await?;
-	tokio::task::spawn_blocking(move || sync::vectors(&cache, &model, NAME))
-		.await
-		.map_err(|e| Error::Other(e.to_string()))?
-		.map_err(|e| Error::Other(e.to_string()))
+	/// Bytes the downloaded model takes on disk; 0 when it is not there.
+	pub fn model_bytes(&self) -> u64 {
+		FILES.iter().filter_map(|(name, _)| std::fs::metadata(self.dir.join(name)).ok()).map(|m| m.len()).sum()
+	}
+
+	/// Deletes the downloaded model; turning search by meaning on fetches it again.
+	pub fn remove_model(&self) {
+		let _ = std::fs::remove_dir_all(&self.dir);
+	}
+
+	/// Works out the meaning of the mails that lack it, off the UI thread. Returns how many.
+	pub async fn index(self: Arc<Self>, cache: Arc<Cache>) -> Result<usize, Error> {
+		let model = self.ensure().await?;
+		tokio::task::spawn_blocking(move || sync::vectors(&cache, &model, NAME))
+			.await
+			.map_err(|e| Error::Other(e.to_string()))?
+			.map_err(|e| Error::Other(e.to_string()))
+	}
 }
 
 #[cfg(test)]
@@ -108,8 +113,8 @@ mod tests {
 	#[ignore]
 	async fn the_model_downloads_and_finds_mail_by_meaning() {
 		let dir = std::env::temp_dir().join(format!("tern-model-test-{}", std::process::id()));
-		std::env::set_var("XDG_CACHE_HOME", &dir);
-		let model = ensure().await.unwrap();
+		let meaning = Meaning::new(&Paths::new(&dir, &dir));
+		let model = meaning.clone().ensure().await.unwrap();
 		assert!(dir.join("tern/models/potion-base-8M/model.safetensors").exists());
 		let cache = Arc::new(Cache::in_memory());
 		let inbox = tern_core::Folder { id: tern_core::FolderId("in".into()), name: "Inbox".into(), kind: tern_core::FolderKind::Inbox, unread: 0 };
@@ -127,7 +132,7 @@ mod tests {
 			draft: false,
 		};
 		cache.merge_page(&inbox.id, &[mail(1, "Photos from Saturday"), mail(2, "Your invoice for October")], true, true).unwrap();
-		assert_eq!(index(cache.clone()).await.unwrap(), 2);
+		assert_eq!(meaning.index(cache.clone()).await.unwrap(), 2);
 		let query = tern_cache::search::Query::parse("pictures");
 		let hits = cache.search(&query, Some((NAME, &model.embed(&query.text()))), 10).unwrap();
 		assert_eq!(hits.iter().map(|h| h.row.latest.subject.as_str()).collect::<Vec<_>>(), ["Photos from Saturday"]);

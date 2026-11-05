@@ -26,12 +26,27 @@ mod window;
 
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
+use std::sync::{Arc, OnceLock};
 
 use adw::prelude::*;
 use gtk::{gio, glib};
+use tern_engine::paths::Paths;
+use tern_engine::semantic::Meaning;
 use tern_engine::{compose_model, fetcher, html_doc, rules, semantic, settings};
 
 pub const APP_ID: &str = "xyz.hollingworth.Tern";
+
+/// Where this desktop says to keep things.
+pub fn paths() -> &'static Paths {
+	static PATHS: OnceLock<Paths> = OnceLock::new();
+	PATHS.get_or_init(Paths::from_env)
+}
+
+/// The language model behind search by meaning.
+pub fn meaning() -> &'static Arc<Meaning> {
+	static MEANING: OnceLock<Arc<Meaning>> = OnceLock::new();
+	MEANING.get_or_init(|| Meaning::new(paths()))
+}
 
 /// Desktops such as KDE Plasma write GTK's old `gtk-application-prefer-dark-theme` into
 /// settings.ini, and libadwaita warns about it at every start. Libadwaita takes the light or dark
@@ -64,6 +79,7 @@ fn command_line() -> Vec<String> {
 }
 
 fn main() -> glib::ExitCode {
+	tern_engine::logs::init(|message| eprintln!("tern: {message}"));
 	gio::resources_register_include!("tern.gresource").expect("register resources");
 	glib::set_application_name("Tern");
 	quiet_old_dark_setting();

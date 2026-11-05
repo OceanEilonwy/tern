@@ -90,7 +90,11 @@ private object Listener : EngineListener {
     }
 
     override fun onEffect(effect: Effect) {
-        if (effect is Effect.Log) Log.i("Tern", effect.message) else Store.effects.tryEmit(effect)
+        Store.effects.tryEmit(effect)
+    }
+
+    override fun onLog(message: String) {
+        Log.w("Tern", message)
     }
 }
 

@@ -40,7 +40,7 @@ impl Rules {
 			group,
 			expander,
 			rows: RefCell::default(),
-			rules: RefCell::new(rules::load()),
+			rules: RefCell::new(rules::load(crate::paths())),
 		});
 		this.fill();
 		this
@@ -93,7 +93,7 @@ impl Rules {
 	}
 
 	fn store(self: &Rc<Self>, rules: Vec<Rule>) {
-		rules::save(&rules);
+		rules::save(crate::paths(), &rules);
 		*self.rules.borrow_mut() = rules;
 		self.fill();
 	}

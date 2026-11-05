@@ -173,7 +173,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			drop(composer);
 			mailbox.select_folder(tern_core::FolderKind::Drafts);
 			wait_for(|| mailbox.select_by_subject("Trip plan")).await;
-			wait_for(|| mailbox.reader.current.borrow().is_some()).await;
+			wait_for(|| mailbox.reader.current.borrow().is_some() && mailbox.reader.mails().iter().any(|m| m.draft)).await;
 			if !mailbox.reader.mails().iter().any(|m| m.draft) {
 				return Err(format!("the saved draft did not show as a draft: {:?}", mailbox.reader.mails().iter().map(|m| (&m.subject, m.draft)).collect::<Vec<_>>()));
 			}
@@ -535,7 +535,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// Move to Spam: the line finds the sender's other mail, Select All picks it, and the line
 		// is kept as a rule. The moves hold after a sync, so the server has them too.
 		"spam" => {
-			rules::save(&[]);
+			rules::save(crate::paths(), &[]);
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			mailbox.select_by_subject("coupon");
 			wait_for(|| mailbox.reader.thread().is_some()).await;
@@ -569,8 +569,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("{:?} in Spam after a sync", in_spam()));
 			}
 			let rule = Rule { when: "from:@deals.example".into(), action: Action::Spam };
-			if rules::load() != [rule] {
-				return Err(format!("the rules are {:?}", rules::load()));
+			if rules::load(crate::paths()) != [rule] {
+				return Err(format!("the rules are {:?}", rules::load(crate::paths())));
 			}
 			Ok(())
 		}
@@ -650,7 +650,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// A saved rule that catches more than its page lists: the newest few, a count, and its
 		// line shown whole, not squeezed to the height worked out before the page showed.
 		"rule-edit" => {
-			rules::save(&[Rule { when: "(from:@deals.example or subject:invoice) or not to:sam".into(), action: Action::Move("Archive".into()) }]);
+			rules::save(crate::paths(), &[Rule { when: "(from:@deals.example or subject:invoice) or not to:sam".into(), action: Action::Move("Archive".into()) }]);
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
 			dialog.present(Some(&win.ctx.window));
@@ -668,7 +668,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// Rules in Preferences: one added, labelled, then changed to move to a folder and deleted; one
 		// labels with a label it makes.
 		"rules" => {
-			rules::save(&[]);
+			rules::save(crate::paths(), &[]);
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
 			dialog.present(Some(&win.ctx.window));
@@ -710,8 +710,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			edit.save.emit_clicked();
 			let labelled = Rule { when: "subject:invoice or from:@example.org".into(), action: Action::Label("Receipts".into()) };
-			if rules::load() != [labelled.clone()] {
-				return Err(format!("saved {:?}", rules::load()));
+			if rules::load(crate::paths()) != [labelled.clone()] {
+				return Err(format!("saved {:?}", rules::load(crate::paths())));
 			}
 			let edit = section.edit(Some(0));
 			wait_for(|| edit.label.model().is_some_and(|m| m.n_items() == 3)).await;
@@ -727,8 +727,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			edit.folder.set_selected(1);
 			edit.save.emit_clicked();
 			let moved = Rule { when: "subject:invoice".into(), action: Action::Move("Archive".into()) };
-			if rules::load() != [moved.clone()] {
-				return Err(format!("changed to {:?}", rules::load()));
+			if rules::load(crate::paths()) != [moved.clone()] {
+				return Err(format!("changed to {:?}", rules::load(crate::paths())));
 			}
 			let edit = section.edit(None);
 			edit.set_line("from:news@example.org");
@@ -740,19 +740,19 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			edit.new_label.set_text("Newsletters");
 			edit.save.emit_clicked();
-			wait_for(|| rules::load().len() == 2).await;
+			wait_for(|| rules::load(crate::paths()).len() == 2).await;
 			let made = Rule { when: "from:news@example.org".into(), action: Action::Label("Newsletters".into()) };
 			let labels = win.ctx.backend().ok_or("signed out")?.labels().await.map_err(|e| e.to_string())?;
-			if rules::load() != [moved.clone(), made.clone()] || !labels.iter().any(|l| l.name == "Newsletters") {
-				return Err(format!("a new label left {:?} with labels {labels:?}", rules::load()));
+			if rules::load(crate::paths()) != [moved.clone(), made.clone()] || !labels.iter().any(|l| l.name == "Newsletters") {
+				return Err(format!("a new label left {:?} with labels {labels:?}", rules::load(crate::paths())));
 			}
 			// A third rule, then the first deleted; the shot shows what is left.
 			let edit = section.edit(None);
 			edit.set_line("from:@deals.example");
 			edit.save.emit_clicked();
 			section.delete(0);
-			if rules::load() != [made, Rule { when: "from:@deals.example".into(), action: Action::Spam }] {
-				return Err(format!("after deleting, {:?}", rules::load()));
+			if rules::load(crate::paths()) != [made, Rule { when: "from:@deals.example".into(), action: Action::Spam }] {
+				return Err(format!("after deleting, {:?}", rules::load(crate::paths())));
 			}
 			section.expander.set_expanded(true);
 			Ok(())
