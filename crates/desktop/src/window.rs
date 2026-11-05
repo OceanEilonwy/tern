@@ -9,21 +9,21 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use relm4::prelude::*;
 use tern_app::view::{Action, ConnectionKind, ComposerView, Effect, RuleEditorView, RulesView, Screen, SettingsView, SheetView, ShellView, SnackView, Update};
-use tern_app::{Engine, EngineListener, Options, SecretStore};
+use tern_app::{Engine, Options, SecretStore};
 use tern_cache::Cache;
 use tern_compose::Fields;
 use tern_demo::DemoBackend;
 use tern_mail::Backend;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::activity::{Activity, Busy, Word};
+use crate::bridge::{Bridge, Incoming};
 use crate::composer::Composer;
 use crate::keyring::{InMemory, Keyring};
 use crate::layout::Layout;
 use crate::cleanup::Cleanup;
 use crate::preferences::Preferences;
 use crate::rule_editor::Rules;
-use crate::{attachments, cleanup, labels, reader, login::{self, Login}, mailbox::Mailbox, rule_editor, runtime, screenshot, spam};
+use crate::{attachments, cleanup, labels, reader, login::{self, Login}, mailbox::{self, Mailbox}, rule_editor, screenshot, spam};
 
 type OfferHook = Box<dyn Fn(Option<&str>)>;
 /// The composer last asked to throw its mail away, and the dialog asking.
@@ -256,30 +256,81 @@ impl Ctx {
 }
 
 
-pub struct Window {
-	pub ctx: Ctx,
-	stack: gtk::Stack,
-	pub login: Controller<Login>,
-	pub mailbox: Rc<Mailbox>,
-	/// Mail asked for before there was an account to send it from, to write once signed in.
-	/// The account open now, if any.
-	address: RefCell<String>,
-	/// What the core is doing, for the activity word.
-	working: RefCell<Option<(Word, Busy)>>,
-	/// The sign-in page has just come up, and takes the focus once it knows what to show.
-	focus_login: Cell<bool>,
+/// For the view macro: a widget made ahead, because the model has to know it, laid out in place.
+pub fn same<T: Clone>(widget: &T) -> T {
+	widget.clone()
 }
 
-impl Window {
-	pub fn new(app: &adw::Application) -> Rc<Window> {
-		let window = adw::ApplicationWindow::builder().application(app).title("Tern").default_width(1280).default_height(800).build();
-		window.set_size_request(360, 294);
+/// The main window: what comes from the core goes out from here to whichever screen it is about.
+pub struct Shell {
+	ctx: Ctx,
+	login: Rc<Controller<Login>>,
+	mailbox: Rc<Controller<Mailbox>>,
+	/// Which of starting, login and mailbox is on show.
+	page: &'static str,
+	/// The account open now, if any.
+	address: String,
+	/// What the core is doing, for the activity word.
+	working: Option<(Word, Busy)>,
+	/// The sign-in page has just come up, and takes the focus once it knows what to show.
+	focus_login: bool,
+}
+
+#[relm4::component(pub)]
+impl SimpleComponent for Shell {
+	type Init = adw::Application;
+	type Input = Incoming;
+	type Output = ();
+
+	view! {
+		adw::ApplicationWindow {
+			set_application: Some(&app),
+			set_title: Some("Tern"),
+			set_default_width: 1280,
+			set_default_height: 800,
+			set_size_request: (360, 294),
+			// Closing the window while composers are open only hides it: they go on with this core, and
+			// asking for the window again brings it back.
+			connect_close_request[composers = model.ctx.composers.clone()] => move |window| {
+				if composers.borrow().is_empty() {
+					return glib::Propagation::Proceed;
+				}
+				window.set_visible(false);
+				glib::Propagation::Stop
+			},
+			#[wrap(Some)]
+			set_content = &same(&toasts) -> adw::ToastOverlay {
+				#[wrap(Some)]
+				set_child = &gtk::Stack {
+					set_transition_type: gtk::StackTransitionType::Crossfade,
+					#[watch(skip_init)]
+					set_visible_child_name: model.page,
+					add_named[Some("starting")] = &adw::ToolbarView {
+						add_top_bar = &adw::HeaderBar {
+							set_show_title: false,
+						},
+						#[wrap(Some)]
+						set_content = &adw::Spinner {
+							set_width_request: 32,
+							set_height_request: 32,
+							set_halign: gtk::Align::Center,
+							set_valign: gtk::Align::Center,
+						},
+					},
+					add_named: (model.login.widget(), Some("login")),
+					add_named: (model.mailbox.widget(), Some("mailbox")),
+				},
+			},
+		}
+	}
+
+	fn init(app: adw::Application, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
 		let toasts = adw::ToastOverlay::new();
 		// Before the core can start, and rewrite the settings' file it may still be in.
 		let layout = Layout::load(crate::paths().config_dir());
-		let (engine, incoming) = start_engine();
+		let engine = start_engine(sender.input_sender().clone());
 		let ctx = Ctx {
-			window: window.clone(),
+			window: root.clone(),
 			toasts: toasts.clone(),
 			engine: engine.clone(),
 			preferences: Rc::default(),
@@ -296,38 +347,129 @@ impl Window {
 			offer: Rc::default(),
 			activity: Activity::default(),
 		};
-
-		let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build();
-		let starting = adw::Spinner::builder().width_request(32).height_request(32).halign(gtk::Align::Center).valign(gtk::Align::Center).build();
-		let starting_page = adw::ToolbarView::new();
-		starting_page.add_top_bar(&adw::HeaderBar::builder().show_title(false).build());
-		starting_page.set_content(Some(&starting));
-		stack.add_named(&starting_page, Some("starting"));
-
-		let login = Login::builder().launch(engine.clone()).detach();
-		stack.add_named(login.widget(), Some("login"));
-		let mailbox = Mailbox::new(ctx.clone());
-		stack.add_named(&mailbox.root, Some("mailbox"));
-		toasts.set_child(Some(&stack));
-		window.set_content(Some(&toasts));
-		for bp in mailbox.breakpoints() {
-			window.add_breakpoint(bp);
+		let login = Rc::new(Login::builder().launch(engine).detach());
+		let mailbox = Rc::new(Mailbox::builder().launch(ctx.clone()).detach());
+		let model = Shell { ctx, login, mailbox, page: "starting", address: String::new(), working: None, focus_login: false };
+		let widgets = view_output!();
+		for breakpoint in crate::mailbox::breakpoints(&model.mailbox) {
+			root.add_breakpoint(breakpoint);
 		}
+		ComponentParts { model, widgets }
+	}
 
-		// Closing the window while composers are open only hides it: they go on with this core, and
-		// asking for the window again brings it back.
-		let hide_for = ctx.clone();
-		window.connect_close_request(move |window| {
-			if hide_for.composers.borrow().is_empty() {
-				return glib::Propagation::Proceed;
-			}
-			window.set_visible(false);
-			glib::Propagation::Stop
-		});
-		let this = Rc::new(Window { ctx, stack, login, mailbox, address: RefCell::default(), working: RefCell::default(), focus_login: Cell::new(false) });
+	fn update(&mut self, what: Incoming, _: ComponentSender<Self>) {
+		match what {
+			Incoming::Update(update) => match *update {
+				Update::Shell { view } => self.show_shell(view),
+				Update::SignIn { view } => {
+					self.login.emit(login::Input::View(view));
+					if std::mem::take(&mut self.focus_login) {
+						self.login.emit(login::Input::Focus);
+					}
+				},
+				Update::Settings { view } => self.ctx.show_settings(view),
+				Update::Sheet { view } => self.ctx.show_sheet(view),
+				Update::Composers { view } => self.ctx.show_composers(view.open),
+				Update::List { view } => self.mailbox.emit(mailbox::Input::List(Box::new(view))),
+				Update::Search { view } => self.mailbox.emit(mailbox::Input::Search(Box::new(view))),
+				Update::Conversation { view } => self.mailbox.model().reader.emit(reader::Input::Show(view.map(Box::new))),
+				Update::Rules { view } => self.ctx.show_rules(view),
+				Update::RuleEditor { view } => self.ctx.show_rule_editor(view),
+				_ => {},
+			},
+			Incoming::Effect(effect) => match effect {
+				Effect::OpenFile { path, .. } => attachments::open_file(&self.ctx, &path),
+				Effect::SaveFile { path, name, .. } => attachments::save_file(&self.ctx, &path, &name),
+				Effect::OpenUrl { url } => crate::render::open_uri(&self.ctx.window, &url),
+				Effect::ClearNotifications => {},
+			},
+		}
+	}
+}
+
+impl Shell {
+	fn show_shell(&mut self, view: ShellView) {
+		self.account_changed(&view.address);
+		self.mailbox.emit(mailbox::Input::Searching(view.stack.contains(&Screen::Search)));
+		match view.stack.last() {
+			Some(Screen::Starting) | None => {},
+			Some(Screen::SignIn) => {
+				if self.page != "login" {
+					self.login.emit(login::Input::ClearPassword);
+					self.page = "login";
+					self.ctx.window.set_title(Some("Tern"));
+					self.focus_login = true;
+				}
+			},
+			Some(_) => {
+				if self.page != "mailbox" {
+					self.login.emit(login::Input::ClearPassword);
+					self.page = "mailbox";
+				}
+				// There is nothing here to sign in again from, so go and do it, as ever.
+				if view.status.kind == ConnectionKind::SignedOut {
+					self.ctx.engine.send(Action::SignInAgain);
+				}
+			},
+		}
+		match view.status.kind {
+			ConnectionKind::Working => {
+				let word = Word::from_label(&view.status.line).unwrap_or(Word::Fetching);
+				if self.working.as_ref().map(|(w, _)| *w) != Some(word) {
+					self.working = Some((word, self.ctx.activity.start(word)));
+				}
+			},
+			kind => {
+				self.working = None;
+				self.ctx.activity.set_problem(matches!(kind, ConnectionKind::Offline | ConnectionKind::Busy).then_some(view.status.line));
+			},
+		}
+		self.ctx.offer_cleanup(view.cleanup_offer.as_deref());
+		if let Some(snack) = &view.snack {
+			self.ctx.say(snack);
+		}
+	}
+
+	/// An account opened or closed.
+	fn account_changed(&mut self, address: &str) {
+		if self.address == address {
+			return;
+		}
+		self.address = address.to_string();
+		if address.is_empty() {
+			self.mailbox.emit(mailbox::Input::Clear);
+		} else {
+			self.mailbox.emit(mailbox::Input::Start(address.to_string()));
+			log::debug!("mailbox shown");
+		}
+	}
+}
+
+/// The main window, for the app and the scenes: the component and what they reach into.
+pub struct Window {
+	pub ctx: Ctx,
+	pub login: Rc<Controller<Login>>,
+	pub mailbox: Rc<Controller<Mailbox>>,
+	shell: RefCell<Option<Controller<Shell>>>,
+}
+
+impl Window {
+	pub fn new(app: &adw::Application) -> Rc<Window> {
+		let shell = Shell::builder().launch(app.clone()).detach();
+		let (ctx, login, mailbox) = {
+			let model = shell.model();
+			(model.ctx.clone(), model.login.clone(), model.mailbox.clone())
+		};
+		let window = ctx.window.clone();
+		let this = Rc::new(Window { ctx, login, mailbox, shell: RefCell::new(Some(shell)) });
 		// The GTK window owns this struct until it is destroyed; callbacks and actions hold only weak references.
 		let owner = RefCell::new(Some(this.clone()));
-		window.connect_destroy(move |_| drop(owner.take()));
+		window.connect_destroy(move |_| {
+			if let Some(this) = owner.take() {
+				// Not the component while its window is going: once it has gone.
+				glib::idle_add_local_once(move || drop(this.shell.take()));
+			}
+		});
 		this.add_actions(app);
 		if let Some((w, h)) = screenshot::size() {
 			window.set_default_size(w, h);
@@ -341,15 +483,6 @@ impl Window {
 			}
 		}
 		window.present();
-		// Holds only a weak reference: the window's life is its own.
-		let weak = Rc::downgrade(&this);
-		runtime::spawn_local(async move {
-			let mut incoming = incoming;
-			while let Some(what) = incoming.recv().await {
-				let Some(this) = weak.upgrade() else { return };
-				this.take(what);
-			}
-		});
 		if screenshot::scene().is_some() {
 			screenshot::drive(this.clone());
 		}
@@ -357,13 +490,9 @@ impl Window {
 	}
 
 	fn add_actions(self: &Rc<Self>, app: &adw::Application) {
-		let weak = Rc::downgrade(self);
+		let engine = self.ctx.engine.clone();
 		let sign_out = gio::SimpleAction::new("sign-out", None);
-		sign_out.connect_activate(move |_, _| {
-			if let Some(this) = weak.upgrade() {
-				this.ctx.engine.send(Action::SignOut);
-			}
-		});
+		sign_out.connect_activate(move |_, _| engine.send(Action::SignOut));
 		app.add_action(&sign_out);
 
 		let window = self.ctx.window.clone();
@@ -388,122 +517,16 @@ impl Window {
 		self.ctx.engine.compose(fields);
 		self.ctx.window.present();
 	}
-
-	/// Takes what the core says, on the GTK thread.
-	fn take(self: &Rc<Self>, what: Incoming) {
-		match what {
-			Incoming::Update(update) => match *update {
-				Update::Shell { view } => self.show_shell(view),
-				Update::SignIn { view } => {
-					self.login.emit(login::Input::View(view));
-					if self.focus_login.take() {
-						self.login.emit(login::Input::Focus);
-					}
-				},
-				Update::Settings { view } => self.ctx.show_settings(view),
-				Update::Sheet { view } => self.ctx.show_sheet(view),
-				Update::Composers { view } => self.ctx.show_composers(view.open),
-				Update::List { view } => self.mailbox.show_list(view),
-				Update::Search { view } => self.mailbox.show_search(view),
-				Update::Conversation { view } => self.mailbox.reader.emit(reader::Input::Show(view.map(Box::new))),
-				Update::Rules { view } => self.ctx.show_rules(view),
-				Update::RuleEditor { view } => self.ctx.show_rule_editor(view),
-				_ => {},
-			},
-			Incoming::Effect(effect) => match effect {
-				Effect::OpenFile { path, .. } => attachments::open_file(&self.ctx, &path),
-				Effect::SaveFile { path, name, .. } => attachments::save_file(&self.ctx, &path, &name),
-				Effect::OpenUrl { url } => crate::render::open_uri(&self.ctx.window, &url),
-				Effect::ClearNotifications => {},
-			},
-		}
-	}
-
-	fn show_shell(self: &Rc<Self>, view: ShellView) {
-		self.account_changed(&view.address);
-		self.mailbox.set_searching(view.stack.contains(&Screen::Search));
-		match view.stack.last() {
-			Some(Screen::Starting) | None => {},
-			Some(Screen::SignIn) => {
-				if self.stack.visible_child_name().as_deref() != Some("login") {
-					self.login.emit(login::Input::ClearPassword);
-					self.stack.set_visible_child_name("login");
-					self.ctx.window.set_title(Some("Tern"));
-					self.focus_login.set(true);
-				}
-			},
-			Some(_) => {
-				if self.stack.visible_child_name().as_deref() != Some("mailbox") {
-					self.login.emit(login::Input::ClearPassword);
-					self.stack.set_visible_child_name("mailbox");
-				}
-				// There is nothing here to sign in again from, so go and do it, as ever.
-				if view.status.kind == ConnectionKind::SignedOut {
-					self.ctx.engine.send(Action::SignInAgain);
-				}
-			},
-		}
-		let mut working = self.working.borrow_mut();
-		match view.status.kind {
-			ConnectionKind::Working => {
-				let word = Word::from_label(&view.status.line).unwrap_or(Word::Fetching);
-				if working.as_ref().map(|(w, _)| *w) != Some(word) {
-					*working = Some((word, self.ctx.activity.start(word)));
-				}
-			},
-			kind => {
-				working.take();
-				self.ctx.activity.set_problem(matches!(kind, ConnectionKind::Offline | ConnectionKind::Busy).then_some(view.status.line));
-			},
-		}
-		self.ctx.offer_cleanup(view.cleanup_offer.as_deref());
-		if let Some(snack) = &view.snack {
-			self.ctx.say(snack);
-		}
-	}
-
-	/// An account opened or closed.
-	fn account_changed(self: &Rc<Self>, address: &str) {
-		if *self.address.borrow() == address {
-			return;
-		}
-		*self.address.borrow_mut() = address.to_string();
-		if address.is_empty() {
-			self.mailbox.clear();
-		} else {
-			self.mailbox.start(address);
-			log::debug!("mailbox shown");
-		}
-	}
-}
-
-/// What comes from the core, in order, for the GTK thread.
-enum Incoming {
-	Update(Box<Update>),
-	Effect(Effect),
-}
-
-struct Bridge(UnboundedSender<Incoming>);
-
-impl EngineListener for Bridge {
-	fn on_update(&self, update: Update) {
-		let _ = self.0.send(Incoming::Update(Box::new(update)));
-	}
-	fn on_effect(&self, effect: Effect) {
-		let _ = self.0.send(Incoming::Effect(effect));
-	}
-	fn on_log(&self, _: String) {}
 }
 
 /// The core, for this desktop. The scenes keep to themselves, with no real keyring.
-fn start_engine() -> (Arc<Engine>, UnboundedReceiver<Incoming>) {
-	let (tx, incoming) = unbounded_channel();
-	let bridge = Arc::new(Bridge(tx));
+fn start_engine(incoming: relm4::Sender<Incoming>) -> Arc<Engine> {
+	let bridge = Arc::new(Bridge(incoming));
 	let in_scene = screenshot::scene().is_some();
 	let signed_in: Option<Arc<dyn Backend>> = std::env::var_os("TERN_DEMO").map(|_| if in_scene { screenshot::backend() } else { Arc::new(DemoBackend::new()) });
 	let secrets: Arc<dyn SecretStore> = if in_scene { Arc::new(InMemory::default()) } else { Arc::new(Keyring) };
 	let options = Options { device: "computer", meaning: Some(crate::meaning().clone()), signed_in, retry_hint: "Press F5 to try again.", follow_neighbour: true, lone_draft_composes: false };
-	(Engine::open_with(crate::paths().clone(), options, secrets, bridge), incoming)
+	Engine::open_with(crate::paths().clone(), options, secrets, bridge)
 }
 
 /// Preferences, with its Rules section.

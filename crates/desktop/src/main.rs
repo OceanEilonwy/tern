@@ -5,6 +5,7 @@
 
 mod activity;
 mod attachments;
+mod bridge;
 mod cleanup;
 mod composer;
 mod default_app;

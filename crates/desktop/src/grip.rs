@@ -6,13 +6,11 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::graphene;
 
-/// Puts `content` in an overlay with a handle on its end edge, and returns both.
-pub fn wrap(content: &impl IsA<gtk::Widget>) -> (gtk::Overlay, gtk::Box) {
+/// A handle to lay over a pane's end edge.
+pub fn handle() -> gtk::Box {
 	let handle = gtk::Box::builder().width_request(6).halign(gtk::Align::End).css_classes(["pane-grip"]).build();
 	handle.set_cursor_from_name(Some("col-resize"));
-	let overlay = gtk::Overlay::builder().child(content).build();
-	overlay.add_overlay(&handle);
-	(overlay, handle)
+	handle
 }
 
 /// Dragging `handle` calls `resize` with the width `pane` is dragged to, then `done`; a double click

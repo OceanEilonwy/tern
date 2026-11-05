@@ -84,15 +84,15 @@ async fn composing(win: &Rc<Window>, fields: Fields) -> Option<Rc<Composer>> {
 	opened_since(win, since).await
 }
 
-async fn answered(win: &Rc<Window>, mailbox: &Rc<crate::mailbox::Mailbox>, kind: AnswerKind) -> Option<Rc<Composer>> {
+async fn answered(win: &Rc<Window>, mailbox: &Rc<Controller<crate::mailbox::Mailbox>>, kind: AnswerKind) -> Option<Rc<Composer>> {
 	let since = newest(win);
-	mailbox.reader.model().answer(kind);
+	mailbox.model().reader.model().answer(kind);
 	opened_since(win, since).await
 }
 
-async fn edited(win: &Rc<Window>, mailbox: &Rc<crate::mailbox::Mailbox>) -> Option<Rc<Composer>> {
+async fn edited(win: &Rc<Window>, mailbox: &Rc<Controller<crate::mailbox::Mailbox>>) -> Option<Rc<Composer>> {
 	let since = newest(win);
-	mailbox.reader.model().edit_current_draft();
+	mailbox.model().reader.model().edit_current_draft();
 	opened_since(win, since).await
 }
 
@@ -110,7 +110,7 @@ fn sign_in(win: std::rc::Weak<Window>, path: PathBuf) {
 		sign_in_as(&w, "demo");
 		let window = w.ctx.window.clone();
 		drop(w);
-		wait_for(|| win.upgrade().is_some_and(|w| w.mailbox.store.n_items() > 0)).await;
+		wait_for(|| win.upgrade().is_some_and(|w| w.mailbox.model().store.n_items() > 0)).await;
 		save_and_quit(window.upcast_ref(), &path, window.application()).await;
 	});
 }
@@ -189,8 +189,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		}
 		// Folders that fail to load say so instead of spinning.
 		"folders-fail" => {
-			wait_for(|| mailbox.status().is_some()).await;
-			match mailbox.status() {
+			wait_for(|| mailbox.model().status().is_some()).await;
+			match mailbox.model().status() {
 				Some(title) if title == "Could not load folders" => {},
 				other => return Err(format!("expected the folder error, got {other:?}")),
 			}
@@ -206,7 +206,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			wait_for(loading).await;
 			gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.refresh", None).map_err(|e| e.to_string())?;
 			for _ in 0..5 {
-				wait_for(|| mailbox.store.n_items() > 0 && !loading()).await;
+				wait_for(|| mailbox.model().store.n_items() > 0 && !loading()).await;
 			}
 			sleep(1000).await;
 			if loading() { Err("the list still counts a page as loading".into()) } else { Ok(()) }
@@ -217,22 +217,22 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			app.activate_action("sign-out", None);
 			sleep(800).await;
 			sign_in_as(win, "demo");
-			wait_for(|| mailbox.store.n_items() > 0).await;
-			if mailbox.store.n_items() > 0 { Ok(()) } else { Err("signing in again showed no mail".into()) }
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
+			if mailbox.model().store.n_items() > 0 { Ok(()) } else { Err("signing in again showed no mail".into()) }
 		}
 		// Closing a composer keeps the message in Drafts; it reopens with its fields and sends.
 		"draft" => {
-			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
 			let fields = Fields { to: "mia@tuta.com".into(), subject: "Trip plan".into(), body: "Day one: the coast.".into(), ..Default::default() };
 			let composer = composing(win, fields).await.expect("a composer");
 			composer.attach("map.pdf", "application/pdf", b"%PDF map");
 			composer.window.close();
 			drop(composer);
-			mailbox.select_folder(tern_mail::FolderKind::Drafts);
-			wait_for(|| mailbox.select_by_subject("Trip plan")).await;
-			wait_for(|| mailbox.reader.model().opened().is_some() && mailbox.reader.model().mails().iter().any(|m| m.draft)).await;
-			if !mailbox.reader.model().mails().iter().any(|m| m.draft) {
-				return Err(format!("the saved draft did not show as a draft: {:?}", mailbox.reader.model().mails().iter().map(|m| (&m.subject, m.draft)).collect::<Vec<_>>()));
+			mailbox.model().select_folder(tern_mail::FolderKind::Drafts);
+			wait_for(|| mailbox.model().select_by_subject("Trip plan")).await;
+			wait_for(|| mailbox.model().reader.model().opened().is_some() && mailbox.model().reader.model().mails().iter().any(|m| m.draft)).await;
+			if !mailbox.model().reader.model().mails().iter().any(|m| m.draft) {
+				return Err(format!("the saved draft did not show as a draft: {:?}", mailbox.model().reader.model().mails().iter().map(|m| (&m.subject, m.draft)).collect::<Vec<_>>()));
 			}
 			let again = edited(win, &mailbox).await.ok_or("the draft did not open for editing")?;
 			if again.subject_and_to() != ("Trip plan".to_string(), "mia@tuta.com".to_string()) {
@@ -241,19 +241,19 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			again.send();
 			wait_for(|| !again.window.is_visible()).await;
 			drop(again);
-			wait_for(|| mailbox.store.n_items() == 0).await;
-			if mailbox.store.n_items() != 0 {
+			wait_for(|| mailbox.model().store.n_items() == 0).await;
+			if mailbox.model().store.n_items() != 0 {
 				return Err("the sent draft stayed in Drafts".into());
 			}
-			mailbox.select_folder(tern_mail::FolderKind::Sent);
-			wait_for(|| mailbox.select_by_subject("Trip plan")).await;
-			wait_for(|| mailbox.reader.model().opened().is_some_and(|o| o.attachments.len() == 1)).await;
-			if mailbox.reader.model().opened().is_some_and(|o| o.attachments.len() == 1) { Ok(()) } else { Err("the sent mail lost its attachment".into()) }
+			mailbox.model().select_folder(tern_mail::FolderKind::Sent);
+			wait_for(|| mailbox.model().select_by_subject("Trip plan")).await;
+			wait_for(|| mailbox.model().reader.model().opened().is_some_and(|o| o.attachments.len() == 1)).await;
+			if mailbox.model().reader.model().opened().is_some_and(|o| o.attachments.len() == 1) { Ok(()) } else { Err("the sent mail lost its attachment".into()) }
 		}
 		// A reply carries only the lines picked in the mail until the whole mail is added; a forward
 		// carries the mail until it is left out.
 		"quote" => {
-			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
 			let backend = win.ctx.backend().ok_or("signed out")?;
 			let sent = win.ctx.cache().and_then(|c| c.folders().ok()?.into_iter().find(|f| f.kind == FolderKind::Sent)).ok_or("no Sent")?;
 			let newest_sent = || {
@@ -264,10 +264,10 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 					backend.open(&newest.id).await.map(|m| m.body_html).map_err(|e| e.to_string())
 				}
 			};
-			mailbox.select_by_subject("Lunch");
-			wait_for(|| mailbox.reader.model().opened().is_some_and(|o| o.subject.starts_with("Re:"))).await;
+			mailbox.model().select_by_subject("Lunch");
+			wait_for(|| mailbox.model().reader.model().opened().is_some_and(|o| o.subject.starts_with("Re:"))).await;
 			sleep(300).await;
-			if !mailbox.reader.model().select_in_current("12:30 at the usual place?") {
+			if !mailbox.model().reader.model().select_in_current("12:30 at the usual place?") {
 				return Err("the reply's text is not in the open mail".into());
 			}
 			let reply = answered(win, &mailbox, AnswerKind::Reply).await.ok_or("no reply")?;
@@ -314,26 +314,26 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			// A reply closed unsent reopens from Drafts with its quotes apart from the text: as kept
 			// here, the whole mail left out included; without that, as read back from the draft.
-			mailbox.select_by_subject("Lunch");
-			wait_for(|| mailbox.reader.model().opened().is_some()).await;
+			mailbox.model().select_by_subject("Lunch");
+			wait_for(|| mailbox.model().reader.model().opened().is_some()).await;
 			sleep(300).await;
-			mailbox.reader.model().select_in_current("12:30 at the usual place?");
+			mailbox.model().reader.model().select_in_current("12:30 at the usual place?");
 			let reply = answered(win, &mailbox, AnswerKind::Reply).await.ok_or("no reply")?;
 			let written = reply.view().map(|v| quote_of(&v));
 			reply.type_body("Yes, see you then.");
 			reply.window.close();
 			wait_for(|| !reply.window.is_visible()).await;
 			drop(reply);
-			mailbox.select_folder(FolderKind::Drafts);
-			wait_for(|| mailbox.select_by_subject("Re: Lunch")).await;
-			wait_for(|| mailbox.reader.model().opened().is_some_and(|o| o.draft)).await;
+			mailbox.model().select_folder(FolderKind::Drafts);
+			wait_for(|| mailbox.model().select_by_subject("Re: Lunch")).await;
+			wait_for(|| mailbox.model().reader.model().opened().is_some_and(|o| o.draft)).await;
 			let again = edited(win, &mailbox).await.ok_or("the draft did not open")?;
 			if again.body_text() != "Yes, see you then." || again.view().map(|v| quote_of(&v)) != written {
 				return Err(format!("the draft reopened as {:?} quoting {:?}, written {written:?}", again.body_text(), again.view().map(|v| quote_of(&v))));
 			}
 			again.window.set_visible(false);
 			drop(again);
-			let id = mailbox.reader.model().current().map(|o| tern_mail::MailId { list: o.id.list, element: o.id.element }).ok_or("no draft")?;
+			let id = mailbox.model().reader.model().current().map(|o| tern_mail::MailId { list: o.id.list, element: o.id.element }).ok_or("no draft")?;
 			win.ctx.cache().ok_or("no cache")?.set_draft_quote(&id, None).map_err(|e| e.to_string())?;
 			let again = edited(win, &mailbox).await.ok_or("the draft did not open")?;
 			let back = again.view().map(|v| quote_of(&v)).ok_or("no draft")?;
@@ -346,9 +346,9 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// A reply goes out from the address the mail came to; a new mail from the main one, unless
 		// another is picked.
 		"from" => {
-			wait_for(|| mailbox.store.n_items() > 0).await;
-			mailbox.select_by_subject("five small things");
-			wait_for(|| mailbox.reader.model().opened().is_some()).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
+			mailbox.model().select_by_subject("five small things");
+			wait_for(|| mailbox.model().reader.model().opened().is_some()).await;
 			let reply = answered(win, &mailbox, AnswerKind::Reply).await.ok_or("no reply")?;
 			let picked = reply.from.selected_item().and_downcast::<gtk::StringObject>().map(|s| s.string().to_string());
 			if !reply.from.is_visible() || picked.as_deref() != Some("news@you.example") {
@@ -364,9 +364,9 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			fresh.send();
 			wait_for(|| !fresh.window.is_visible()).await;
 			drop(fresh);
-			mailbox.select_folder(tern_mail::FolderKind::Sent);
-			wait_for(|| mailbox.select_by_subject("Re: This week")).await;
-			wait_for(|| mailbox.reader.model().opened().is_some()).await;
+			mailbox.model().select_folder(tern_mail::FolderKind::Sent);
+			wait_for(|| mailbox.model().select_by_subject("Re: This week")).await;
+			wait_for(|| mailbox.model().reader.model().opened().is_some()).await;
 			let sent = win.ctx.cache().and_then(|c| c.folders().ok()?.into_iter().find(|f| f.kind == FolderKind::Sent)).ok_or("no Sent")?;
 			let backend = win.ctx.backend().ok_or("signed out")?;
 			let senders: Vec<(String, String)> = backend.list(&sent.id, None, 50).await.map_err(|e| e.to_string())?.mails.into_iter().map(|m| (m.subject, m.from.address)).collect();
@@ -378,13 +378,14 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		}
 		// The sidebar's broom past the limit, and Clean Up clearing everything, which then fetches again.
 		"cleanup" => {
-			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
 			sleep(500).await;
-			if mailbox.cleanup_offered() {
+			if mailbox.model().cleanup_offered() {
 				return Err("the demo's small cache is offered for cleanup".into());
 			}
 			win.ctx.offer_cleanup(Some("1.3 GB"));
-			if !mailbox.cleanup_offered() {
+			wait_for(|| mailbox.model().cleanup_offered()).await;
+			if !mailbox.model().cleanup_offered() {
 				return Err("no broom past the limit".into());
 			}
 			win.ctx.engine.send(tern_app::view::Action::OpenCleanup);
@@ -406,7 +407,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			let cache = win.ctx.cache().ok_or("no cache")?;
 			let inbox = || cache.folders().ok()?.into_iter().find(|f| f.kind == tern_mail::FolderKind::Inbox).and_then(|f| cache.count(&f.id).ok());
-			wait_for(|| inbox().is_some_and(|n| n > 0) && mailbox.store.n_items() > 0).await;
+			wait_for(|| inbox().is_some_and(|n| n > 0) && mailbox.model().store.n_items() > 0).await;
 			if !inbox().is_some_and(|n| n > 0) {
 				return Err("the Inbox did not fetch again".into());
 			}
@@ -424,7 +425,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		}
 		// Typing in To suggests contacts and people written to.
 		"suggest" => {
-			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
 			sleep(500).await;
 			let composer = composing(win, Fields::default()).await.expect("a composer");
 			sleep(200).await;
@@ -437,22 +438,22 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		}
 		// Alt+Down moves to the next conversation; Delete trashes it and opens its neighbour.
 		"keys" => {
-			wait_for(|| mailbox.store.n_items() == 7).await;
+			wait_for(|| mailbox.model().store.n_items() == 7).await;
 			let window = win.ctx.window.clone();
 			let act = |name: &str| gtk::prelude::WidgetExt::activate_action(&window, name, None).map_err(|e| e.to_string());
 			act("win.next")?;
 			act("win.next")?;
-			wait_for(|| mailbox.reader.model().opened().is_some()).await;
-			let second = mailbox.reader.model().mails().first().map(|m| m.subject.clone()).unwrap_or_default();
+			wait_for(|| mailbox.model().reader.model().opened().is_some()).await;
+			let second = mailbox.model().reader.model().mails().first().map(|m| m.subject.clone()).unwrap_or_default();
 			if second != "Your invoice for October" {
 				return Err(format!("Alt+Down twice opened {second:?}"));
 			}
 			act("win.trash")?;
-			wait_for(|| mailbox.store.n_items() == 6).await;
-			wait_for(|| mailbox.reader.model().opened().is_some()).await;
-			let next = mailbox.reader.model().mails().first().map(|m| m.subject.clone()).unwrap_or_default();
-			if mailbox.store.n_items() != 6 || !next.contains("Lunch") {
-				return Err(format!("after Delete: {} conversations, showing {next:?}", mailbox.store.n_items()));
+			wait_for(|| mailbox.model().store.n_items() == 6).await;
+			wait_for(|| mailbox.model().reader.model().opened().is_some()).await;
+			let next = mailbox.model().reader.model().mails().first().map(|m| m.subject.clone()).unwrap_or_default();
+			if mailbox.model().store.n_items() != 6 || !next.contains("Lunch") {
+				return Err(format!("after Delete: {} conversations, showing {next:?}", mailbox.model().store.n_items()));
 			}
 			Ok(())
 		}
@@ -460,35 +461,35 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		"panes" => {
 			// The window's icon on the folders' header, as KDE puts it, must not widen the rail.
 			gtk::Settings::default().ok_or("no settings")?.set_gtk_decoration_layout(Some("icon:minimize,maximize,close"));
-			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
 			let window = win.ctx.window.clone();
 			let act = |name: &str| gtk::prelude::WidgetExt::activate_action(&window, name, None).map_err(|e| e.to_string());
-			mailbox.drag_folders(300);
-			mailbox.drag_list(500);
+			mailbox.emit(crate::mailbox::Input::DragFolders(300));
+			mailbox.emit(crate::mailbox::Input::DragList(500));
 			// Waits for the layout rather than a set time: a slow machine, such as CI's, lays out later.
-			wait_for(|| mailbox.pane_widths() == (300, 500)).await;
-			if mailbox.pane_widths() != (300, 500) {
-				return Err(format!("dragged to 300 and 500, the panes are {:?}", mailbox.pane_widths()));
+			wait_for(|| mailbox.model().pane_widths() == (300, 500)).await;
+			if mailbox.model().pane_widths() != (300, 500) {
+				return Err(format!("dragged to 300 and 500, the panes are {:?}", mailbox.model().pane_widths()));
 			}
 			act("win.toggle-folders")?;
-			wait_for(|| mailbox.is_rail() && mailbox.pane_widths().0 == RAIL as i32).await;
-			if !mailbox.is_rail() || mailbox.pane_widths().0 != RAIL as i32 {
-				return Err(format!("F9 did not make a rail: {:?}", mailbox.pane_widths()));
+			wait_for(|| mailbox.model().is_rail() && mailbox.model().pane_widths().0 == RAIL as i32).await;
+			if !mailbox.model().is_rail() || mailbox.model().pane_widths().0 != RAIL as i32 {
+				return Err(format!("F9 did not make a rail: {:?}", mailbox.model().pane_widths()));
 			}
-			let middle = mailbox.header_icon_middle().ok_or("no icon on the rail's header")?;
+			let middle = mailbox.model().header_icon_middle().ok_or("no icon on the rail's header")?;
 			if (middle - RAIL as f32 / 2.0).abs() > 0.5 {
 				return Err(format!("the rail's icon is centred at {middle}, the rail is {RAIL} wide"));
 			}
 			act("win.toggle-folders")?;
-			wait_for(|| mailbox.pane_widths().0 == 300).await;
-			if mailbox.pane_widths().0 != 300 {
-				return Err(format!("F9 again left the folders {} wide", mailbox.pane_widths().0));
+			wait_for(|| mailbox.model().pane_widths().0 == 300).await;
+			if mailbox.model().pane_widths().0 != 300 {
+				return Err(format!("F9 again left the folders {} wide", mailbox.model().pane_widths().0));
 			}
 			// Dragged narrow, it snaps to the rail; the shot shows it.
-			mailbox.drag_folders(90);
-			wait_for(|| mailbox.is_rail()).await;
-			if !mailbox.is_rail() || win.ctx.layout().folders_width != 300 {
-				return Err(format!("dragged narrow: rail {}, width kept {}", mailbox.is_rail(), win.ctx.layout().folders_width));
+			mailbox.emit(crate::mailbox::Input::DragFolders(90));
+			wait_for(|| mailbox.model().is_rail()).await;
+			if !mailbox.model().is_rail() || win.ctx.layout().folders_width != 300 {
+				return Err(format!("dragged narrow: rail {}, width kept {}", mailbox.model().is_rail(), win.ctx.layout().folders_width));
 			}
 			Ok(())
 		}
@@ -496,8 +497,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// opening a slow mail over that, then sending over both.
 		"busy" => {
 			wait_for(|| win.ctx.activity.word() == Some(Word::Fetching)).await;
-			wait_for(|| mailbox.store.n_items() > 0).await;
-			mailbox.select_by_subject("Photos from Saturday");
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
+			mailbox.model().select_by_subject("Photos from Saturday");
 			sleep(800).await;
 			if win.ctx.activity.word() != Some(Word::Opening) {
 				return Err(format!("while opening, the word is {:?}", win.ctx.activity.word()));
@@ -514,12 +515,12 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// The mail chosen shows at once though a slow batch fetching the list's mail holds it:
 		// batches take seconds here, a single mail none.
 		"focus-first" => {
-			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
 			sleep(500).await;
 			let started = std::time::Instant::now();
-			mailbox.select_by_subject("Lunch");
-			wait_for(|| mailbox.reader.model().opened().is_some()).await;
-			let shown = mailbox.reader.model().opened().map(|o| o.subject);
+			mailbox.model().select_by_subject("Lunch");
+			wait_for(|| mailbox.model().reader.model().opened().is_some()).await;
+			let shown = mailbox.model().reader.model().opened().map(|o| o.subject);
 			let batched = tern_mail::MailId { list: "demo".into(), element: "m001".into() };
 			let batch_done = win.ctx.cache().is_some_and(|c| c.has_mail(&batched).unwrap_or(false));
 			if shown.as_deref() != Some("Re: Lunch on Friday?") || started.elapsed() > Duration::from_secs(2) || batch_done {
@@ -529,15 +530,15 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		}
 		// Arrowing onto an unread conversation marks it read without moving the focus off it.
 		"arrows" => {
-			wait_for(|| mailbox.store.n_items() > 0).await;
-			let unread = (1..mailbox.store.n_items()).find(|&i| mailbox.store.item(i).is_some_and(|o| o.downcast_ref::<glib::BoxedAnyObject>().unwrap().borrow::<tern_app::view::RowView>().unread));
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
+			let unread = (1..mailbox.model().store.n_items()).find(|&i| mailbox.model().store.item(i).is_some_and(|o| o.downcast_ref::<glib::BoxedAnyObject>().unwrap().borrow::<tern_app::view::RowView>().unread));
 			let at = unread.ok_or("no unread conversation below the first")?;
-			mailbox.arrow_to(0);
+			mailbox.model().arrow_to(0);
 			sleep(200).await;
-			mailbox.arrow_to(at);
-			wait_for(|| mailbox.focused_row().is_some_and(|(_, unread)| !unread)).await;
+			mailbox.model().arrow_to(at);
+			wait_for(|| mailbox.model().focused_row().is_some_and(|(_, unread)| !unread)).await;
 			sleep(300).await;
-			match mailbox.focused_row() {
+			match mailbox.model().focused_row() {
 				Some((row, false)) if row == at => Ok(()),
 				other => Err(format!("arrowed onto row {at}, the focus is now on {other:?}")),
 			}
@@ -545,57 +546,57 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// Ctrl+F searches the mail on this computer across folders; a result opens its conversation,
 		// and Escape goes back to the folder.
 		"search" => {
-			wait_for(|| mailbox.store.n_items() == 7).await;
+			wait_for(|| mailbox.model().store.n_items() == 7).await;
 			// Body words are found once the background sync has opened the mails ahead.
 			wait_for(|| win.ctx.cache().is_some_and(|c| c.missing_bodies(10).is_ok_and(|m| m.is_empty()))).await;
 			let window = win.ctx.window.clone();
 			let act = |name: &str| gtk::prelude::WidgetExt::activate_action(&window, name, None).map_err(|e| e.to_string());
-			let shows = |subjects: &[&str]| mailbox.is_searching() && mailbox.shown() == ("Search".to_string(), subjects.iter().map(|s| s.to_string()).collect());
+			let shows = |subjects: &[&str]| mailbox.model().is_searching() && mailbox.model().shown() == ("Search".to_string(), subjects.iter().map(|s| s.to_string()).collect());
 			act("win.search")?;
 			sleep(100).await;
 			// A filter; then words from a body, the last one a prefix.
 			for (query, expected) in [("from:sam", "Re: Lunch on Friday?"), ("usual pla", "Re: Lunch on Friday?"), ("invoic", "Your invoice for October")] {
-				mailbox.type_search(query)?;
+				mailbox.model().type_search(query)?;
 				wait_for(|| shows(&[expected])).await;
 				if !shows(&[expected]) {
-					return Err(format!("searching {query:?} shows {:?}", mailbox.shown()));
+					return Err(format!("searching {query:?} shows {:?}", mailbox.model().shown()));
 				}
 			}
-			mailbox.select_by_subject("invoice");
-			let opened = || mailbox.reader.model().opened().is_some_and(|o| o.subject == "Your invoice for October");
+			mailbox.model().select_by_subject("invoice");
+			let opened = || mailbox.model().reader.model().opened().is_some_and(|o| o.subject == "Your invoice for October");
 			wait_for(opened).await;
 			if !opened() {
 				return Err("the result did not open".into());
 			}
 			// Typing on after opening one: nothing opens by itself (which would mark it read).
-			mailbox.type_search("in:inbox")?;
+			mailbox.model().type_search("in:inbox")?;
 			wait_for(|| shows(&["Photos from Saturday", "Your invoice for October", "Re: Lunch on Friday?", "This week: five small things", "50% off everything this weekend", "Last chance: 50% off ends tonight", "Your exclusive coupon inside"])).await;
-			mailbox.select_by_subject("invoice");
+			mailbox.model().select_by_subject("invoice");
 			wait_for(opened).await;
-			mailbox.append_search(" lunch");
+			mailbox.model().append_search(" lunch");
 			wait_for(|| shows(&["Re: Lunch on Friday?"])).await;
 			sleep(300).await;
-			if mailbox.reader.model().current().is_some() || !shows(&["Re: Lunch on Friday?"]) {
-				return Err(format!("typing on opened {:?}", mailbox.reader.model().mails().first().map(|m| m.subject.clone())));
+			if mailbox.model().reader.model().current().is_some() || !shows(&["Re: Lunch on Friday?"]) {
+				return Err(format!("typing on opened {:?}", mailbox.model().reader.model().mails().first().map(|m| m.subject.clone())));
 			}
-			mailbox.type_search("zzqx")?;
-			wait_for(|| mailbox.status().is_some()).await;
-			if mailbox.status().as_deref() != Some("No matches") {
-				return Err(format!("searching nonsense shows {:?}", mailbox.status()));
+			mailbox.model().type_search("zzqx")?;
+			wait_for(|| mailbox.model().status().is_some()).await;
+			if mailbox.model().status().as_deref() != Some("No matches") {
+				return Err(format!("searching nonsense shows {:?}", mailbox.model().status()));
 			}
-			mailbox.escape_search();
-			wait_for(|| !mailbox.is_searching() && mailbox.store.n_items() == 7).await;
-			if mailbox.is_searching() || mailbox.shown().0 != "Inbox" || mailbox.store.n_items() != 7 {
-				return Err(format!("Escape left {:?}", mailbox.shown()));
+			mailbox.model().escape_search();
+			wait_for(|| !mailbox.model().is_searching() && mailbox.model().store.n_items() == 7).await;
+			if mailbox.model().is_searching() || mailbox.model().shown().0 != "Inbox" || mailbox.model().store.n_items() != 7 {
+				return Err(format!("Escape left {:?}", mailbox.model().shown()));
 			}
 			// A conversation spanning Inbox and Sent opens whole; the shot shows it.
 			act("win.search")?;
 			sleep(100).await;
-			mailbox.type_search("lunch")?;
+			mailbox.model().type_search("lunch")?;
 			wait_for(|| shows(&["Re: Lunch on Friday?"])).await;
-			mailbox.select_by_subject("Lunch");
-			wait_for(|| mailbox.reader.model().mails().len() == 2).await;
-			match mailbox.reader.model().mails().len() {
+			mailbox.model().select_by_subject("Lunch");
+			wait_for(|| mailbox.model().reader.model().mails().len() == 2).await;
+			match mailbox.model().reader.model().mails().len() {
 				2 => Ok(()),
 				n => Err(format!("the Lunch conversation opened with {n} mails")),
 			}
@@ -604,9 +605,9 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// is kept as a rule. The moves hold after a sync, so the server has them too.
 		"spam" => {
 			rules::save(crate::paths(), &[]);
-			wait_for(|| mailbox.store.n_items() > 0).await;
-			mailbox.select_by_subject("coupon");
-			wait_for(|| mailbox.reader.model().opened().is_some()).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
+			mailbox.model().select_by_subject("coupon");
+			wait_for(|| mailbox.model().reader.model().opened().is_some()).await;
 			gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.spam", None).map_err(|e| e.to_string())?;
 			wait_for(|| win.ctx.picker.borrow().as_ref().is_some_and(|p| p.model().listed().len() == 3)).await;
 			let picker = win.ctx.picker.borrow().clone().ok_or("Move to Spam did not open")?;
@@ -654,14 +655,14 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// Labels: from a conversation's menu, on its row and in its heading; one made from the dialog;
 		// browsed from the sidebar across folders.
 		"labels" => {
-			wait_for(|| mailbox.store.n_items() > 0).await;
-			let i = mailbox.listed().iter().position(|r| r.subject.contains("invoice")).ok_or("no invoice")? as u32;
-			mailbox.open_row_menu(i, None).ok_or("no menu")?.popdown();
-			mailbox.row_action("labels")?;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
+			let i = mailbox.model().listed().iter().position(|r| r.subject.contains("invoice")).ok_or("no invoice")? as u32;
+			mailbox.model().open_row_menu(i, None).ok_or("no menu")?.popdown();
+			mailbox.model().row_action("labels")?;
 			wait_for(|| win.ctx.label_picker.borrow().as_ref().is_some_and(|p| !p.model().ticks().is_empty())).await;
 			let picker = win.ctx.label_picker.borrow().clone().ok_or("no labels dialog")?;
 			picker.model().toggle("Travel");
-			let chips = || mailbox.listed().iter().position(|r| r.subject.contains("invoice")).map_or(Vec::new(), |i| mailbox.row_chips(i as u32));
+			let chips = || mailbox.model().listed().iter().position(|r| r.subject.contains("invoice")).map_or(Vec::new(), |i| mailbox.model().row_chips(i as u32));
 			wait_for(|| chips() == ["Travel"]).await;
 			if chips() != ["Travel"] {
 				return Err(format!("the row shows {:?}", chips()));
@@ -676,8 +677,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			picker.widget().close();
 			wait_for(|| win.ctx.label_picker.borrow().is_none()).await;
 			drop(picker);
-			mailbox.select_by_subject("invoice");
-			wait_for(|| mailbox.reader.model().opened().is_some()).await;
+			mailbox.model().select_by_subject("invoice");
+			wait_for(|| mailbox.model().reader.model().opened().is_some()).await;
 			gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.labels", None).map_err(|e| e.to_string())?;
 			wait_for(|| win.ctx.label_picker.borrow().is_some()).await;
 			if win.ctx.label_picker.borrow().is_none() {
@@ -688,24 +689,24 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				open.widget().close();
 			}
 			wait_for(|| win.ctx.label_picker.borrow().is_none()).await;
-			wait_for(|| mailbox.select_label("Bills")).await;
-			wait_for(|| mailbox.shown().0 == "Bills" && mailbox.store.n_items() == 1).await;
-			if mailbox.shown() != ("Bills".to_string(), vec!["Your invoice for October".to_string()]) {
-				return Err(format!("browsing Bills shows {:?}", mailbox.shown()));
+			wait_for(|| mailbox.model().select_label("Bills")).await;
+			wait_for(|| mailbox.model().shown().0 == "Bills" && mailbox.model().store.n_items() == 1).await;
+			if mailbox.model().shown() != ("Bills".to_string(), vec!["Your invoice for October".to_string()]) {
+				return Err(format!("browsing Bills shows {:?}", mailbox.model().shown()));
 			}
-			mailbox.select_folder(FolderKind::Inbox);
-			wait_for(|| mailbox.shown().0 == "Inbox" && mailbox.store.n_items() == 7).await;
-			if mailbox.shown().0 != "Inbox" {
-				return Err(format!("the Inbox shows {:?}", mailbox.shown()));
+			mailbox.model().select_folder(FolderKind::Inbox);
+			wait_for(|| mailbox.model().shown().0 == "Inbox" && mailbox.model().store.n_items() == 7).await;
+			if mailbox.model().shown().0 != "Inbox" {
+				return Err(format!("the Inbox shows {:?}", mailbox.model().shown()));
 			}
 			Ok(())
 		}
 		// Opening an attachment hands the file over, saving copies it, and files dragged in attach.
 		"attachments" => {
-			wait_for(|| mailbox.store.n_items() > 0).await;
-			mailbox.select_by_subject("invoice");
-			wait_for(|| mailbox.reader.model().opened().is_some_and(|c| !c.attachments.is_empty())).await;
-			let card = mailbox.reader.model().opened().ok_or("the mail did not open")?;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
+			mailbox.model().select_by_subject("invoice");
+			wait_for(|| mailbox.model().reader.model().opened().is_some_and(|c| !c.attachments.is_empty())).await;
+			let card = mailbox.model().reader.model().opened().ok_or("the mail did not open")?;
 			let att = card.attachments.first().ok_or("no attachment")?.clone();
 			win.ctx.engine.send(tern_app::view::Action::OpenAttachment { mail: card.id.clone(), attachment: att.id.clone() });
 			wait_for(|| !win.ctx.handed_over.borrow().is_empty()).await;
@@ -734,7 +735,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		}
 		// Discard asks first; Cancel keeps the mail, and Discard takes its saved draft with it.
 		"discard" => {
-			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
 			let empty = composing(win, Fields::default()).await.ok_or("no composer")?;
 			empty.discard();
 			wait_for(|| !empty.window.is_visible()).await;
@@ -747,9 +748,9 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			composer.type_body("On further reflection");
 			composer.window.close();
 			wait_for(|| !composer.window.is_visible()).await;
-			mailbox.select_folder(FolderKind::Drafts);
-			wait_for(|| mailbox.select_by_subject("Second thoughts")).await;
-			wait_for(|| mailbox.reader.model().opened().is_some_and(|c| c.draft)).await;
+			mailbox.model().select_folder(FolderKind::Drafts);
+			wait_for(|| mailbox.model().select_by_subject("Second thoughts")).await;
+			wait_for(|| mailbox.model().reader.model().opened().is_some_and(|c| c.draft)).await;
 			let again = edited(win, &mailbox).await.ok_or("the draft did not open")?;
 			again.discard();
 			wait_for(|| win.ctx.discard_dialog().is_some()).await;
@@ -763,16 +764,16 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			wait_for(|| win.ctx.discard_dialog().is_some()).await;
 			let dialog = win.ctx.discard_dialog().ok_or("Discard did not ask again")?;
 			dialog.emit_by_name::<()>("response", &[&"discard"]);
-			wait_for(|| !again.window.is_visible() && mailbox.store.n_items() == 0).await;
-			if again.window.is_visible() || mailbox.store.n_items() != 0 {
-				return Err(format!("after Discard the composer shows: {}, {} drafts", again.window.is_visible(), mailbox.store.n_items()));
+			wait_for(|| !again.window.is_visible() && mailbox.model().store.n_items() == 0).await;
+			if again.window.is_visible() || mailbox.model().store.n_items() != 0 {
+				return Err(format!("after Discard the composer shows: {}, {} drafts", again.window.is_visible(), mailbox.model().store.n_items()));
 			}
 			Ok(())
 		}
 		// Closing the window with a composer open only hides it, on the same core; it comes back when
 		// asked for, and goes when the last composer does.
 		"reopen" => {
-			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
 			let composer = composing(win, Fields::default()).await.ok_or("no composer")?;
 			win.ctx.window.close();
 			wait_for(|| !win.ctx.window.is_visible()).await;
@@ -798,28 +799,28 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// A narrow window's content fits it: the buttons that do not fit give way to the menus, and a
 		// picture holds no pane wider than the window's least.
 		"narrow-fits" => {
-			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
 			wait_for(|| win.ctx.activity.word().is_none()).await;
-			if mailbox.narrowest_parts().0 > 360 {
-				return Err(format!("the list needs {} px, the window's least is 360", mailbox.narrowest_parts().0));
+			if mailbox.model().narrowest_parts().0 > 360 {
+				return Err(format!("the list needs {} px, the window's least is 360", mailbox.model().narrowest_parts().0));
 			}
-			mailbox.select_by_subject("Lunch");
-			wait_for(|| mailbox.reader.model().opened().is_some()).await;
-			wait_for(|| mailbox.narrowest_parts().1 <= 360).await;
-			if mailbox.narrowest_parts().1 > 360 {
-				return Err(format!("the conversation needs {} px, the window's least is 360", mailbox.narrowest_parts().1));
+			mailbox.model().select_by_subject("Lunch");
+			wait_for(|| mailbox.model().reader.model().opened().is_some()).await;
+			wait_for(|| mailbox.model().narrowest_parts().1 <= 360).await;
+			if mailbox.model().narrowest_parts().1 > 360 {
+				return Err(format!("the conversation needs {} px, the window's least is 360", mailbox.model().narrowest_parts().1));
 			}
-			mailbox.select_by_subject("Photos");
-			wait_for(|| mailbox.reader.model().opened().is_some_and(|c| c.subject.contains("Photos"))).await;
+			mailbox.model().select_by_subject("Photos");
+			wait_for(|| mailbox.model().reader.model().opened().is_some_and(|c| c.subject.contains("Photos"))).await;
 			sleep(500).await;
-			if mailbox.narrowest_parts().1 > 360 {
-				return Err(format!("a picture holds the conversation at {} px", mailbox.narrowest_parts().1));
+			if mailbox.model().narrowest_parts().1 > 360 {
+				return Err(format!("a picture holds the conversation at {} px", mailbox.model().narrowest_parts().1));
 			}
 			Ok(())
 		}
 		// Trying to send again with the same problem says so again.
 		"repeat-error" => {
-			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
 			let fields = Fields { to: "not an address".into(), subject: "One".into(), body: "Hi".into(), ..Default::default() };
 			let composer = composing(win, fields).await.ok_or("no composer")?;
 			composer.send();
@@ -834,12 +835,12 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// A conversation shows newest first. Its menu pins it, marks it read and unread, and opens
 		// Move to Spam.
 		"menu" => {
-			wait_for(|| mailbox.store.n_items() == 7).await;
-			mailbox.select_by_subject("Lunch");
-			wait_for(|| mailbox.reader.model().mails().len() == 2).await;
-			let open = mailbox.listed().into_iter().find(|r| r.open).ok_or("nothing marked open")?;
+			wait_for(|| mailbox.model().store.n_items() == 7).await;
+			mailbox.model().select_by_subject("Lunch");
+			wait_for(|| mailbox.model().reader.model().mails().len() == 2).await;
+			let open = mailbox.model().listed().into_iter().find(|r| r.open).ok_or("nothing marked open")?;
 			let oldest_first = win.ctx.cache().ok_or("no cache")?.thread(&open.key, &tern_mail::FolderId(open.folder_id)).map_err(|e| e.to_string())?;
-			let shown: Vec<String> = mailbox.reader.model().mails().into_iter().map(|m| m.id.element).collect();
+			let shown: Vec<String> = mailbox.model().reader.model().mails().into_iter().map(|m| m.id.element).collect();
 			if shown != oldest_first.iter().rev().map(|m| m.summary.id.element.clone()).collect::<Vec<_>>() {
 				return Err(format!("the conversation shows {shown:?}"));
 			}
@@ -855,29 +856,29 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				popover.popdown();
 				labels
 			};
-			let find = |key: &str| mailbox.listed().into_iter().position(|r| r.key == key).ok_or(format!("{key} is not listed"));
+			let find = |key: &str| mailbox.model().listed().into_iter().position(|r| r.key == key).ok_or(format!("{key} is not listed"));
 
 			// A right click on the last conversation pins it.
-			let last = mailbox.listed().pop().ok_or("nothing listed")?;
-			if !mailbox.right_click_row(mailbox.store.n_items() - 1) {
+			let last = mailbox.model().listed().pop().ok_or("nothing listed")?;
+			if !mailbox.model().right_click_row(mailbox.model().store.n_items() - 1) {
 				return Err("a right click on a conversation opened no menu".into());
 			}
-			mailbox.row_action("pin")?;
-			wait_for(|| mailbox.listed().first().is_some_and(|r| r.key == last.key)).await;
-			if !mailbox.listed()[0].pinned {
+			mailbox.model().row_action("pin")?;
+			wait_for(|| mailbox.model().listed().first().is_some_and(|r| r.key == last.key)).await;
+			if !mailbox.model().listed()[0].pinned {
 				return Err("the pinned conversation is not marked pinned".into());
 			}
 
-			let unread = mailbox.listed().into_iter().find(|r| r.unread).ok_or("nothing unread")?;
-			let menu = mailbox.open_row_menu(find(&unread.key)? as u32, None).ok_or("no menu")?;
+			let unread = mailbox.model().listed().into_iter().find(|r| r.unread).ok_or("nothing unread")?;
+			let menu = mailbox.model().open_row_menu(find(&unread.key)? as u32, None).ok_or("no menu")?;
 			if !labels(&menu).contains(&"Mark as _Read".to_string()) {
 				return Err(format!("the menu of an unread conversation: {:?}", labels(&menu)));
 			}
-			mailbox.row_action("read")?;
-			wait_for(|| find(&unread.key).is_ok_and(|i| !mailbox.listed()[i].unread)).await;
-			mailbox.open_row_menu(find(&unread.key)? as u32, None).ok_or("no menu")?.popdown();
-			mailbox.row_action("unread")?;
-			wait_for(|| find(&unread.key).is_ok_and(|i| mailbox.listed()[i].unread)).await;
+			mailbox.model().row_action("read")?;
+			wait_for(|| find(&unread.key).is_ok_and(|i| !mailbox.model().listed()[i].unread)).await;
+			mailbox.model().open_row_menu(find(&unread.key)? as u32, None).ok_or("no menu")?.popdown();
+			mailbox.model().row_action("unread")?;
+			wait_for(|| find(&unread.key).is_ok_and(|i| mailbox.model().listed()[i].unread)).await;
 			wait_for(|| win.ctx.activity.word().is_none()).await;
 			let backend = win.ctx.backend().ok_or("signed out")?;
 			let inbox = win.ctx.cache().and_then(|c| c.folders().ok()?.into_iter().find(|f| f.kind == FolderKind::Inbox)).ok_or("no Inbox")?;
@@ -886,31 +887,31 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("read then unread left the server at {on_server:?}"));
 			}
 
-			let menu = mailbox.open_row_menu(find(&last.key)? as u32, None).ok_or("no menu")?;
+			let menu = mailbox.model().open_row_menu(find(&last.key)? as u32, None).ok_or("no menu")?;
 			if labels(&menu) != ["Un_pin", "Mark as _Unread", "_Labels…", "Move to _Spam…", "Move to _Trash"] {
 				return Err(format!("the menu of a pinned read conversation: {:?}", labels(&menu)));
 			}
 
-			let deals = mailbox.listed().into_iter().find(|r| r.subject.contains("coupon")).ok_or("no coupon")?;
-			mailbox.open_row_menu(find(&deals.key)? as u32, None).ok_or("no menu")?.popdown();
-			mailbox.row_action("spam")?;
+			let deals = mailbox.model().listed().into_iter().find(|r| r.subject.contains("coupon")).ok_or("no coupon")?;
+			mailbox.model().open_row_menu(find(&deals.key)? as u32, None).ok_or("no menu")?.popdown();
+			mailbox.model().row_action("spam")?;
 			wait_for(|| win.ctx.window.visible_dialog().is_some()).await;
 			if let Some(dialog) = win.ctx.window.visible_dialog() {
 				dialog.force_close();
 			}
 
-			mailbox.open_row_menu(0, None).ok_or("no menu")?.popdown();
-			mailbox.row_action("pin")?;
-			wait_for(|| mailbox.listed().last().is_some_and(|r| r.key == last.key && !r.pinned)).await;
+			mailbox.model().open_row_menu(0, None).ok_or("no menu")?.popdown();
+			mailbox.model().row_action("pin")?;
+			wait_for(|| mailbox.model().listed().last().is_some_and(|r| r.key == last.key && !r.pinned)).await;
 			// The shot shows the newest mail on top.
-			mailbox.select_by_subject("Lunch");
+			mailbox.model().select_by_subject("Lunch");
 			Ok(())
 		}
 		// A saved rule that catches more than its page lists: the newest few, a count, and its
 		// line shown whole, not squeezed to the height worked out before the page showed.
 		"rule-edit" => {
 			rules::save(crate::paths(), &[Rule { when: "(from:@deals.example or subject:invoice) or not to:sam".into(), action: Action::Move("Archive".into()) }]);
-			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
 			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
 			dialog.present(Some(&win.ctx.window));
 			let edit = editing(&section, Some(0)).await;
@@ -928,7 +929,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 		// labels with a label it makes.
 		"rules" => {
 			rules::save(crate::paths(), &[]);
-			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
 			let saved = |want: &[Rule]| rules::load(crate::paths()) == want;
 			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
 			dialog.present(Some(&win.ctx.window));
@@ -955,9 +956,9 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			}
 			// Show All lists them in the main window, in place of the folder.
 			edit.show_all();
-			wait_for(|| mailbox.shown().0 == "Mail the rule catches" && mailbox.store.n_items() == 7).await;
-			if mailbox.shown().0 != "Mail the rule catches" || mailbox.store.n_items() != 7 || dialog.is_mapped() {
-				return Err(format!("Show All shows {:?}, dialog open {}", mailbox.shown(), dialog.is_mapped()));
+			wait_for(|| mailbox.model().shown().0 == "Mail the rule catches" && mailbox.model().store.n_items() == 7).await;
+			if mailbox.model().shown().0 != "Mail the rule catches" || mailbox.model().store.n_items() != 7 || dialog.is_mapped() {
+				return Err(format!("Show All shows {:?}, dialog open {}", mailbox.model().shown(), dialog.is_mapped()));
 			}
 			gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.search", None).map_err(|e| e.to_string())?;
 			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
@@ -1060,7 +1061,7 @@ pub fn drive(win: Rc<Window>) {
 	glib::spawn_future_local(async move {
 		let mailbox = win.mailbox.clone();
 		if scene != "login" {
-			wait_for(|| mailbox.store.n_items() > 0).await;
+			wait_for(|| mailbox.model().store.n_items() > 0).await;
 		}
 		let subject = match scene.as_str() {
 			"reading" | "narrow-reading" => Some("Photos from Saturday"),
@@ -1071,8 +1072,8 @@ pub fn drive(win: Rc<Window>) {
 			_ => None,
 		};
 		if let Some(s) = subject {
-			mailbox.select_by_subject(s);
-			wait_for(|| mailbox.reader.model().opened().is_some()).await;
+			mailbox.model().select_by_subject(s);
+			wait_for(|| mailbox.model().reader.model().opened().is_some()).await;
 		}
 		let answer = match scene.as_str() {
 			"reply" => Some(AnswerKind::ReplyAll),
@@ -1082,7 +1083,7 @@ pub fn drive(win: Rc<Window>) {
 		if scene == "reply" {
 			// The line answered is picked in the mail first.
 			sleep(300).await;
-			mailbox.reader.model().select_in_current("12:30 at the usual place?");
+			mailbox.model().reader.model().select_in_current("12:30 at the usual place?");
 		}
 		let answered = match answer {
 			Some(a) => answered(&win, &mailbox, a).await,
@@ -1099,9 +1100,9 @@ pub fn drive(win: Rc<Window>) {
 			let w = composer.window.clone();
 			wait_for(|| !w.is_visible()).await;
 			drop(composer);
-			mailbox.select_folder(tern_mail::FolderKind::Sent);
-			wait_for(|| mailbox.select_by_subject("Route for Sunday")).await;
-			wait_for(|| mailbox.reader.model().opened().is_some_and(|o| o.attachments.len() == 1)).await;
+			mailbox.model().select_folder(tern_mail::FolderKind::Sent);
+			wait_for(|| mailbox.model().select_by_subject("Route for Sunday")).await;
+			wait_for(|| mailbox.model().reader.model().opened().is_some_and(|o| o.attachments.len() == 1)).await;
 			win.ctx.window.clone().upcast()
 		} else if scene == "rail" {
 			// The window's icon on the folders' header, as KDE puts it.
@@ -1112,16 +1113,16 @@ pub fn drive(win: Rc<Window>) {
 			sleep(300).await;
 			win.ctx.window.clone().upcast()
 		} else if scene == "pinned" {
-			let coupon = mailbox.listed().iter().position(|r| r.subject.contains("coupon")).unwrap_or(0) as u32;
-			if let Some(menu) = mailbox.open_row_menu(coupon, None) {
+			let coupon = mailbox.model().listed().iter().position(|r| r.subject.contains("coupon")).unwrap_or(0) as u32;
+			if let Some(menu) = mailbox.model().open_row_menu(coupon, None) {
 				menu.popdown();
 			}
-			let _ = mailbox.row_action("pin");
+			let _ = mailbox.model().row_action("pin");
 			sleep(300).await;
 			win.ctx.window.clone().upcast()
 		} else if scene == "labels-dialog" {
-			mailbox.select_by_subject("invoice");
-			wait_for(|| mailbox.reader.model().opened().is_some()).await;
+			mailbox.model().select_by_subject("invoice");
+			wait_for(|| mailbox.model().reader.model().opened().is_some()).await;
 			let _ = gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.labels", None);
 			wait_for(|| win.ctx.label_picker.borrow().as_ref().is_some_and(|p| !p.model().ticks().is_empty())).await;
 			let picker = win.ctx.label_picker.borrow().clone();
@@ -1132,8 +1133,8 @@ pub fn drive(win: Rc<Window>) {
 			}
 			win.ctx.window.clone().upcast()
 		} else if scene == "spam-dialog" {
-			mailbox.select_by_subject("coupon");
-			wait_for(|| mailbox.reader.model().opened().is_some()).await;
+			mailbox.model().select_by_subject("coupon");
+			wait_for(|| mailbox.model().reader.model().opened().is_some()).await;
 			let _ = gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.spam", None);
 			wait_for(|| win.ctx.picker.borrow().as_ref().is_some_and(|p| p.model().listed().len() == 3)).await;
 			let picker = win.ctx.picker.borrow().clone();

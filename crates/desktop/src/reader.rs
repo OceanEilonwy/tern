@@ -152,7 +152,8 @@ impl FactoryComponent for Card {
 				set_cursor_visible: false,
 				set_wrap_mode: gtk::WrapMode::WordChar,
 				set_pixels_below_lines: 2,
-				add_css_class: "reader-body",
+				// Not the "view" class a text view has by itself, which would paint it apart from its card.
+				set_css_classes: &["reader-body"],
 				set_accessible_role: gtk::AccessibleRole::Document,
 			}
 		}
@@ -457,7 +458,7 @@ impl Component for Reader {
 				set_content = &gtk::Stack {
 					set_transition_type: gtk::StackTransitionType::Crossfade,
 					set_transition_duration: 100,
-					#[watch]
+					#[watch(skip_init)]
 					set_visible_child_name: if model.view.is_some() { "thread" } else { "empty" },
 					add_named[Some("empty")] = &adw::StatusPage {
 						set_icon_name: Some("mail-read-symbolic"),
