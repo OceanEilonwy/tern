@@ -658,7 +658,8 @@ impl Writing {
 				let name = file.basename().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into());
 				let result = file.load_contents_future().await;
 				drop(busy);
-				sender.input(Input::Read(match result {
+				// The window may have gone by now.
+				sender.input_sender().emit(Input::Read(match result {
 					Ok((bytes, _)) => Ok((name, bytes.to_vec())),
 					Err(_) => Err(name),
 				}));
@@ -690,7 +691,8 @@ fn pick_files(root: &adw::Window, sender: &ComponentSender<Writing>) {
 	runtime::spawn_local(async move {
 		let dialog = gtk::FileDialog::builder().title("Attach Files").modal(true).build();
 		let Ok(list) = dialog.open_multiple_future(Some(&root)).await else { return };
-		sender.input(Input::Add((0..list.n_items()).filter_map(|i| list.item(i).and_downcast::<gio::File>()).collect()));
+		// The window may have gone by now.
+		sender.input_sender().emit(Input::Add((0..list.n_items()).filter_map(|i| list.item(i).and_downcast::<gio::File>()).collect()));
 	});
 }
 

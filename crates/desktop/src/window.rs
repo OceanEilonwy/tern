@@ -8,7 +8,7 @@ use std::sync::Arc;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use relm4::prelude::*;
-use tern_app::view::{Action, ChoiceView, ConnectionKind, ComposerView, Effect, RuleEditorView, RulesView, Screen, SettingsView, SheetView, ShellView, SnackView, Update};
+use tern_app::view::{Action, ConnectionKind, ComposerView, Effect, RuleEditorView, RulesView, Screen, SettingsView, SheetView, ShellView, SnackView, Update};
 use tern_app::{Engine, EngineListener, Options, SecretStore};
 use tern_cache::Cache;
 use tern_compose::Fields;
@@ -21,14 +21,13 @@ use crate::composer::Composer;
 use crate::keyring::{InMemory, Keyring};
 use crate::layout::Layout;
 use crate::cleanup::Cleanup;
-use crate::{attachments, cleanup, default_app, labels, login::{self, Login}, mailbox::Mailbox, rule_editor, runtime, screenshot, spam};
+use crate::preferences::Preferences;
+use crate::rule_editor::Rules;
+use crate::{attachments, cleanup, labels, login::{self, Login}, mailbox::Mailbox, rule_editor, runtime, screenshot, spam};
 
 type OfferHook = Box<dyn Fn(Option<&str>)>;
 /// The composer last asked to throw its mail away, and the dialog asking.
 type Discarding = (Option<(u64, adw::Window)>, Option<adw::AlertDialog>);
-type SettingsHook = Box<dyn Fn(&SettingsView)>;
-type RulesHook = Box<dyn Fn(&RulesView)>;
-type RuleEditorHook = Box<dyn Fn(Option<&RuleEditorView>)>;
 
 /// What every part of the window shares: the window, its toasts, the signed-in account and its cache.
 #[derive(Clone)]
@@ -37,18 +36,14 @@ pub struct Ctx {
 	pub toasts: adw::ToastOverlay,
 	pub engine: Arc<Engine>,
 	/// Preferences, when open: what Clean Up opens over, and where it says it is done.
-	preferences: Rc<RefCell<Option<glib::WeakRef<adw::PreferencesDialog>>>>,
+	preferences: Rc<RefCell<Option<Rc<Controller<Preferences>>>>>,
 	/// Clean Up, while open, with its tick for all mail.
 	pub cleanup: Rc<RefCell<Option<Rc<Controller<Cleanup>>>>>,
 	/// The last message the core gave, so it is said once.
 	said: Rc<Cell<u64>>,
 	/// What the core last said about the settings.
 	settings_view: Rc<RefCell<Option<SettingsView>>>,
-	on_settings: Rc<RefCell<Option<SettingsHook>>>,
-	on_rules: Rc<RefCell<Option<RulesHook>>>,
-	on_rule_editor: Rc<RefCell<Option<RuleEditorHook>>>,
 	rules_view: Rc<RefCell<Option<RulesView>>>,
-	rule_editor_view: Rc<RefCell<Option<RuleEditorView>>>,
 	layout: Rc<Cell<Layout>>,
 	/// For the screenshot scenes: files that would have gone to another app.
 	pub handed_over: Rc<RefCell<Vec<String>>>,
@@ -80,36 +75,29 @@ impl Ctx {
 		self.settings_view.borrow().clone()
 	}
 
-	/// Calls `f` whenever the settings on show change, instead of whoever asked last.
-	pub fn connect_settings(&self, f: impl Fn(&SettingsView) + 'static) {
-		*self.on_settings.borrow_mut() = Some(Box::new(f));
-	}
-
-	/// Calls `f` with the rules, now and whenever they change, instead of whoever asked last.
-	pub fn connect_rules(&self, f: impl Fn(&RulesView) + 'static) {
-		if let Some(view) = self.rules_view.borrow().as_ref() {
-			f(view);
-		}
-		*self.on_rules.borrow_mut() = Some(Box::new(f));
-	}
-
-	/// Calls `f` whenever the rule being edited changes, instead of whoever asked last.
-	pub fn connect_rule_editor(&self, f: impl Fn(Option<&RuleEditorView>) + 'static) {
-		*self.on_rule_editor.borrow_mut() = Some(Box::new(f));
+	pub fn rules_view(&self) -> Option<RulesView> {
+		self.rules_view.borrow().clone()
 	}
 
 	fn show_rules(&self, view: RulesView) {
-		if let Some(f) = self.on_rules.borrow().as_ref() {
-			f(&view);
+		*self.rules_view.borrow_mut() = Some(view.clone());
+		if let Some(preferences) = self.preferences.borrow().as_ref() {
+			preferences.model().rules.emit(rule_editor::Input::View(view));
 		}
-		*self.rules_view.borrow_mut() = Some(view);
 	}
 
 	fn show_rule_editor(&self, view: Option<RuleEditorView>) {
-		if let Some(f) = self.on_rule_editor.borrow().as_ref() {
-			f(view.as_ref());
+		if let Some(preferences) = self.preferences.borrow().as_ref() {
+			preferences.model().rules.emit(rule_editor::Input::Editor(view.map(Box::new)));
 		}
-		*self.rule_editor_view.borrow_mut() = view;
+	}
+
+	/// Preferences has closed: unless another has opened since, there is none.
+	pub fn forget_preferences(&self, dialog: &adw::PreferencesDialog) {
+		let mut open = self.preferences.borrow_mut();
+		if open.as_ref().is_some_and(|p| p.widget() == dialog) {
+			open.take();
+		}
 	}
 
 	/// A message from the core, wherever the person is looking.
@@ -125,7 +113,7 @@ impl Ctx {
 	}
 
 	fn open_preferences(&self) -> Option<adw::PreferencesDialog> {
-		self.preferences.borrow().as_ref().and_then(|d| d.upgrade()).filter(|d| d.is_mapped())
+		self.preferences.borrow().as_ref().map(|p| p.widget().clone()).filter(|d| d.is_mapped())
 	}
 
 	/// Clean Up opens when the core offers it, and goes when the core has finished with it.
@@ -178,10 +166,10 @@ impl Ctx {
 	}
 
 	fn show_settings(&self, view: SettingsView) {
-		if let Some(f) = self.on_settings.borrow().as_ref() {
-			f(&view);
+		*self.settings_view.borrow_mut() = Some(view.clone());
+		if let Some(preferences) = self.preferences.borrow().as_ref() {
+			preferences.emit(view);
 		}
-		*self.settings_view.borrow_mut() = Some(view);
 	}
 
 	pub fn layout(&self) -> Layout {
@@ -298,11 +286,7 @@ impl Window {
 			cleanup: Rc::default(),
 			said: Rc::default(),
 			settings_view: Rc::default(),
-			on_settings: Rc::default(),
-			on_rules: Rc::default(),
-			on_rule_editor: Rc::default(),
 			rules_view: Rc::default(),
-			rule_editor_view: Rc::default(),
 			handed_over: Rc::default(),
 			label_picker: Rc::default(),
 			layout: Rc::new(Cell::new(layout)),
@@ -523,97 +507,11 @@ fn start_engine() -> (Arc<Engine>, UnboundedReceiver<Incoming>) {
 }
 
 /// Preferences, with its Rules section.
-pub fn preferences_dialog(ctx: &Ctx) -> (adw::PreferencesDialog, Rc<rule_editor::Rules>) {
-	// Tall enough for a rule's page without scrolling.
-	let dialog = adw::PreferencesDialog::builder().content_height(680).build();
-	let page = adw::PreferencesPage::new();
-	let (search, meaning) = search_group(ctx);
-	let rules = rule_editor::Rules::new(ctx, &dialog);
-	let group = adw::PreferencesGroup::builder()
-		.title("Offline Mail")
-		.description("Tern keeps recent mail on this computer, encrypted, so it shows at once and can be read offline. It checks for new mail every few minutes.")
-		.build();
-	let view = ctx.settings_view().unwrap_or_else(|| panic!("the core publishes settings at once"));
-	group.add(&choice_row(ctx, "Keep Ready", None, &view.keep_ready, |value| Action::SetKeepReady { value }));
-	let forget = adw::SwitchRow::builder()
-		.title("Forget Mail on Sign Out")
-		.subtitle("Deletes the mail kept on this computer when you sign out. Signing in again downloads it afresh.")
-		.active(view.forget_on_sign_out)
-		.build();
-	forget.connect_active_notify({
-		let ctx = ctx.clone();
-		move |row| ctx.engine.send(Action::SetForget { on: row.is_active() })
-	});
-	group.add(&forget);
-	group.add(&choice_row(ctx, "Offer Cleanup Past", Some("The sidebar offers to clean up once mail here takes more than this."), &view.cleanup_limits, |value| Action::SetCleanupLimit { value }));
-	let storage = storage_row(ctx, &view.storage_line);
-	group.add(&storage);
-	// The download's progress, the switch going back off if it fails, and the size as it changes.
-	let (meaning, storage) = (meaning.downgrade(), storage.downgrade());
-	ctx.connect_settings(move |view| {
-		if let Some(row) = meaning.upgrade() {
-			row.set_subtitle(&view.semantic_line);
-			if row.is_active() != view.semantic {
-				row.set_active(view.semantic);
-			}
-		}
-		if let Some(row) = storage.upgrade() {
-			row.set_subtitle(&view.storage_line);
-		}
-	});
-	*ctx.preferences.borrow_mut() = Some(dialog.downgrade());
-	page.add(&group);
-	page.add(&search);
-	page.add(&default_app::group());
-	page.add(&rules.group);
-	dialog.add(&page);
-	// The dialog keeps its rules section alive while open.
-	let keep = RefCell::new(Some(rules.clone()));
-	let engine = ctx.engine.clone();
-	dialog.connect_closed(move |_| {
-		keep.borrow_mut().take();
-		engine.send(Action::CloseSettings);
-	});
+pub fn preferences_dialog(ctx: &Ctx) -> (adw::PreferencesDialog, Rc<Controller<Rules>>) {
+	let preferences = Preferences::builder().launch(ctx.clone()).detach();
+	let (dialog, rules) = (preferences.widget().clone(), preferences.model().rules.clone());
+	*ctx.preferences.borrow_mut() = Some(Rc::new(preferences));
 	(dialog, rules)
-}
-
-/// One of the choices the core offers.
-fn choice_row(ctx: &Ctx, title: &str, subtitle: Option<&str>, choices: &[ChoiceView], action: fn(String) -> Action) -> adw::ComboRow {
-	let names: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
-	let row = adw::ComboRow::builder().title(title).model(&gtk::StringList::new(&names)).build();
-	if let Some(subtitle) = subtitle {
-		row.set_subtitle(subtitle);
-	}
-	row.set_selected(choices.iter().position(|c| c.selected).unwrap_or(0) as u32);
-	let (ctx, values): (_, Vec<String>) = (ctx.clone(), choices.iter().map(|c| c.value.clone()).collect());
-	row.connect_selected_notify(move |row| {
-		if let Some(value) = values.get(row.selected() as usize) {
-			ctx.engine.send(action(value.clone()));
-		}
-	});
-	row
-}
-
-/// How much Tern takes on disk, with Clean Up always to hand whatever the size.
-fn storage_row(ctx: &Ctx, line: &str) -> adw::ActionRow {
-	let button = gtk::Button::builder().label("Clean Up…").valign(gtk::Align::Center).build();
-	let signed_in = ctx.settings_view().is_some_and(|v| !v.address.is_empty());
-	let row = adw::ActionRow::builder().title("Storage").subtitle(line).visible(signed_in).build();
-	row.add_suffix(&button);
-	let engine = ctx.engine.clone();
-	button.connect_clicked(move |_| engine.send(Action::OpenCleanup));
-	row
-}
-
-/// Search by meaning is off until asked for, as it downloads a model once.
-fn search_group(ctx: &Ctx) -> (adw::PreferencesGroup, adw::SwitchRow) {
-	let group = adw::PreferencesGroup::builder().title("Search").description("Search looks through the mail kept on this computer.").build();
-	let view = ctx.settings_view().unwrap_or_else(|| panic!("the core publishes settings at once"));
-	let row = adw::SwitchRow::builder().title("Search by Meaning").subtitle(view.semantic_line).active(view.semantic).build();
-	let engine = ctx.engine.clone();
-	row.connect_active_notify(move |row| engine.send(Action::SetSemantic { on: row.is_active() }));
-	group.add(&row);
-	(group, row)
 }
 
 fn about_dialog() -> adw::AboutDialog {

@@ -52,6 +52,14 @@ async fn wait_for(ready: impl Fn() -> bool) {
 	eprintln!("tern: screenshot scene did not get ready");
 }
 
+/// Opens rule `index`, or a new one, on a page of its own, as a click does.
+async fn editing(section: &Rc<Controller<crate::rule_editor::Rules>>, index: Option<u32>) -> Rc<crate::rule_editor::Page> {
+	let before = section.model().opened();
+	section.emit(crate::rule_editor::Input::Edit(index));
+	wait_for(|| section.model().opened() != before).await;
+	section.model().page().expect("a rule's page")
+}
+
 /// Types `email` and presses Sign In.
 fn sign_in_as(win: &Rc<Window>, email: &str) {
 	let field = win.login.widgets().email.clone();
@@ -905,7 +913,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			wait_for(|| mailbox.store.n_items() > 0).await;
 			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
 			dialog.present(Some(&win.ctx.window));
-			let edit = section.edit(Some(0));
+			let edit = editing(&section, Some(0)).await;
 			// A squeezed line stays squeezed, so waiting for the layout still catches it.
 			wait_for(|| edit.line_height() >= 36 && edit.preview().1 == 4).await;
 			if edit.line_height() < 36 {
@@ -925,7 +933,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
 			dialog.present(Some(&win.ctx.window));
 			// What a line catches shows as typed: nothing, one mail, or the newest few and a count.
-			let edit = section.edit(None);
+			let edit = editing(&section, None).await;
 			wait_for(|| edit.is_ready()).await;
 			edit.put(tern_app::view::RulePiece::From);
 			wait_for(|| edit.line() == "from:").await;
@@ -954,7 +962,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			gtk::prelude::WidgetExt::activate_action(&win.ctx.window, "win.search", None).map_err(|e| e.to_string())?;
 			let (dialog, section) = crate::window::preferences_dialog(&win.ctx);
 			dialog.present(Some(&win.ctx.window));
-			let edit = section.edit(None);
+			let edit = editing(&section, None).await;
 			wait_for(|| edit.is_ready()).await;
 			edit.set_line("subject:invoice or from:@example.org");
 			edit.set_does(2);
@@ -970,7 +978,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if !saved(std::slice::from_ref(&labelled)) {
 				return Err(format!("saved {:?}", rules::load(crate::paths())));
 			}
-			let edit = section.edit(Some(0));
+			let edit = editing(&section, Some(0)).await;
 			wait_for(|| edit.is_ready() && edit.label.model().is_some_and(|m| m.n_items() == 3)).await;
 			if edit.does() != 2 || edit.label.selected() != 0 || edit.line() != labelled.when {
 				return Err(format!("the rule did not open as saved: {} {} {:?}", edit.does(), edit.label.selected(), edit.line()));
@@ -990,7 +998,7 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if !saved(std::slice::from_ref(&moved)) {
 				return Err(format!("changed to {:?}", rules::load(crate::paths())));
 			}
-			let edit = section.edit(None);
+			let edit = editing(&section, None).await;
 			wait_for(|| edit.is_ready()).await;
 			edit.set_line("from:news@example.org");
 			edit.set_does(2);
@@ -1010,13 +1018,13 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 				return Err(format!("a new label left {:?} with labels {labels:?}", rules::load(crate::paths())));
 			}
 			// A third rule, then the first deleted; the shot shows what is left.
-			let edit = section.edit(None);
+			let edit = editing(&section, None).await;
 			wait_for(|| edit.is_ready()).await;
 			edit.set_line("from:@deals.example");
 			wait_for(|| edit.save.is_sensitive()).await;
 			edit.save.emit_clicked();
 			wait_for(|| rules::load(crate::paths()).len() == 3).await;
-			let edit = section.edit(Some(0));
+			let edit = editing(&section, Some(0)).await;
 			wait_for(|| edit.is_ready()).await;
 			edit.delete();
 			let left = [made, Rule { when: "from:@deals.example".into(), action: Action::Spam }];
@@ -1024,7 +1032,8 @@ async fn check(win: &Rc<Window>, scene: &str) -> std::result::Result<(), String>
 			if !saved(&left) {
 				return Err(format!("after deleting, {:?}", rules::load(crate::paths())));
 			}
-			section.expander.set_expanded(true);
+			let expander = section.widgets().expander.clone();
+			expander.set_expanded(true);
 			Ok(())
 		}
 		_ => Ok(()),
