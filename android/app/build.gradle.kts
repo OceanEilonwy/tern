@@ -26,7 +26,7 @@ android {
         targetSdk = 37
         // A release build is given these by CI (.github/workflows/release.yml).
         versionCode = (project.findProperty("ternVersionCode") as String?)?.toInt() ?: 1
-        versionName = (project.findProperty("ternVersion") as String?) ?: "0.1.0"
+        versionName = (project.findProperty("ternVersion") as String?) ?: "0.1.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
