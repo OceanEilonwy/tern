@@ -76,10 +76,13 @@ Tern as the mail app in your system's Default Applications settings instead.
 ### Android
 
 Tern runs on Android 17 and newer, with the same Rust core drawn with Material 3 on true black. It has no
-store listing yet. [The latest build](https://github.com/OceanEilonwy/tern/releases/tag/latest-main) has an
-APK for each kind of phone (`arm64-v8a` for almost all of them), but these are unsigned, and Android will
-not install them until they are signed. For now, [build it from source](android/README.md) or sign the APK
-with your own key.
+store listing yet. [Releases](https://github.com/OceanEilonwy/tern/releases/latest) have a signed APK for each
+kind of phone (`arm64-v8a` for almost all of them), and updates install over each other.
+
+To get updates automatically, add `https://github.com/OceanEilonwy/tern` to
+[Obtainium](https://github.com/ImranR98/Obtainium). If it asks which APK to use, pick `arm64-v8a`.
+
+You can also [build it from source](android/README.md).
 
 ## Build from source
 
