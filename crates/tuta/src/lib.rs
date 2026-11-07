@@ -505,7 +505,10 @@ impl Backend for TutaBackend {
 	}
 
 	async fn labels(&self) -> Result<Vec<Label>> {
-		let mut labels: Vec<Label> = self.mail_sets().await?.iter().filter_map(label).collect();
+		// Folders and labels are one list on the server, so the fetch for the folders has them.
+		let known = self.sets.lock().unwrap().clone();
+		let sets = if known.is_empty() { self.mail_sets().await? } else { known };
+		let mut labels: Vec<Label> = sets.iter().filter_map(label).collect();
 		labels.sort_by_key(|l| l.name.to_lowercase());
 		Ok(labels)
 	}

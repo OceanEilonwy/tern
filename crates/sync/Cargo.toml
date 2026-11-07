@@ -11,6 +11,7 @@ tern-mail = { workspace = true }
 tern-rules = { workspace = true }
 tern-cache = { workspace = true }
 log = { workspace = true }
+futures = "0.3.31"
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros"] }
 
 [dev-dependencies]

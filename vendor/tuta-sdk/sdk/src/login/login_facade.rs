@@ -99,10 +99,14 @@ impl LoginFacade {
 			}
 		})?;
 		// Cannot use typed client because session is encrypted, and we haven't init crypto client yet
-		let session: ParsedEntity = self
-			.entity_client
-			.load(&Session::type_ref(), &session_id)
-			.await?;
+		// The two do not depend on each other, and each is a round trip to the server.
+		let session_type = Session::type_ref();
+		let (session, user) = tokio::join!(
+			self.entity_client.load(&session_type, &session_id),
+			self.typed_entity_client.load::<User, _>(&credentials.user_id),
+		);
+		let session: ParsedEntity = session?;
+		let user = user?;
 
 		let access_key = self.get_access_key(&session)?;
 		let passphrase_key = access_key
@@ -110,8 +114,6 @@ impl LoginFacade {
 			.map_err(|e| LoginError::InvalidPassphrase {
 				error_message: format!("Failed to decrypt key: {e}"),
 			})?;
-
-		let user: User = self.typed_entity_client.load(&credentials.user_id).await?;
 
 		let user_facade = self.init_session(user, passphrase_key)?;
 

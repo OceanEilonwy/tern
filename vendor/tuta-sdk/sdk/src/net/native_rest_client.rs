@@ -20,11 +20,16 @@ impl NativeRestClient {
 	pub fn try_new() -> Result<Self, std::io::Error> {
 		let _ = rustls::crypto::ring::default_provider().install_default();
 
+		// Without TCP_NODELAY a request sent while another is unanswered waits for that one's
+		// acknowledgement: a whole round trip each, with HTTP/2 sharing one connection.
+		let mut http = HttpConnector::new();
+		http.enforce_http(false);
+		http.set_nodelay(true);
 		let https_conn = hyper_rustls::HttpsConnectorBuilder::new()
 			.with_native_roots()?
 			.https_or_http()
 			.enable_all_versions()
-			.build();
+			.wrap_connector(http);
 
 		let client = Client::builder(TokioExecutor::new()).build(https_conn);
 
