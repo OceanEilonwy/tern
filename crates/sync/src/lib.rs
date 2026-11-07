@@ -69,23 +69,42 @@ pub async fn folders(backend: &dyn Backend, cache: &Cache) -> Result<Vec<Folder>
 /// Brings the newest mails of `folder` up to date: pages from the newest down until a page brings
 /// nothing new (after the first sync) or `keep` mails were fetched. Returns whether anything changed.
 pub async fn folder(backend: &dyn Backend, cache: &Cache, folder: &FolderId, keep: usize) -> Result<bool> {
+	folder_by_page(backend, cache, folder, keep, PAGE, &|| {}).await
+}
+
+/// [`folder`], calling `on_change` after each page that changed something, so that new mail shows
+/// when it arrives and not after the last page of a first sync. The first page holds `first_page`
+/// mails: fewer than a full page reach the screen sooner, and the next page makes up the rest.
+pub async fn folder_by_page(
+	backend: &dyn Backend,
+	cache: &Cache,
+	folder: &FolderId,
+	keep: usize,
+	first_page: usize,
+	on_change: &(dyn Fn() + Send + Sync),
+) -> Result<bool> {
 	let mut state = cache.folder_state(folder).map_err(cache_error)?;
 	let synced_before = state.synced_ms > 0;
 	let stored = cache.count(folder).map_err(cache_error)?;
 	let (mut next, mut fetched, mut changed, mut first) = (None, 0, false, true);
 	loop {
-		let page = backend.list(folder, next.clone(), PAGE).await?;
+		let count = if first { first_page } else if fetched < PAGE { PAGE - fetched } else { PAGE };
+		let page = backend.list(folder, next.clone(), count).await?;
 		let last = page.next.is_none();
 		let changes = cache.merge_page(folder, &page.mails, first, last).map_err(cache_error)?;
 		remember_cursor(cache, &page)?;
 		fetched += page.mails.len();
 		changed |= changes > 0;
+		if changes > 0 {
+			on_change();
+		}
 		// The deepest point reached so far is where "load more" continues.
 		if fetched >= stored || state.next.is_none() {
 			state.next = page.next.clone();
 			state.complete = last;
 		}
-		if last || fetched >= keep || (synced_before && changes == 0) {
+		// A short first page says nothing of the mails a full one would have checked.
+		if last || fetched >= keep || (synced_before && changes == 0 && fetched >= PAGE) {
 			break;
 		}
 		next = page.next;
@@ -139,6 +158,20 @@ pub async fn older(backend: &dyn Backend, cache: &Cache, folder: &FolderId) -> R
 pub async fn contacts(backend: &dyn Backend, cache: &Cache) -> Result<()> {
 	let contacts = backend.contacts().await?;
 	cache.note_addresses(&contacts, tern_cache::Met::Contact).map_err(cache_error)
+}
+
+/// How long contacts fetched count as fresh. They only feed suggestions, and can be large.
+const CONTACTS_FRESH_MS: i64 = 24 * 60 * 60 * 1000;
+const CONTACTS_MARK: &str = "contacts";
+
+/// [`contacts`], unless they were fetched within the last day.
+pub async fn contacts_if_stale(backend: &dyn Backend, cache: &Cache) -> Result<()> {
+	let fetched = cache.mark(CONTACTS_MARK).map_err(cache_error)?;
+	if fetched.is_some_and(|ms| now_ms() - ms < CONTACTS_FRESH_MS) {
+		return Ok(());
+	}
+	contacts(backend, cache).await?;
+	cache.set_mark(CONTACTS_MARK, now_ms()).map_err(cache_error)
 }
 
 #[cfg(test)]
@@ -223,6 +256,42 @@ mod tests {
 		folder(&demo, &cache, &sent, PAGE).await.unwrap();
 		assert!(!older(&demo, &cache, &sent).await.unwrap(), "the third page was the last");
 		assert_eq!(cache.count(&sent).unwrap(), 131);
+	}
+
+	#[tokio::test]
+	async fn each_page_of_a_first_sync_is_told_as_it_lands() {
+		let (demo, _, sent) = many_sent(130).await;
+		let cache = Cache::in_memory();
+		folders(&demo, &cache).await.unwrap();
+		let shown = std::sync::Mutex::new(Vec::new());
+		folder_by_page(&demo, &cache, &sent, 500, PAGE, &|| shown.lock().unwrap().push(cache.count(&sent).unwrap())).await.unwrap();
+		assert_eq!(*shown.lock().unwrap(), vec![50, 100, 131]);
+	}
+
+	#[tokio::test]
+	async fn a_short_first_page_still_checks_a_full_page() {
+		let (demo, _, sent) = many_sent(130).await;
+		let cache = Cache::in_memory();
+		folders(&demo, &cache).await.unwrap();
+		folder(&demo, &cache, &sent, PAGE).await.unwrap();
+		// Read elsewhere, past the short page but within a full one.
+		let far = cache.list(&sent, 30, 1).unwrap().remove(0);
+		demo.set_unread(&far.id, !far.unread).await.unwrap();
+		assert!(folder_by_page(&demo, &cache, &sent, PAGE, 20, &|| {}).await.unwrap(), "a change on the second page was found");
+		assert_eq!(cache.list(&sent, 30, 1).unwrap().remove(0).unread, !far.unread);
+		assert!(!folder_by_page(&demo, &cache, &sent, PAGE, 20, &|| {}).await.unwrap(), "and nothing the next time");
+	}
+
+	#[tokio::test]
+	async fn contacts_are_fetched_once_a_day() {
+		let (demo, cache) = (DemoBackend::new(), Cache::in_memory());
+		contacts_if_stale(&demo, &cache).await.unwrap();
+		let fetched = cache.mark(CONTACTS_MARK).unwrap().unwrap();
+		contacts_if_stale(&demo, &cache).await.unwrap();
+		assert_eq!(cache.mark(CONTACTS_MARK).unwrap(), Some(fetched), "fresh: not fetched again");
+		cache.set_mark(CONTACTS_MARK, fetched - CONTACTS_FRESH_MS).unwrap();
+		contacts_if_stale(&demo, &cache).await.unwrap();
+		assert!(cache.mark(CONTACTS_MARK).unwrap().unwrap() >= fetched, "a day on: fetched again");
 	}
 
 	#[tokio::test]

@@ -1258,7 +1258,8 @@ impl App {
 			None => {
 				let inbox = self.folders.iter().find(|f| f.kind == FolderKind::Inbox).or_else(|| self.folders.first()).cloned();
 				if let Some(folder) = inbox {
-					self.open_folder(folder);
+					// The sync round that brought the list, or starts next, syncs it too.
+					self.show_folder(folder);
 				}
 			},
 		}
@@ -1268,8 +1269,14 @@ impl App {
 	}
 
 	fn open_folder(&mut self, folder: Folder) {
-		let same = self.current.lock().unwrap_or_else(|p| p.into_inner()).as_ref().is_some_and(|c| c.id == folder.id);
 		let id = folder.id.clone();
+		self.show_folder(folder);
+		self.sync_folder(&id, false);
+	}
+
+	/// Shows what the cache has of `folder`.
+	fn show_folder(&mut self, folder: Folder) {
+		let same = self.current.lock().unwrap_or_else(|p| p.into_inner()).as_ref().is_some_and(|c| c.id == folder.id);
 		*self.current.lock().unwrap_or_else(|p| p.into_inner()) = Some(folder);
 		if !same {
 			self.shown = ROWS;
@@ -1278,7 +1285,6 @@ impl App {
 			self.selection.clear();
 		}
 		self.reload_list();
-		self.sync_folder(&id, false);
 	}
 
 	/// Mail in `folder` changed, or anywhere when None: shows what is there now.

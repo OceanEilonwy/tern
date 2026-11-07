@@ -3640,6 +3640,7 @@ name = "tern-sync"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "log 0.4.27",
  "tern-cache",
  "tern-demo",

@@ -1,7 +1,10 @@
-//! One round of keeping the cache up to date, the same on every platform: the folder list, each
-//! folder's newest mail, the rules on new mail in the Inbox, contacts, then the newest mails opened
-//! ahead. Each folder is trimmed back to what is kept after its sync, except the one on screen,
-//! whose older mail may be scrolled to, and Drafts.
+//! One round of keeping the cache up to date, the same on every platform, what a person is looking
+//! at first: the Inbox, its newest mails before the rest of its page; the folder list; the other
+//! folders a few at a time; the rules on new mail in the Inbox; the newest mails opened ahead; and
+//! contacts, at most daily. Each folder is trimmed back to what is kept after its sync, except the
+//! one on screen, whose older mail may be scrolled to, and Drafts.
+//!
+//! Nearly all of a round's time is waiting on the server, a round trip for each request.
 //!
 //! What it finds out goes to the caller as it happens, as [`Event`]s, for whatever is on screen. When
 //! rounds run is the caller's to say.
@@ -9,6 +12,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use tern_cache::Cache;
 use tern_mail::{Backend, Error, Folder, FolderId, FolderKind, Label, Result};
 use tern_rules::Rule;
@@ -65,21 +69,58 @@ pub struct Finished {
 	pub result: Result<()>,
 }
 
+/// Folders listed at once, the same as the fetcher's limit on requests.
+const FOLDERS_AT_ONCE: usize = 3;
+
+/// Mails in the first page of what is on screen: about a window's worth. On a new connection a full
+/// page takes three round trips as TCP ramps up, this one two.
+const FIRST_ON_SCREEN: usize = 20;
+
 /// An error that says more folders would fail the same way, or that asking again makes things worse.
 fn stops_the_round(e: &Error) -> bool {
 	matches!(e, Error::Offline | Error::SessionExpired | Error::RateLimited(_))
 }
 
+/// Syncs one folder and trims it, telling what changed as it goes.
+async fn sync_folder(job: &Job, folder: &Folder, on: &(dyn Fn(Event) + Send + Sync)) -> Result<()> {
+	let (backend, cache) = (job.backend.as_ref(), job.cache.as_ref());
+	let seen_first = folder.kind == FolderKind::Inbox || (job.on_screen)().as_ref() == Some(&folder.id);
+	let first_page = if seen_first { FIRST_ON_SCREEN } else { tern_cache::PAGE };
+	crate::folder_by_page(backend, cache, &folder.id, job.level.headers(), first_page, &|| on(Event::FolderChanged(folder.id.clone()))).await?;
+	if folder.kind != FolderKind::Drafts && (job.on_screen)().as_ref() != Some(&folder.id) {
+		match cache.trim(&folder.id, job.level.headers()) {
+			Ok(0) => {},
+			Ok(_) => on(Event::FolderChanged(folder.id.clone())),
+			Err(e) => log::warn!("could not trim {}: {e}", folder.name),
+		}
+	}
+	Ok(())
+}
+
+/// [`sync_folder`], saying which folder it was.
+async fn sync_told<'a>(job: &Job, folder: &'a Folder, on: &(dyn Fn(Event) + Send + Sync)) -> (&'a Folder, Result<()>) {
+	(folder, sync_folder(job, folder, on).await)
+}
+
 pub async fn round(job: &Job, on: &(dyn Fn(Event) + Send + Sync)) -> Finished {
 	let (backend, cache) = (job.backend.as_ref(), job.cache.as_ref());
-	let mut folders = match crate::folders(backend, cache).await {
+	// A cached Inbox need not wait for the folder list, which is three requests away and on screen already.
+	let cached_inbox = cache.folders().ok().and_then(|folders| folders.into_iter().find(|f| f.kind == FolderKind::Inbox));
+	let early = match &cached_inbox {
+		Some(inbox) => Some(sync_folder(job, inbox, on).await),
+		None => None,
+	};
+	let listed = crate::folders(backend, cache).await;
+	if let Ok(folders) = &listed {
+		on(Event::Folders(folders.clone()));
+	}
+	let mut folders = match listed {
 		Ok(folders) => folders,
 		Err(e) => {
 			on(Event::NoFolders(e.clone()));
 			return Finished { listed: false, result: Err(e) };
 		},
 	};
-	on(Event::Folders(folders.clone()));
 	if job.labels {
 		match backend.labels().await {
 			Ok(labels) => on(Event::Labels(labels)),
@@ -87,31 +128,42 @@ pub async fn round(job: &Job, on: &(dyn Fn(Event) + Send + Sync)) -> Finished {
 		}
 	}
 	let mut result = Ok(());
-	// The inbox first, then the others in their order.
+	let mut stopped = |folder: &Folder, outcome: Result<()>| match outcome {
+		Ok(()) => false,
+		Err(e) if stops_the_round(&e) => {
+			log::warn!("sync stopped: {e}");
+			on(Event::Problem(e.clone()));
+			result = Err(e);
+			true
+		},
+		Err(e) => {
+			log::warn!("could not sync {}: {e}", folder.name);
+			false
+		},
+	};
+	let mut stop = false;
+	if let (Some(inbox), Some(outcome)) = (&cached_inbox, early) {
+		stop = stopped(inbox, outcome);
+		folders.retain(|f| f.id != inbox.id);
+	}
+	// The inbox first, if it has not been done, then the others in their order.
 	folders.sort_by_key(|f| f.kind != FolderKind::Inbox);
-	for folder in folders {
-		match crate::folder(backend, cache, &folder.id, job.level.headers()).await {
-			Ok(changed) => {
-				let trim = folder.kind != FolderKind::Drafts && (job.on_screen)().as_ref() != Some(&folder.id);
-				let trimmed = if trim {
-					cache.trim(&folder.id, job.level.headers()).unwrap_or_else(|e| {
-						log::warn!("could not trim {}: {e}", folder.name);
-						0
-					})
-				} else {
-					0
-				};
-				if changed || trimmed > 0 {
-					on(Event::FolderChanged(folder.id));
-				}
-			},
-			Err(e) if stops_the_round(&e) => {
-				log::warn!("sync stopped: {e}");
-				on(Event::Problem(e.clone()));
-				result = Err(e);
+	let mut rest = folders.as_slice();
+	if !stop && rest.first().is_some_and(|f| f.kind == FolderKind::Inbox) {
+		stop = stopped(&rest[0], sync_folder(job, &rest[0], on).await);
+		rest = &rest[1..];
+	}
+	if !stop {
+		let (mut waiting, mut syncing) = (rest.iter(), FuturesUnordered::new());
+		loop {
+			while syncing.len() < FOLDERS_AT_ONCE {
+				let Some(folder) = waiting.next() else { break };
+				syncing.push(sync_told(job, folder, on));
+			}
+			let Some((folder, outcome)) = syncing.next().await else { break };
+			if stopped(folder, outcome) {
 				break;
-			},
-			Err(e) => log::warn!("could not sync {}: {e}", folder.name),
+			}
 		}
 	}
 	// New mail in the Inbox through the rules, before it is opened ahead.
@@ -120,12 +172,13 @@ pub async fn round(job: &Job, on: &(dyn Fn(Event) + Send + Sync)) -> Finished {
 		Ok(_) => on(Event::RulesMoved),
 		Err(e) => log::warn!("could not run the rules: {e}"),
 	}
-	if !job.contacts_done.load(Ordering::Relaxed) && crate::contacts(backend, cache).await.is_ok() {
-		job.contacts_done.store(true, Ordering::Relaxed);
-	}
 	if let Err(e) = job.fetcher.ahead(job.level.bodies()).await {
 		log::warn!("could not open mail ahead: {e}");
 		on(Event::Problem(e));
+	}
+	// Last, as nothing on screen depends on them, and they can take seconds.
+	if !job.contacts_done.load(Ordering::Relaxed) && crate::contacts_if_stale(backend, cache).await.is_ok() {
+		job.contacts_done.store(true, Ordering::Relaxed);
 	}
 	Finished { listed: true, result }
 }
@@ -254,6 +307,20 @@ mod tests {
 		let (finished, events) = run(&job).await;
 		assert_eq!(finished.result, Ok(()));
 		assert!(!events.iter().any(|e| matches!(e, Event::FolderChanged(_))), "nothing new: {events:?}");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_later_round_syncs_the_cached_inbox_once() {
+		let backend = Arc::new(Troubled::new());
+		let job = job(backend.clone(), Vec::new());
+		run(&job).await;
+		backend.listed.lock().unwrap().clear();
+		let (finished, _) = run(&job).await;
+		assert_eq!(finished.result, Ok(()));
+		let inbox = job.cache.folders().unwrap().into_iter().find(|f| f.kind == FolderKind::Inbox).unwrap();
+		let listed = backend.listed.lock().unwrap();
+		assert_eq!(listed.iter().filter(|f| **f == inbox.id).count(), 1);
+		assert_eq!(listed.iter().collect::<HashSet<_>>().len(), job.cache.folders().unwrap().len(), "every folder was synced");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

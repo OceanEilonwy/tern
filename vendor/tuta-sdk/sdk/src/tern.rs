@@ -40,7 +40,7 @@ use crate::entities::generated::sys::{
 use crate::entities::generated::tutanota::{
 	AttachmentKeyData, Contact, ContactList, ConversationEntry, DraftAttachment, DraftCreateData,
 	DraftCreateReturn, DraftData, DraftRecipient, DraftUpdateData, DraftUpdateReturn,
-	EncryptedMailAddress, InternalRecipientKeyData, Mail, MailDetails, MailDetailsBlob,
+	EncryptedMailAddress, InternalRecipientKeyData, Mail, MailBox, MailDetails, MailDetailsBlob,
 	ManageLabelServiceLabelData, ManageLabelServicePostIn, ManageLabelServicePostOut,
 	MailDetailsDraft, MailSet, MailSetEntry, NewDraftAttachment, SendDraftData,
 	SendDraftParameters, SendDraftReturn, TutanotaFile,
@@ -395,6 +395,8 @@ pub struct TernMail {
 	key_pairs: Mutex<HashMap<(GeneratedId, u64), AsymmetricKeyPair>>,
 	/// Read tokens by archive, kept until they expire, as the TypeScript client keeps them.
 	read_tokens: Mutex<HashMap<GeneratedId, BlobServerAccessInfo>>,
+	/// The account's mailbox, which does not change: finding it costs two requests.
+	mailbox: Mutex<Option<MailBox>>,
 }
 
 impl LoggedInSdk {
@@ -409,6 +411,7 @@ impl LoggedInSdk {
 			randomizer: RandomizerFacade::from_core(rand_core::OsRng),
 			key_pairs: Mutex::default(),
 			read_tokens: Mutex::default(),
+			mailbox: Mutex::default(),
 		}
 	}
 }
@@ -429,11 +432,23 @@ impl TernMail {
 		// A personal mailbox keeps its addresses on the user's GroupInfo, as the SDK's
 		// `get_group_id_for_mail_address` reads them; the mail group's GroupInfo has no aliases.
 		// A shared mailbox (a group with no user) keeps them on its own.
-		let group: Option<crate::entities::generated::sys::Group> =
-			self.sdk.crypto_entity_client.load(&membership.group).await.ok();
-		let personal = group.is_some_and(|g| g.user.is_some() && g.user == user._id);
-		let info_id = if personal { &user.userGroup.groupInfo } else { &membership.groupInfo };
-		let group_info: Option<GroupInfo> = self.sdk.crypto_entity_client.load(info_id).await.ok();
+		// Almost every mailbox is personal, so its GroupInfo is asked for alongside the Group.
+		// Mail with a bucket key needs the user group's key pair to decrypt: loaded now, it does not
+		// hold up the first page. An older key version is still loaded when a mail asks for it.
+		let (group, personal_info, key_pair) = tokio::join!(
+			self.sdk.crypto_entity_client.load::<crate::entities::generated::sys::Group, _>(&membership.group),
+			self.sdk.crypto_entity_client.load::<GroupInfo, _>(&user.userGroup.groupInfo),
+			self.key_pair(&user.userGroup.group, user.userGroup.groupKeyVersion as u64),
+		);
+		if let Err(e) = key_pair {
+			log::warn!("could not load the key pair ahead: {e:?}");
+		}
+		let personal = group.ok().is_some_and(|g| g.user.is_some() && g.user == user._id);
+		let group_info: Option<GroupInfo> = if personal {
+			personal_info.ok()
+		} else {
+			self.sdk.crypto_entity_client.load(&membership.groupInfo).await.ok()
+		};
 		Ok(TernAccount {
 			mail_address: group_info
 				.as_ref()
@@ -447,7 +462,15 @@ impl TernMail {
 
 	pub async fn folders(&self) -> Result<Vec<MailSet>, TernError> {
 		let facade = self.sdk.mail_facade();
-		let mailbox = facade.load_user_mailbox().await?;
+		let known = self.mailbox.lock().unwrap_or_else(|p| p.into_inner()).clone();
+		let mailbox = match known {
+			Some(mailbox) => mailbox,
+			None => {
+				let mailbox = facade.load_user_mailbox().await?;
+				*self.mailbox.lock().unwrap_or_else(|p| p.into_inner()) = Some(mailbox.clone());
+				mailbox
+			},
+		};
 		let folders = facade.load_folders_for_mailbox(&mailbox).await?;
 		Ok(folders.into_folders())
 	}

@@ -653,3 +653,25 @@ Built to the "Cache cleanup" boards on the design canvas.
   sending an input.
 - **A late `sender.input` panics once a component has gone.** Anything that can outlive its component,
   such as a file being read or a style notification, uses `sender.input_sender().emit`, which does not.
+
+## Starting fast (2026-11-06)
+
+Profiled from Perth on the real account, on copies of the cache, with `TERN_LOG` timings. Decrypting a page
+and merging it cost about 1 ms: a start is nearly all waiting, 285 ms for each round trip to Tuta in Germany,
+and a new connection costs three of those before its first request. So the work is fewer and overlapping trips.
+
+- **`TCP_NODELAY`**: hyper leaves it off, so Nagle's algorithm held each request sent while another was
+  unanswered for a round trip. Concurrency over HTTP/2 was costing as much as doing without it.
+- **Nothing waits for what it does not need**: Session and User at once; Group and GroupInfo at once; other
+  folders three at a time, the fetcher's limit on requests.
+- **What is on screen goes first**: the Inbox before the folder list, its newest 20 mails before the other 30 of
+  its page, and contacts last and at most daily (590 KB here, for suggestions only). A contact added elsewhere
+  may take a day to be suggested.
+- **The user group's key pair loads with the account**, one trip that overlaps, rather than holding up the first
+  page of mail with a bucket key.
+- **Labels come from the folder fetch**, one list on the server, and the mailbox is kept for the session.
+- **A first sync shows each page as it lands**, not after the last of 500 mails, and the folder first shown is
+  no longer paged by a second sync alongside the round's.
+- **Left as is**: the first page of 50 mails is about 78 KB of mostly ciphertext, three round trips on a new
+  connection as TCP ramps up. Gzip would not help ciphertext much. Tuta's event bus could replace the
+  folder-by-folder check altogether; it is a bigger piece of work than this was.

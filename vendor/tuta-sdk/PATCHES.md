@@ -45,3 +45,7 @@ tag, never to master. GPL-3.0.
     `#[cfg(test)]`, like the deserializers that return it.
   - `crypto-primitives/Cargo.toml`: takes the workspace's lints, like `sdk` and `util`. Clippy is
     turned off for all three in the root `Cargo.toml`.
+- `sdk/src/net/native_rest_client.rs`: `TCP_NODELAY` on the connection. Without it, Nagle's algorithm holds a request
+  sent while another is unanswered until that one is acknowledged, a round trip each over HTTP/2's one connection.
+- `sdk/src/login/login_facade.rs`: `resume_session` loads the Session and User at once.
+- `sdk/src/tern.rs`: `account` asks for the personal GroupInfo and the user group's key pair alongside the Group; `folders` keeps the mailbox.
